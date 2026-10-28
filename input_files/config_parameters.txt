@@ -1,0 +1,66 @@
+# ==============================================================================
+# קובץ הגדרות ופרמטרים דינמיים - מערכת מיון הזמנות ותכנון מסלולים (דורמקו)
+# יש לשמור קובץ זה בתוך תיקיית input_files בשם: config_parameters.txt
+# (אם הקובץ לא קיים בתיקייה, הסקריפט ייצור אותו שם אוטומטית בהרצה הראשונה)
+# ==============================================================================
+
+# --- 1. נתיבי תיקיות ושמות קבצים ---
+BASE_DIR = C:\Users\itaik\OneDrive\מסמכים\dormeco-sorting-script
+INPUT_FILE_NAME = list.xlsx
+COOLING_FILE_NAME = Cooling_products.pdf
+HAZMAT_FILE_NAME = dangerous_products.xlsx
+
+# --- 2. זמני העמסה בכל מחסן בנפרד וזמן פריקה אצל לקוחות (בדקות) ---
+# זמן העמסה ראשונית במחסן הרגיל (מבוא הספנים 1 אשדוד) - ברירת מחדל: 60 דקות (שעה)
+MAIN_WAREHOUSE_LOAD_MINUTES = 60
+# זמן העמסה במחסן קירור (מבוא הספנים 6 אשדוד) - ברירת מחדל: 30 דקות
+COOLING_WAREHOUSE_LOAD_MINUTES = 30
+# זמן העמסה במחסן חומ"ס (פארק נמלי ישראל, אשדוד) - ברירת מחדל: 30 דקות
+HAZMAT_WAREHOUSE_LOAD_MINUTES = 30
+# זמן פריקת סחורה בכל עצירה אצל לקוח במסלול - ברירת מחדל: 30 דקות
+UNLOAD_MINUTES = 30
+# האם הנהג תמיד עוצר תחילה במחסן הראשי (מבוא הספנים 1) להעמסה ראשונית לפני קירור/חומ"ס
+ALWAYS_LOAD_AT_MAIN_WAREHOUSE = true
+
+# --- 3. מגבלות משאית ונהג (חריגה תגרום לפיצול אוטומטי ל-2 נהגים) ---
+# משקל מקסימלי שמשאית יכולה לשאת (בק"ג)
+MAX_TRUCK_WEIGHT_KG = 7500
+# זמן עבודה/נסיעה מקסימלי לנהג בשעות (מרגע היציאה מנתניה ב-05:30 ועד החזרה לנתניה)
+MAX_DRIVER_SHIFT_HOURS = 12.0
+
+# --- 4. שעת יציאה ומיקום בית הנהגים ---
+DRIVER_HOME_NAME = מרכז נתניה
+DRIVER_HOME_LAT = 32.3215
+DRIVER_HOME_LON = 34.8532
+DRIVER_DEPARTURE_TIME = 05:30
+
+# --- 5. כתובות וקואורדינטות של המחסנים באשדוד ---
+MAIN_WAREHOUSE_ADDRESS = מבוא הספנים 1 אשדוד
+MAIN_WAREHOUSE_LAT = 31.8315
+MAIN_WAREHOUSE_LON = 34.6465
+
+COOLING_WAREHOUSE_ADDRESS = מבוא הספנים 6 אשדוד
+COOLING_WAREHOUSE_LAT = 31.8322
+COOLING_WAREHOUSE_LON = 34.6482
+
+HAZMAT_WAREHOUSE_ADDRESS = פארק נמלי ישראל, אשדוד
+HAZMAT_WAREHOUSE_LAT = 31.8245
+HAZMAT_WAREHOUSE_LON = 34.6610
+
+# --- 6. פרמטרים לחישוב כבישים ואופטימיזציית מסלולים ---
+# מקדם התאמת מהירות משאית כבדה בכבישי ישראל ביחס לרכב פרטי (1.20 = תוספת 20% לזמן נסיעה)
+OSRM_TRUCK_SPEED_FACTOR = 1.20
+# האם לאפשר איחוד חכם של נהג "צפון מזרח + השרון" או "צפון מערב + השרון" בדרך חזרה לנתניה
+ENABLE_NORTH_SHARON_MERGE = true
+# האם להשתמש ב-API חיצוני לחישוב זמני נסיעה בכבישי ישראל ופענוח כתובות
+USE_EXTERNAL_ROUTING_API = true
+# האם לתת עדיפות לעיר שמופיעה בעמודת "שם האתר" על פני עמודת "יעד"
+PREFER_SITE_NAME_CITY = false
+# האם לפתוח אוטומטית את תיקיית התוצאות בסייר הקבצים של Windows בסיום הריצה
+AUTO_OPEN_OUTPUT_FOLDER = true
+# מפתח API אופציונלי של Google Maps (לפענוח כתובות וחישוב פקקים ב-Distance Matrix)
+GOOGLE_MAPS_API_KEY = 
+
+# --- 7. הוספת מק"טים ידנית לקירור או חומ"ס (אופציונלי, מופרדים בפסיק) ---
+EXTRA_COOLING_SKUS = 
+EXTRA_HAZMAT_SKUS =
