@@ -1,29 +1,7 @@
 #!/usr/bin/env python3
 """
-מערכת אוטומטית למיון הזמנות, העמסה ממחסנים (רגיל / קירור / חומ"ס) ותכנון מסלולי נהגים (Python 3.11/3.12/3.13+)
-=================================================================================================================
-תכונות המערכת:
-1. טעינה דינמית של כל הפרמטרים מקובץ הגדרות בתיקיית input_files (config_parameters.txt),
-   כולל זמני העמסה נפרדים לכל מחסן:
-   - מחסן רגיל (מבוא הספנים 1 אשדוד): 60 דקות כברירת מחדל (MAIN_WAREHOUSE_LOAD_MINUTES).
-   - מחסן קירור (מבוא הספנים 6 אשדוד): 30 דקות כברירת מחדל (COOLING_WAREHOUSE_LOAD_MINUTES).
-   - מחסן חומ"ס (פארק נמלי ישראל, אשדוד): 30 דקות כברירת מחדל (HAZMAT_WAREHOUSE_LOAD_MINUTES).
-   - פריקה אצל כל לקוח במסלול: 30 דקות כברירת מחדל (UNLOAD_MINUTES).
-2. זיהוי אוטומטי של מוצרי קירור מתוך ה-PDF בתיקיית input_files (Cooling_products.pdf)
-   וזיהוי מוצרי חומ"ס מתוך קובץ האקסל בתיקיית input_files (dangerous_products.xlsx) לפי מק"ט.
-3. חישוב זמני נסיעה אמיתיים בכבישי ישראל ב-3 שכבות:
-   - שכבה 1: Google Maps Distance Matrix API (אם הוזן GOOGLE_MAPS_API_KEY).
-   - שכבה 2: OSRM Real Israeli Road Network API (חינמי, מבוסס על מיפוי כבישי ישראל ב-OpenStreetMap).
-   - שכבה 3: מודל כבישי ישראל מכויל למשאיות (לעבודה ללא אינטרנט / גיבוי).
-4. הגבלת זמן משמרת נהג ל-12 שעות (מיציאה מנתניה ב-05:30 ועד חזרה לנתניה) ומשקל משאית ל-7,500 ק"ג:
-   חריגה באזור כלשהו מפצלת אותו אוטומטית ל-2 נהגים/משאיות (במקום סימון באדום).
-5. איחוד חכם של "צפון מזרח + אזור השרון" או "צפון מערב + אזור השרון" בדרך חזרה לנתניה (ללא שילוב שני הצפונים יחד).
-6. סידור עמודות בטבלה הסופית:
-   - עמודת "שעת הגעה ליעד" צמודה לעמודת ה"יעד".
-   - עמודת "יחידות" צמודה לעמודת ה"כמות", ורק אחריהן העמודה "הערה למוצר ללקוח".
-
-דרישות התקנה:
-    pip install openpyxl requests pandas pypdf
+מערכת אוטומטית למיון הזמנות, העמסה מ-4 מחסנים (אוברסיז / קירור / חומ"ס / גולד בונד) ותכנון מסלולי נהגים
+=========================================================================================================
 """
 
 from __future__ import annotations
@@ -44,13 +22,12 @@ import zipfile
 from typing import Any
 
 import openpyxl
-from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 import requests
 
 # ==============================================================================
-# 0. הגדרת נתיבי ברירת מחדל ופרמטרים דינמיים (ניתנים לעדכון ב-config_parameters.txt)
+# 0. הגדרת נתיבי ברירת מחדל ופרמטרים דינמיים
 # ==============================================================================
 BASE_DIR = r"C:\Users\itaik\OneDrive\מסמכים\dormeco-sorting-script"
 INPUT_FOLDER = BASE_DIR + r"\input_files"
@@ -60,18 +37,20 @@ CONFIG_FILE_NAME = "config_parameters.txt"
 INPUT_FILE_NAME = "list.xlsx"
 COOLING_FILE_NAME = "Cooling_products.pdf"
 HAZMAT_FILE_NAME = "dangerous_products.xlsx"
+GOLDBOND_FILE_NAME = "Gold_bond.xlsx"
 
 # זמני העמסה נפרדים לכל מחסן באשדוד וזמן פריקה אצל לקוח (בדקות)
-MAIN_WAREHOUSE_LOAD_MINUTES: float = 60.0     # שעה העמסה ראשונית במבוא הספנים 1
-COOLING_WAREHOUSE_LOAD_MINUTES: float = 30.0  # 30 דקות העמסה במחסן קירור (מבוא הספנים 6)
-HAZMAT_WAREHOUSE_LOAD_MINUTES: float = 30.0   # 30 דקות העמסה במחסן חומ"ס (פארק נמלי ישראל)
-UNLOAD_MINUTES: float = 30.0                  # 30 דקות פריקה בכל עצירה אצל לקוח
+MAIN_WAREHOUSE_LOAD_MINUTES: float = 60.0      # שעה העמסה ראשונית באוברסיז (מבוא הספנים 1)
+COOLING_WAREHOUSE_LOAD_MINUTES: float = 30.0   # 30 דקות העמסה במחסן קירור (מבוא הספנים 6)
+HAZMAT_WAREHOUSE_LOAD_MINUTES: float = 30.0    # 30 דקות העמסה במחסן חומ"ס (פארק נמלי ישראל)
+GOLDBOND_WAREHOUSE_LOAD_MINUTES: float = 30.0  # 30 דקות העמסה במחסן גולד בונד (הקידמה 1)
+UNLOAD_MINUTES: float = 30.0                   # 30 דקות פריקה בכל עצירה אצל לקוח
 ALWAYS_LOAD_AT_MAIN_WAREHOUSE: bool = True
 
 MAX_TRUCK_WEIGHT_KG: float = 7500.0
 MAX_DRIVER_SHIFT_HOURS: float = 12.0
 
-DRIVER_HOME_NAME: str = "מרכז נתניה"
+DRIVER_HOME_NAME: str = "בית"
 DRIVER_HOME_COORDS: tuple[float, float] = (32.3215, 34.8532)
 DRIVER_DEPARTURE_TIME_STR: str = "05:30"
 DRIVER_START_MINUTES: float = 5 * 60 + 30  # 05:30 = 330 דקות מחצות
@@ -84,6 +63,9 @@ COOLING_WAREHOUSE_COORDS: tuple[float, float] = (31.8322, 34.6482)
 
 HAZMAT_WAREHOUSE_ADDRESS: str = "פארק נמלי ישראל, אשדוד"
 HAZMAT_WAREHOUSE_COORDS: tuple[float, float] = (31.8245, 34.6610)
+
+GOLDBOND_WAREHOUSE_ADDRESS: str = "הקידמה 1 אשדוד"
+GOLDBOND_WAREHOUSE_COORDS: tuple[float, float] = (31.8210, 34.6595)
 
 OSRM_TRUCK_SPEED_FACTOR: float = 1.20
 ENABLE_NORTH_SHARON_MERGE: bool = True
@@ -129,16 +111,24 @@ DEFAULT_HAZMAT_SKUS: set[str] = {
     "VTRAAFG0030",
 }
 
+DEFAULT_GOLDBOND_SKUS: set[str] = {
+    "BANKBIOPR3025",
+    "BANKBIOPRO10L25",
+    "CCCIVC040",
+    "CCCPPP0000",
+    "INFSHEBUO25",
+}
+
 EXTRA_COOLING_SKUS: set[str] = set()
 EXTRA_HAZMAT_SKUS: set[str] = set()
+EXTRA_GOLDBOND_SKUS: set[str] = set()
 
 # ==============================================================================
 # 1. טעינה ויצירה אוטומטית של קובץ הפרמטרים הדינמיים ב-input_files
 # ==============================================================================
 DEFAULT_CONFIG_TEMPLATE = """# ==============================================================================
-# קובץ הגדרות ופרמטרים דינמיים - מערכת מיון הזמנות ותכנון מסלולים (דורמקו)
+# קובץ הגדרות ופרמטרים דינמיים - מערכת מיון הזמנות ורשימות ליקוט (דורמקו)
 # יש לשמור קובץ זה בתוך תיקיית input_files בשם: config_parameters.txt
-# ניתן לשנות כל ערך אחרי סימן השווה (=) ולשמור.
 # ==============================================================================
 
 # --- 1. נתיבי תיקיות ושמות קבצים ---
@@ -146,30 +136,27 @@ BASE_DIR = C:\\Users\\itaik\\OneDrive\\מסמכים\\dormeco-sorting-script
 INPUT_FILE_NAME = list.xlsx
 COOLING_FILE_NAME = Cooling_products.pdf
 HAZMAT_FILE_NAME = dangerous_products.xlsx
+GOLDBOND_FILE_NAME = Gold_bond.xlsx
 
 # --- 2. זמני העמסה בכל מחסן בנפרד וזמן פריקה אצל לקוחות (בדקות) ---
-# זמן העמסה ראשונית במחסן הרגיל (מבוא הספנים 1 אשדוד) - ברירת מחדל: 60 דקות (שעה)
 MAIN_WAREHOUSE_LOAD_MINUTES = 60
-# זמן העמסה במחסן קירור (מבוא הספנים 6 אשדוד) - ברירת מחדל: 30 דקות
 COOLING_WAREHOUSE_LOAD_MINUTES = 30
-# זמן העמסה במחסן חומ"ס (פארק נמלי ישראל, אשדוד) - ברירת מחדל: 30 דקות
 HAZMAT_WAREHOUSE_LOAD_MINUTES = 30
-# זמן פריקת סחורה בכל עצירה אצל לקוח במסלול - ברירת מחדל: 30 דקות
+GOLDBOND_WAREHOUSE_LOAD_MINUTES = 30
 UNLOAD_MINUTES = 30
-# האם הנהג תמיד עוצר תחילה במחסן הראשי (מבוא הספנים 1) להעמסה ראשונית לפני קירור/חומ"ס
 ALWAYS_LOAD_AT_MAIN_WAREHOUSE = true
 
 # --- 3. מגבלות משאית ונהג (חריגה תגרום לפיצול אוטומטי ל-2 נהגים) ---
 MAX_TRUCK_WEIGHT_KG = 7500
 MAX_DRIVER_SHIFT_HOURS = 12.0
 
-# --- 4. שעת יציאה ומיקום בית הנהגים ---
-DRIVER_HOME_NAME = מרכז נתניה
+# --- 4. שעת יציאה ומיקום הבית של הנהגים ---
+DRIVER_HOME_NAME = בית
 DRIVER_HOME_LAT = 32.3215
 DRIVER_HOME_LON = 34.8532
 DRIVER_DEPARTURE_TIME = 05:30
 
-# --- 5. כתובות וקואורדינטות של המחסנים באשדוד ---
+# --- 5. כתובות וקואורדינטות של 4 המחסנים באשדוד ---
 MAIN_WAREHOUSE_ADDRESS = מבוא הספנים 1 אשדוד
 MAIN_WAREHOUSE_LAT = 31.8315
 MAIN_WAREHOUSE_LON = 34.6465
@@ -182,6 +169,10 @@ HAZMAT_WAREHOUSE_ADDRESS = פארק נמלי ישראל, אשדוד
 HAZMAT_WAREHOUSE_LAT = 31.8245
 HAZMAT_WAREHOUSE_LON = 34.6610
 
+GOLDBOND_WAREHOUSE_ADDRESS = הקידמה 1 אשדוד
+GOLDBOND_WAREHOUSE_LAT = 31.8210
+GOLDBOND_WAREHOUSE_LON = 34.6595
+
 # --- 6. פרמטרים לחישוב כבישים ואופטימיזציית מסלולים ---
 OSRM_TRUCK_SPEED_FACTOR = 1.20
 ENABLE_NORTH_SHARON_MERGE = true
@@ -190,9 +181,10 @@ PREFER_SITE_NAME_CITY = false
 AUTO_OPEN_OUTPUT_FOLDER = true
 GOOGLE_MAPS_API_KEY = 
 
-# --- 7. הוספת מק"טים ידנית לקירור או חומ"ס (אופציונלי, מופרדים בפסיק) ---
+# --- 7. הוספת מק"טים ידנית לקירור, חומ"ס או גולד בונד (אופציונלי, מופרדים בפסיק) ---
 EXTRA_COOLING_SKUS = 
 EXTRA_HAZMAT_SKUS = 
+EXTRA_GOLDBOND_SKUS = 
 """
 
 
@@ -213,22 +205,20 @@ def parse_time_to_minutes(time_str: str, default_minutes: float = 330.0) -> floa
 
 
 def load_dynamic_config(custom_config_path: str | pathlib.Path | None = None) -> pathlib.Path | None:
-    """
-    טוענת את קובץ ההגדרות מתוך input_files\\config_parameters.txt.
-    אם הקובץ עדיין לא קיים בתיקיית input_files, יוצרת אותו אוטומטית כדי שיהיה מוכן לעריכה.
-    """
     global BASE_DIR, INPUT_FOLDER, OUTPUT_FOLDER
-    global INPUT_FILE_NAME, COOLING_FILE_NAME, HAZMAT_FILE_NAME
-    global MAIN_WAREHOUSE_LOAD_MINUTES, COOLING_WAREHOUSE_LOAD_MINUTES, HAZMAT_WAREHOUSE_LOAD_MINUTES
+    global INPUT_FILE_NAME, COOLING_FILE_NAME, HAZMAT_FILE_NAME, GOLDBOND_FILE_NAME
+    global MAIN_WAREHOUSE_LOAD_MINUTES, COOLING_WAREHOUSE_LOAD_MINUTES
+    global HAZMAT_WAREHOUSE_LOAD_MINUTES, GOLDBOND_WAREHOUSE_LOAD_MINUTES
     global UNLOAD_MINUTES, ALWAYS_LOAD_AT_MAIN_WAREHOUSE
     global MAX_TRUCK_WEIGHT_KG, MAX_DRIVER_SHIFT_HOURS
     global DRIVER_HOME_NAME, DRIVER_HOME_COORDS, DRIVER_DEPARTURE_TIME_STR, DRIVER_START_MINUTES
     global MAIN_WAREHOUSE_ADDRESS, MAIN_WAREHOUSE_COORDS
     global COOLING_WAREHOUSE_ADDRESS, COOLING_WAREHOUSE_COORDS
     global HAZMAT_WAREHOUSE_ADDRESS, HAZMAT_WAREHOUSE_COORDS
+    global GOLDBOND_WAREHOUSE_ADDRESS, GOLDBOND_WAREHOUSE_COORDS
     global OSRM_TRUCK_SPEED_FACTOR, ENABLE_NORTH_SHARON_MERGE
     global USE_EXTERNAL_ROUTING_API, PREFER_SITE_NAME_CITY, AUTO_OPEN_OUTPUT_FOLDER
-    global EXTRA_COOLING_SKUS, EXTRA_HAZMAT_SKUS
+    global EXTRA_COOLING_SKUS, EXTRA_HAZMAT_SKUS, EXTRA_GOLDBOND_SKUS
 
     candidates: list[pathlib.Path] = []
     if custom_config_path:
@@ -281,15 +271,8 @@ def load_dynamic_config(custom_config_path: str | pathlib.Path | None = None) ->
         COOLING_FILE_NAME = kv["COOLING_FILE_NAME"]
     if "HAZMAT_FILE_NAME" in kv and kv["HAZMAT_FILE_NAME"]:
         HAZMAT_FILE_NAME = kv["HAZMAT_FILE_NAME"]
-
-    # תמיכה גם בפרמטר הישן LOAD_MINUTES וגם ב-3 הפרמטרים הנפרדים לכל מחסן
-    if "LOAD_MINUTES" in kv and kv["LOAD_MINUTES"]:
-        try:
-            legacy_load = float(kv["LOAD_MINUTES"])
-            COOLING_WAREHOUSE_LOAD_MINUTES = legacy_load
-            HAZMAT_WAREHOUSE_LOAD_MINUTES = legacy_load
-        except ValueError:
-            pass
+    if "GOLDBOND_FILE_NAME" in kv and kv["GOLDBOND_FILE_NAME"]:
+        GOLDBOND_FILE_NAME = kv["GOLDBOND_FILE_NAME"]
 
     if "MAIN_WAREHOUSE_LOAD_MINUTES" in kv and kv["MAIN_WAREHOUSE_LOAD_MINUTES"]:
         try:
@@ -304,6 +287,11 @@ def load_dynamic_config(custom_config_path: str | pathlib.Path | None = None) ->
     if "HAZMAT_WAREHOUSE_LOAD_MINUTES" in kv and kv["HAZMAT_WAREHOUSE_LOAD_MINUTES"]:
         try:
             HAZMAT_WAREHOUSE_LOAD_MINUTES = float(kv["HAZMAT_WAREHOUSE_LOAD_MINUTES"])
+        except ValueError:
+            pass
+    if "GOLDBOND_WAREHOUSE_LOAD_MINUTES" in kv and kv["GOLDBOND_WAREHOUSE_LOAD_MINUTES"]:
+        try:
+            GOLDBOND_WAREHOUSE_LOAD_MINUTES = float(kv["GOLDBOND_WAREHOUSE_LOAD_MINUTES"])
         except ValueError:
             pass
     if "UNLOAD_MINUTES" in kv and kv["UNLOAD_MINUTES"]:
@@ -393,6 +381,21 @@ def load_dynamic_config(custom_config_path: str | pathlib.Path | None = None) ->
             pass
     HAZMAT_WAREHOUSE_COORDS = (h_lat, h_lon)
 
+    if "GOLDBOND_WAREHOUSE_ADDRESS" in kv and kv["GOLDBOND_WAREHOUSE_ADDRESS"]:
+        GOLDBOND_WAREHOUSE_ADDRESS = kv["GOLDBOND_WAREHOUSE_ADDRESS"]
+    g_lat, g_lon = GOLDBOND_WAREHOUSE_COORDS
+    if "GOLDBOND_WAREHOUSE_LAT" in kv and kv["GOLDBOND_WAREHOUSE_LAT"]:
+        try:
+            g_lat = float(kv["GOLDBOND_WAREHOUSE_LAT"])
+        except ValueError:
+            pass
+    if "GOLDBOND_WAREHOUSE_LON" in kv and kv["GOLDBOND_WAREHOUSE_LON"]:
+        try:
+            g_lon = float(kv["GOLDBOND_WAREHOUSE_LON"])
+        except ValueError:
+            pass
+    GOLDBOND_WAREHOUSE_COORDS = (g_lat, g_lon)
+
     if "OSRM_TRUCK_SPEED_FACTOR" in kv and kv["OSRM_TRUCK_SPEED_FACTOR"]:
         try:
             OSRM_TRUCK_SPEED_FACTOR = float(kv["OSRM_TRUCK_SPEED_FACTOR"])
@@ -429,12 +432,18 @@ def load_dynamic_config(custom_config_path: str | pathlib.Path | None = None) ->
             for s in kv["EXTRA_HAZMAT_SKUS"].split(",")
             if s.strip()
         }
+    if "EXTRA_GOLDBOND_SKUS" in kv and kv["EXTRA_GOLDBOND_SKUS"]:
+        EXTRA_GOLDBOND_SKUS = {
+            s.strip().upper()
+            for s in kv["EXTRA_GOLDBOND_SKUS"].split(",")
+            if s.strip()
+        }
 
     return cfg_path
 
 
 # ==============================================================================
-# 2. קריאה אוטומטית של קובץ מוצרי הקירור (PDF/Excel) וקובץ החומ"ס (Excel/CSV)
+# 2. קריאה אוטומטית של קבצי המחסנים (קירור, חומ"ס, גולד בונד)
 # ==============================================================================
 def clean_sku_token(val: Any) -> str:
     if val is None:
@@ -478,7 +487,7 @@ def extract_skus_from_excel_file(xlsx_path: pathlib.Path) -> set[str]:
         return skus
 
     header_keywords = {"פריט", 'מק"ט', "מק'ט", "מקט", "SKU", "ITEM", "PART", "קוד פריט"}
-    ignored_words = header_keywords | {"סה\"כ", "סהכ", "TOTAL", "GOODS", "מחסן", "איתור"}
+    ignored_words = header_keywords | {"סה\"כ", "סהכ", "TOTAL", "GOODS", "מחסן", "איתור", "שם המחסן"}
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
@@ -571,15 +580,20 @@ def extract_skus_from_pdf_file(pdf_path: pathlib.Path) -> set[str]:
     return skus
 
 
-def load_cooling_and_hazmat_catalogs(
+def load_warehouse_catalogs(
     input_folder: str | pathlib.Path,
-) -> tuple[set[str], set[str]]:
+) -> tuple[set[str], set[str], set[str]]:
     in_dir = pathlib.Path(input_folder)
-    cooling_skus: set[str] = set(DEFAULT_COOLING_SKUS) | set(EXTRA_COOLING_SKUS)
-    hazmat_skus: set[str] = set(DEFAULT_HAZMAT_SKUS) | set(EXTRA_HAZMAT_SKUS)
+    cooling_skus: set[str] = set(EXTRA_COOLING_SKUS)
+    hazmat_skus: set[str] = set(EXTRA_HAZMAT_SKUS)
+    goldbond_skus: set[str] = set(EXTRA_GOLDBOND_SKUS)
 
     if not in_dir.exists() or not in_dir.is_dir():
-        return cooling_skus, hazmat_skus
+        return (
+            cooling_skus | DEFAULT_COOLING_SKUS,
+            hazmat_skus | DEFAULT_HAZMAT_SKUS,
+            goldbond_skus | DEFAULT_GOLDBOND_SKUS,
+        )
 
     cooling_candidates: list[pathlib.Path] = []
     exact_cooling = in_dir / COOLING_FILE_NAME
@@ -591,12 +605,14 @@ def load_cooling_and_hazmat_catalogs(
             if "cooling" in name_low or "קירור" in name_low:
                 cooling_candidates.append(f)
 
+    loaded_cooling: set[str] = set()
     for c_file in cooling_candidates:
         suf = c_file.suffix.lower()
         if suf == ".pdf":
-            cooling_skus |= extract_skus_from_pdf_file(c_file)
+            loaded_cooling |= extract_skus_from_pdf_file(c_file)
         elif suf in (".xlsx", ".xlsm"):
-            cooling_skus |= extract_skus_from_excel_file(c_file)
+            loaded_cooling |= extract_skus_from_excel_file(c_file)
+    cooling_skus |= loaded_cooling if loaded_cooling else DEFAULT_COOLING_SKUS
 
     hazmat_candidates: list[pathlib.Path] = []
     exact_hazmat = in_dir / HAZMAT_FILE_NAME
@@ -613,14 +629,35 @@ def load_cooling_and_hazmat_catalogs(
             ):
                 hazmat_candidates.append(f)
 
+    loaded_hazmat: set[str] = set()
     for h_file in hazmat_candidates:
         suf = h_file.suffix.lower()
         if suf in (".xlsx", ".xlsm"):
-            hazmat_skus |= extract_skus_from_excel_file(h_file)
+            loaded_hazmat |= extract_skus_from_excel_file(h_file)
         elif suf == ".pdf":
-            hazmat_skus |= extract_skus_from_pdf_file(h_file)
+            loaded_hazmat |= extract_skus_from_pdf_file(h_file)
+    hazmat_skus |= loaded_hazmat if loaded_hazmat else DEFAULT_HAZMAT_SKUS
 
-    return cooling_skus, hazmat_skus
+    goldbond_candidates: list[pathlib.Path] = []
+    exact_goldbond = in_dir / GOLDBOND_FILE_NAME
+    if exact_goldbond.exists():
+        goldbond_candidates.append(exact_goldbond)
+    for f in in_dir.iterdir():
+        if f.is_file() and f not in goldbond_candidates:
+            name_low = f.name.lower()
+            if "gold" in name_low or "bond" in name_low or "גולד" in name_low:
+                goldbond_candidates.append(f)
+
+    loaded_goldbond: set[str] = set()
+    for g_file in goldbond_candidates:
+        suf = g_file.suffix.lower()
+        if suf in (".xlsx", ".xlsm"):
+            loaded_goldbond |= extract_skus_from_excel_file(g_file)
+        elif suf == ".pdf":
+            loaded_goldbond |= extract_skus_from_pdf_file(g_file)
+    goldbond_skus |= loaded_goldbond if loaded_goldbond else DEFAULT_GOLDBOND_SKUS
+
+    return cooling_skus, hazmat_skus, goldbond_skus
 
 
 # ==============================================================================
@@ -850,6 +887,7 @@ SPECIFIC_ADDRESS_COORDS: list[tuple[str, str, float, float]] = [
     ("אשדוד", "מבוא הספנים 1", 31.8315, 34.6465),
     ("אשדוד", "מבוא הספנים 6", 31.8322, 34.6482),
     ("אשדוד", "פארק נמלי ישראל", 31.8245, 34.6610),
+    ("אשדוד", "הקידמה 1", 31.8210, 34.6595),
 ]
 
 CBS_SUBDISTRICT_TO_REGION: dict[str, tuple[str, float, float]] = {
@@ -951,7 +989,7 @@ def query_external_geocoding_coords(
 
     try:
         nom_url = "https://nominatim.openstreetmap.org/search"
-        headers = {"User-Agent": "DormacoOrderRegionSorter/5.1 (Python/3.12)"}
+        headers = {"User-Agent": "DormacoOrderRegionSorter/6.1 (Python/3.12)"}
         resp = requests.get(
             nom_url,
             params={
@@ -1087,12 +1125,13 @@ def resolve_region_and_coords(
 
 
 # ==============================================================================
-# 5. חישוב זמני נסיעה בכבישי ישראל + העמסה רב-מחסנית (רגיל / קירור / חומ"ס)
+# 5. חישוב זמני נסיעה בכבישי ישראל + העמסה מ-4 מחסנים באשדוד
 # ==============================================================================
 NODE_HOME = 0
 NODE_MAIN_WH = 1
 NODE_COOLING_WH = 2
 NODE_HAZMAT_WH = 3
+NODE_GOLDBOND_WH = 4
 
 
 def haversine_air_km(c1: tuple[float, float], c2: tuple[float, float]) -> float:
@@ -1110,13 +1149,10 @@ def haversine_air_km(c1: tuple[float, float], c2: tuple[float, float]) -> float:
 def estimate_israel_road_drive_minutes(
     c1: tuple[float, float], c2: tuple[float, float]
 ) -> float:
-    """
-    שכבה 3 (גיבוי Offline): חישוב זמן נסיעה ריאלי למשאית בכבישי ישראל (בדקות).
-    """
     air_km = haversine_air_km(c1, c2)
     if air_km < 0.05:
         return 1.0
-    if air_km < 0.6:
+    if air_km < 0.8:
         return 3.0
 
     avg_lon = (c1[1] + c2[1]) / 2.0
@@ -1146,18 +1182,13 @@ def fetch_google_distance_matrix(
     truck_speed_factor: float,
     fallback_matrix: list[list[float]],
 ) -> list[list[float]] | None:
-    """
-    שכבה 1 (אם הוגדר GOOGLE_MAPS_API_KEY):
-    חישוב זמני נסיעה בכבישי ישראל באמצעות Google Maps Distance Matrix API.
-    """
     n = len(points)
     if n > 25:
         return None
     try:
         locs = "|".join(f"{lat:.5f},{lon:.5f}" for lat, lon in points)
         url = "https://maps.googleapis.com/maps/api/distancematrix/json"
-        Matrix = [[fallback_matrix[i][j] for j in range(n)] for i in range(n)]
-        # Google Distance Matrix מאפשר עד 100 אלמנטים בבקשה אחת, לכן נחלק לשורות
+        matrix = [[fallback_matrix[i][j] for j in range(n)] for i in range(n)]
         batch_size = max(1, 100 // n)
         for start_i in range(0, n, batch_size):
             end_i = min(n, start_i + batch_size)
@@ -1187,12 +1218,12 @@ def fetch_google_distance_matrix(
                 elements = row_obj.get("elements", [])
                 for j, el in enumerate(elements):
                     if i == j:
-                        Matrix[i][j] = 0.0
+                        matrix[i][j] = 0.0
                     elif el.get("status") == "OK" and "duration" in el:
                         sec = float(el["duration"]["value"])
                         g_min = (sec / 60.0) * truck_speed_factor
-                        Matrix[i][j] = round(max(g_min, fallback_matrix[i][j] * 0.8), 1)
-        return Matrix
+                        matrix[i][j] = round(max(g_min, fallback_matrix[i][j] * 0.8), 1)
+        return matrix
     except Exception:
         return None
 
@@ -1202,12 +1233,6 @@ def fetch_real_road_minutes_matrix(
     use_external_api: bool = True,
     truck_speed_factor: float = OSRM_TRUCK_SPEED_FACTOR,
 ) -> list[list[float]]:
-    """
-    מחשב מטריצת זמני נסיעה בדקות בין כל הנקודות לפי 3 שכבות:
-    1. Google Maps Distance Matrix API (אם הוזן GOOGLE_MAPS_API_KEY).
-    2. OSRM Real Israeli Road Network API (מבוסס כבישי ישראל ב-OpenStreetMap).
-    3. מודל כבישי ישראל מכויל למשאיות (גיבוי Offline).
-    """
     n = len(points)
     fallback_matrix = [
         [
@@ -1220,7 +1245,6 @@ def fetch_real_road_minutes_matrix(
     if not use_external_api or n <= 1 or n > 65:
         return fallback_matrix
 
-    # שכבה 1: Google Maps Distance Matrix (אם הוזן מפתח API)
     google_api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
     if google_api_key:
         g_matrix = fetch_google_distance_matrix(
@@ -1229,7 +1253,6 @@ def fetch_real_road_minutes_matrix(
         if g_matrix is not None:
             return g_matrix
 
-    # שכבה 2: OSRM Real Road Network API
     coords_str = ";".join(f"{lon:.5f},{lat:.5f}" for lat, lon in points)
     url = f"https://router.project-osrm.org/table/v1/driving/{coords_str}?annotations=duration"
     try:
@@ -1256,7 +1279,6 @@ def fetch_real_road_minutes_matrix(
     except Exception:
         pass
 
-    # שכבה 3: גיבוי מודל כבישי ישראל
     return fallback_matrix
 
 
@@ -1330,30 +1352,25 @@ def evaluate_truck_route(
     main_load_minutes: float = MAIN_WAREHOUSE_LOAD_MINUTES,
     cooling_load_minutes: float = COOLING_WAREHOUSE_LOAD_MINUTES,
     hazmat_load_minutes: float = HAZMAT_WAREHOUSE_LOAD_MINUTES,
+    goldbond_load_minutes: float = GOLDBOND_WAREHOUSE_LOAD_MINUTES,
     unload_minutes: float = UNLOAD_MINUTES,
     start_minutes: float = DRIVER_START_MINUTES,
     always_load_main_wh: bool = ALWAYS_LOAD_AT_MAIN_WAREHOUSE,
 ) -> dict[str, Any]:
-    """
-    מחשב לוח זמנים מלא למשאית עם זמני העמסה נפרדים לכל מחסן:
-    1. יציאה ממרכז נתניה (NODE_HOME = 0) בשעה 05:30.
-    2. מחסן ראשי "מבוא הספנים 1 אשדוד" (NODE_MAIN_WH = 1) -> העמסה במשך main_load_minutes (60 דק' כברירת מחדל).
-    3. אם יש מוצר קירור: מחסן קירור "מבוא הספנים 6 אשדוד" (NODE_COOLING_WH = 2) -> העמסה במשך cooling_load_minutes (30 דק').
-    4. אם יש מוצר חומ"ס: מחסן חומ"ס "פארק נמלי ישראל, אשדוד" (NODE_HAZMAT_WH = 3) -> העמסה במשך hazmat_load_minutes (30 דק').
-    5. נסיעה מהמחסן האחרון לכל תחנות הלקוחות במסלול (כולל unload_minutes = 30 דק' פריקה בכל עצירה).
-    6. נסיעה מהלקוח האחרון חזרה למרכז נתניה (NODE_HOME = 0).
-    """
     has_regular = False
     has_cooling = False
     has_hazmat = False
+    has_goldbond = False
 
     for st in ordered_stops:
         for r in st["records"]:
-            w_type = r.get("warehouse_type", "רגיל")
+            w_type = r.get("warehouse_type", "אוברסיז")
             if w_type == "קירור":
                 has_cooling = True
             elif w_type == 'חומ"ס':
                 has_hazmat = True
+            elif w_type == "גולד בונד":
+                has_goldbond = True
             else:
                 has_regular = True
 
@@ -1363,8 +1380,12 @@ def evaluate_truck_route(
     total_drive_min = 0.0
     total_load_min = 0.0
 
-    # שלב א': מחסן ראשי - מבוא הספנים 1 אשדוד (60 דקות כברירת מחדל)
-    if always_load_main_wh or has_regular or (not has_cooling and not has_hazmat):
+    # 1. מחסן אוברסיז - מבוא הספנים 1 אשדוד
+    if (
+        always_load_main_wh
+        or has_regular
+        or (not has_cooling and not has_hazmat and not has_goldbond)
+    ):
         leg = drive_matrix[current_node][NODE_MAIN_WH]
         arr = current_time + leg
         dep = arr + main_load_minutes
@@ -1372,8 +1393,8 @@ def evaluate_truck_route(
         total_load_min += main_load_minutes
         warehouse_visits.append(
             {
-                "name": f"מחסן ראשי ({MAIN_WAREHOUSE_ADDRESS})",
-                "short_name": f"מבוא הספנים 1 ({int(main_load_minutes)} דק')",
+                "name": f"אוברסיז ({MAIN_WAREHOUSE_ADDRESS})",
+                "short_name": f"אוברסיז ({int(main_load_minutes)} דק')",
                 "node": NODE_MAIN_WH,
                 "arrival_min": arr,
                 "arrival_str": format_hhmm(arr),
@@ -1384,7 +1405,7 @@ def evaluate_truck_route(
         current_time = dep
         current_node = NODE_MAIN_WH
 
-    # שלב ב': מחסן קירור - מבוא הספנים 6 אשדוד (30 דקות כברירת מחדל)
+    # 2. מחסן קירור - מבוא הספנים 6 אשדוד
     if has_cooling:
         leg = drive_matrix[current_node][NODE_COOLING_WH]
         arr = current_time + leg
@@ -1394,7 +1415,7 @@ def evaluate_truck_route(
         warehouse_visits.append(
             {
                 "name": f"מחסן קירור ({COOLING_WAREHOUSE_ADDRESS})",
-                "short_name": f"מבוא הספנים 6 קירור ({int(cooling_load_minutes)} דק')",
+                "short_name": f"מחסן קירור ({int(cooling_load_minutes)} דק')",
                 "node": NODE_COOLING_WH,
                 "arrival_min": arr,
                 "arrival_str": format_hhmm(arr),
@@ -1405,7 +1426,7 @@ def evaluate_truck_route(
         current_time = dep
         current_node = NODE_COOLING_WH
 
-    # שלב ג': מחסן חומ"ס - פארק נמלי ישראל, אשדוד (30 דקות כברירת מחדל)
+    # 3. מחסן חומ"ס - פארק נמלי ישראל, אשדוד
     if has_hazmat:
         leg = drive_matrix[current_node][NODE_HAZMAT_WH]
         arr = current_time + leg
@@ -1415,7 +1436,7 @@ def evaluate_truck_route(
         warehouse_visits.append(
             {
                 "name": f'מחסן חומ"ס ({HAZMAT_WAREHOUSE_ADDRESS})',
-                "short_name": f'פארק נמלי ישראל חומ"ס ({int(hazmat_load_minutes)} דק\')',
+                "short_name": f'מחסן חומ"ס ({int(hazmat_load_minutes)} דק\')',
                 "node": NODE_HAZMAT_WH,
                 "arrival_min": arr,
                 "arrival_str": format_hhmm(arr),
@@ -1426,7 +1447,27 @@ def evaluate_truck_route(
         current_time = dep
         current_node = NODE_HAZMAT_WH
 
-    # שלב ד': מעבר בין תחנות החלוקה אצל הלקוחות
+    # 4. מחסן גולד בונד - הקידמה 1 אשדוד
+    if has_goldbond:
+        leg = drive_matrix[current_node][NODE_GOLDBOND_WH]
+        arr = current_time + leg
+        dep = arr + goldbond_load_minutes
+        total_drive_min += leg
+        total_load_min += goldbond_load_minutes
+        warehouse_visits.append(
+            {
+                "name": f"גולד בונד ({GOLDBOND_WAREHOUSE_ADDRESS})",
+                "short_name": f"גולד בונד ({int(goldbond_load_minutes)} דק')",
+                "node": NODE_GOLDBOND_WH,
+                "arrival_min": arr,
+                "arrival_str": format_hhmm(arr),
+                "departure_min": dep,
+                "departure_str": format_hhmm(dep),
+            }
+        )
+        current_time = dep
+        current_node = NODE_GOLDBOND_WH
+
     stop_schedules: list[dict[str, Any]] = []
     total_unload_min = 0.0
     total_weight = 0.0
@@ -1456,7 +1497,6 @@ def evaluate_truck_route(
         current_time = departure_min
         current_node = mat_idx
 
-    # שלב ה': חזרה מהלקוח האחרון לבית הנהג במרכז נתניה
     last_to_home_min = drive_matrix[current_node][NODE_HOME] if ordered_stops else 0.0
     total_drive_min += last_to_home_min
     return_home_min = current_time + last_to_home_min
@@ -1473,6 +1513,7 @@ def evaluate_truck_route(
         "warehouses_summary_str": wh_summary_str,
         "has_cooling": has_cooling,
         "has_hazmat": has_hazmat,
+        "has_goldbond": has_goldbond,
         "stop_schedules": stop_schedules,
         "return_home_min": return_home_min,
         "return_home_str": format_hhmm(return_home_min),
@@ -1558,6 +1599,10 @@ def build_region_stops(
 def get_last_warehouse_node_for_stops(stops_slice: list[dict[str, Any]]) -> int:
     for st in stops_slice:
         for r in st["records"]:
+            if r.get("warehouse_type") == "גולד בונד":
+                return NODE_GOLDBOND_WH
+    for st in stops_slice:
+        for r in st["records"]:
             if r.get("warehouse_type") == 'חומ"ס':
                 return NODE_HAZMAT_WH
     for st in stops_slice:
@@ -1576,6 +1621,7 @@ def split_region_into_trucks(
     main_load_minutes: float = MAIN_WAREHOUSE_LOAD_MINUTES,
     cooling_load_minutes: float = COOLING_WAREHOUSE_LOAD_MINUTES,
     hazmat_load_minutes: float = HAZMAT_WAREHOUSE_LOAD_MINUTES,
+    goldbond_load_minutes: float = GOLDBOND_WAREHOUSE_LOAD_MINUTES,
     unload_minutes: float = UNLOAD_MINUTES,
 ) -> list[dict[str, Any]]:
     if not region_stops:
@@ -1609,6 +1655,7 @@ def split_region_into_trucks(
         main_load_minutes=main_load_minutes,
         cooling_load_minutes=cooling_load_minutes,
         hazmat_load_minutes=hazmat_load_minutes,
+        goldbond_load_minutes=goldbond_load_minutes,
         unload_minutes=unload_minutes,
     )
     if (
@@ -1655,6 +1702,7 @@ def split_region_into_trucks(
                 main_load_minutes=main_load_minutes,
                 cooling_load_minutes=cooling_load_minutes,
                 hazmat_load_minutes=hazmat_load_minutes,
+                goldbond_load_minutes=goldbond_load_minutes,
                 unload_minutes=unload_minutes,
             )
             if j > i + 1 and ev["total_shift_min"] > max_shift_min + 1e-6:
@@ -1678,14 +1726,10 @@ def split_region_into_trucks(
     trucks.reverse()
 
     total_parts = len(trucks)
-    for idx, tr in enumerate(trucks, start=1):
+    for tr in trucks:
         tr["regions"] = [region_name]
-        if total_parts > 1:
-            tr["region_label"] = f"{region_name} (נהג {idx} מתוך {total_parts})"
-            tr["was_split"] = True
-        else:
-            tr["region_label"] = region_name
-            tr["was_split"] = False
+        tr["region_label"] = region_name
+        tr["was_split"] = total_parts > 1
 
     return trucks
 
@@ -1698,6 +1742,7 @@ def try_consolidate_north_and_sharon_trucks(
     main_load_minutes: float = MAIN_WAREHOUSE_LOAD_MINUTES,
     cooling_load_minutes: float = COOLING_WAREHOUSE_LOAD_MINUTES,
     hazmat_load_minutes: float = HAZMAT_WAREHOUSE_LOAD_MINUTES,
+    goldbond_load_minutes: float = GOLDBOND_WAREHOUSE_LOAD_MINUTES,
     unload_minutes: float = UNLOAD_MINUTES,
     enable_merge: bool = ENABLE_NORTH_SHARON_MERGE,
 ) -> list[dict[str, Any]]:
@@ -1742,6 +1787,7 @@ def try_consolidate_north_and_sharon_trucks(
                         main_load_minutes=main_load_minutes,
                         cooling_load_minutes=cooling_load_minutes,
                         hazmat_load_minutes=hazmat_load_minutes,
+                        goldbond_load_minutes=goldbond_load_minutes,
                         unload_minutes=unload_minutes,
                     )
 
@@ -1792,9 +1838,10 @@ def sort_orders_excel(
     main_load_minutes: float = MAIN_WAREHOUSE_LOAD_MINUTES,
     cooling_load_minutes: float = COOLING_WAREHOUSE_LOAD_MINUTES,
     hazmat_load_minutes: float = HAZMAT_WAREHOUSE_LOAD_MINUTES,
+    goldbond_load_minutes: float = GOLDBOND_WAREHOUSE_LOAD_MINUTES,
     unload_minutes: float = UNLOAD_MINUTES,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    cooling_skus, hazmat_skus = load_cooling_and_hazmat_catalogs(INPUT_FOLDER)
+    cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_catalogs(INPUT_FOLDER)
 
     wb_in = load_workbook_safe(input_path)
     ws_in = wb_in.active
@@ -1865,12 +1912,15 @@ def sort_orders_excel(
         if sku_clean in cooling_skus:
             warehouse_type = "קירור"
             warehouse_label = f"קירור ({COOLING_WAREHOUSE_ADDRESS})"
+        elif sku_clean in goldbond_skus:
+            warehouse_type = "גולד בונד"
+            warehouse_label = f"גולד בונד ({GOLDBOND_WAREHOUSE_ADDRESS})"
         elif sku_clean in hazmat_skus:
             warehouse_type = 'חומ"ס'
             warehouse_label = f'חומ"ס ({HAZMAT_WAREHOUSE_ADDRESS})'
         else:
-            warehouse_type = "רגיל"
-            warehouse_label = f"רגיל ({MAIN_WAREHOUSE_ADDRESS})"
+            warehouse_type = "אוברסיז"
+            warehouse_label = f"אוברסיז ({MAIN_WAREHOUSE_ADDRESS})"
 
         cust_name = str(row_vals[idx_cust_name] or "").strip()
         stop_key = f"{effective_dest}||{cust_name}||{lat:.5f},{lon:.5f}"
@@ -1901,12 +1951,14 @@ def sort_orders_excel(
         MAIN_WAREHOUSE_COORDS,
         COOLING_WAREHOUSE_COORDS,
         HAZMAT_WAREHOUSE_COORDS,
+        GOLDBOND_WAREHOUSE_COORDS,
     ]
     coord_to_mat_idx: dict[tuple[float, float], int] = {
         DRIVER_HOME_COORDS: NODE_HOME,
         MAIN_WAREHOUSE_COORDS: NODE_MAIN_WH,
         COOLING_WAREHOUSE_COORDS: NODE_COOLING_WH,
         HAZMAT_WAREHOUSE_COORDS: NODE_HAZMAT_WH,
+        GOLDBOND_WAREHOUSE_COORDS: NODE_GOLDBOND_WH,
     }
 
     stops_by_region: dict[str, list[dict[str, Any]]] = {}
@@ -1938,6 +1990,7 @@ def sort_orders_excel(
             main_load_minutes=main_load_minutes,
             cooling_load_minutes=cooling_load_minutes,
             hazmat_load_minutes=hazmat_load_minutes,
+            goldbond_load_minutes=goldbond_load_minutes,
             unload_minutes=unload_minutes,
         )
 
@@ -1949,6 +2002,7 @@ def sort_orders_excel(
         main_load_minutes=main_load_minutes,
         cooling_load_minutes=cooling_load_minutes,
         hazmat_load_minutes=hazmat_load_minutes,
+        goldbond_load_minutes=goldbond_load_minutes,
         unload_minutes=unload_minutes,
         enable_merge=ENABLE_NORTH_SHARON_MERGE,
     )
@@ -1969,11 +2023,6 @@ def sort_orders_excel(
                 rec["return_home_str"] = tr["return_home_str"]
                 sorted_records.append(rec)
 
-    # ==========================================================================
-    # סידור העמודות בטבלה הסופית:
-    # - ליד "יעד": "שעת הגעה ליעד" ו"שעת יציאה מיעד"
-    # - "יחידות" צמודה ל"כמות", ורק אחריהן "הערה למוצר ללקוח"
-    # ==========================================================================
     reordered_orig_cols: list[int] = []
     for c_i in range(len(raw_headers)):
         if c_i in (idx_qty, idx_units, idx_note_cust):
@@ -2032,6 +2081,8 @@ def sort_orders_excel(
     COOLING_FONT = "01579B"
     HAZMAT_BG = "FFF3E0"
     HAZMAT_FONT = "E65100"
+    GOLDBOND_BG = "F3E5F5"
+    GOLDBOND_FONT = "4A148C"
 
     REGION_COLORS: dict[str, str] = {
         "צפון מזרח": "E2EFDA",
@@ -2088,6 +2139,10 @@ def sort_orders_excel(
         start_color=HAZMAT_BG, end_color=HAZMAT_BG, fill_type="solid"
     )
     hazmat_font = Font(name="Arial", size=10, bold=True, color=HAZMAT_FONT)
+    goldbond_fill = PatternFill(
+        start_color=GOLDBOND_BG, end_color=GOLDBOND_BG, fill_type="solid"
+    )
+    goldbond_font = Font(name="Arial", size=10, bold=True, color=GOLDBOND_FONT)
 
     start_data_row = 2
     for offset, rec in enumerate(sorted_records):
@@ -2153,6 +2208,9 @@ def sort_orders_excel(
                 elif rec["warehouse_type"] == 'חומ"ס':
                     cell.fill = hazmat_fill
                     cell.font = hazmat_font
+                elif rec["warehouse_type"] == "גולד בונד":
+                    cell.fill = goldbond_fill
+                    cell.font = goldbond_font
                 else:
                     cell.fill = zebra_fill
                     cell.font = Font(name="Arial", size=10)
@@ -2219,7 +2277,7 @@ def sort_orders_excel(
         ws_orders.column_dimensions[col_letter].width = min(max(max_len + 4, 12), 38)
 
     # ==========================================================================
-    # גיליון 2: סיכום מסלולי נהגים, מחסני העמסה ושעות הגעה
+    # גיליון 2: סיכום מסלולי נהגים ומשאיות
     # ==========================================================================
     ws_trucks = wb_out.create_sheet(title="סיכום מסלולי נהגים ומשאיות")
     ws_trucks.sheet_view.rightToLeft = True
@@ -2230,12 +2288,12 @@ def sort_orders_excel(
     truck_headers = [
         "נהג / משאית",
         "אזורי חלוקה במסלול",
-        "יציאה מנתניה",
-        "מחסני העמסה באשדוד (כולל זמני הגעה והעמסה)",
+        "יציאה מהבית",
+        "שעות הגעה והעמסה במחסנים באשדוד",
+        "חזרה אל הבית",
+        "סה\"כ זמן משמרת (מתוך 12:00 שעות)",
         "מספר עצירות",
         'סה"כ משקל במשאית (ק"ג)',
-        "חזרה למרכז נתניה",
-        "סה\"כ זמן משמרת (מתוך 12:00 שעות)",
         "סטטוס מסלול",
         "פירוט מלא של מסלול הנסיעה ושעות ההגעה",
     ]
@@ -2245,11 +2303,13 @@ def sort_orders_excel(
         c.fill = header_fill
         c.font = header_font
         c.border = thin_border
-        c.alignment = Alignment(
-            horizontal="right" if col_idx in (5, 6) else "left",
-            vertical="center",
-            wrap_text=True,
-        )
+        if col_idx in (7, 8):
+            horiz = "right"
+        elif col_idx in (3, 5, 6):
+            horiz = "center"
+        else:
+            horiz = "left"
+        c.alignment = Alignment(horizontal=horiz, vertical="center", wrap_text=True)
     ws_trucks.row_dimensions[1].height = 28
     ws_trucks.freeze_panes = "A2"
 
@@ -2271,9 +2331,9 @@ def sort_orders_excel(
             for s in tr["stop_schedules"]
         )
         full_route_text = (
-            f"{DRIVER_HOME_NAME} ({format_hhmm(DRIVER_START_MINUTES)}) -> "
+            f"יציאה מהבית ({format_hhmm(DRIVER_START_MINUTES)}) -> "
             f"{tr['warehouses_summary_str']} -> "
-            f"{stops_summary} -> {DRIVER_HOME_NAME} ({tr['return_home_str']})"
+            f"{stops_summary} -> חזרה אל הבית ({tr['return_home_str']})"
         )
 
         status_notes: list[str] = []
@@ -2281,6 +2341,8 @@ def sort_orders_excel(
             status_notes.append("כולל העמסת קירור")
         if tr.get("has_hazmat"):
             status_notes.append('כולל העמסת חומ"ס')
+        if tr.get("has_goldbond"):
+            status_notes.append("כולל העמסת גולד בונד")
         if tr.get("is_merged_north_sharon"):
             status_notes.append("אוחד נהג (צפון + השרון)")
         elif tr.get("was_split"):
@@ -2292,15 +2354,15 @@ def sort_orders_excel(
         ws_trucks.cell(row=r_idx, column=2, value=tr["region_label"])
         ws_trucks.cell(row=r_idx, column=3, value=format_hhmm(DRIVER_START_MINUTES))
         ws_trucks.cell(row=r_idx, column=4, value=tr["warehouses_summary_str"])
-        ws_trucks.cell(row=r_idx, column=5, value=len(tr["stop_schedules"]))
+        ws_trucks.cell(row=r_idx, column=5, value=tr["return_home_str"])
+        ws_trucks.cell(
+            row=r_idx, column=6, value=format_duration_hhmm(tr["total_shift_min"])
+        )
+        ws_trucks.cell(row=r_idx, column=7, value=len(tr["stop_schedules"]))
         ws_trucks.cell(
             row=r_idx,
-            column=6,
+            column=8,
             value=f"=SUMIF({driver_range_ref}, A{r_idx}, {qty_range_ref})",
-        )
-        ws_trucks.cell(row=r_idx, column=7, value=tr["return_home_str"])
-        ws_trucks.cell(
-            row=r_idx, column=8, value=format_duration_hhmm(tr["total_shift_min"])
         )
         ws_trucks.cell(row=r_idx, column=9, value=" | ".join(status_notes))
         ws_trucks.cell(row=r_idx, column=10, value=full_route_text)
@@ -2312,10 +2374,10 @@ def sort_orders_excel(
             if col_idx == 9:
                 c.fill = ok_fill
                 c.font = ok_font
-            if col_idx in (5, 6):
+            if col_idx in (7, 8):
                 c.alignment = Alignment(horizontal="right", vertical="center")
                 c.number_format = "#,##0"
-            elif col_idx in (3, 7, 8):
+            elif col_idx in (3, 5, 6):
                 c.alignment = Alignment(horizontal="center", vertical="center")
             else:
                 c.alignment = Alignment(horizontal="left", vertical="center")
@@ -2327,10 +2389,10 @@ def sort_orders_excel(
     ws_trucks.cell(row=t_total_row, column=1, value=f'סה"כ ({len(final_trucks)} נהגים)')
     if t_end_row >= t_start_row:
         ws_trucks.cell(
-            row=t_total_row, column=5, value=f"=SUM(E{t_start_row}:E{t_end_row})"
+            row=t_total_row, column=7, value=f"=SUM(G{t_start_row}:G{t_end_row})"
         )
         ws_trucks.cell(
-            row=t_total_row, column=6, value=f"=SUM(F{t_start_row}:F{t_end_row})"
+            row=t_total_row, column=8, value=f"=SUM(H{t_start_row}:H{t_end_row})"
         )
 
     for col_idx in range(1, 11):
@@ -2340,32 +2402,15 @@ def sort_orders_excel(
             start_color=TOTAL_FILL, end_color=TOTAL_FILL, fill_type="solid"
         )
         c.border = total_border
-        if col_idx in (5, 6):
+        if col_idx in (7, 8):
             c.alignment = Alignment(horizontal="right", vertical="center")
             c.number_format = "#,##0"
         else:
             c.alignment = Alignment(horizontal="left", vertical="center")
     ws_trucks.row_dimensions[t_total_row].height = 24
 
-    for col_idx, width in enumerate([28, 24, 15, 52, 14, 22, 18, 26, 32, 70], start=1):
+    for col_idx, width in enumerate([26, 22, 16, 54, 16, 26, 14, 22, 32, 70], start=1):
         ws_trucks.column_dimensions[get_column_letter(col_idx)].width = width
-
-    if t_end_row >= t_start_row:
-        chart = BarChart()
-        chart.type = "col"
-        chart.style = 10
-        chart.title = 'סה"כ משקל העמסה (ק"ג) לפי נהג / משאית'
-        chart.y_axis.title = 'משקל (ק"ג)'
-        chart.x_axis.title = "נהג / משאית"
-        chart.width = 18
-        chart.height = 10
-
-        data_ref = Reference(ws_trucks, min_col=6, min_row=1, max_row=t_end_row)
-        cats_ref = Reference(ws_trucks, min_col=1, min_row=t_start_row, max_row=t_end_row)
-        chart.add_data(data_ref, titles_from_data=True)
-        chart.set_categories(cats_ref)
-        chart.legend = None
-        ws_trucks.add_chart(chart, f"A{t_total_row + 2}")
 
     output_path = pathlib.Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2374,7 +2419,7 @@ def sort_orders_excel(
 
 
 # ==============================================================================
-# 7. פתיחת חלון התיקייה ב-Windows ובחירת קובץ קלט (תוך דילוג על קובץ החומ"ס)
+# 7. פתיחת חלון התיקייה ב-Windows ובחירת קובץ קלט
 # ==============================================================================
 def open_folder_in_windows_explorer(target_path: pathlib.Path | str) -> None:
     p = pathlib.Path(target_path)
@@ -2439,9 +2484,11 @@ def resolve_input_file(cli_input: str | None) -> tuple[pathlib.Path | None, str 
     excluded_names = {
         HAZMAT_FILE_NAME.lower(),
         COOLING_FILE_NAME.lower(),
+        GOLDBOND_FILE_NAME.lower(),
         CONFIG_FILE_NAME.lower(),
         "dangerous_products.xlsx",
         "cooling_products.xlsx",
+        "gold_bond.xlsx",
         "settings.xlsx",
         "config.xlsx",
     }
@@ -2455,6 +2502,7 @@ def resolve_input_file(cli_input: str | None) -> tuple[pathlib.Path | None, str 
             and f.name.lower() not in excluded_names
             and "dangerous" not in f.name.lower()
             and "cooling" not in f.name.lower()
+            and "gold" not in f.name.lower()
         )
         if xlsx_files:
             return xlsx_files[0], xlsx_files[0].name
@@ -2471,7 +2519,7 @@ def main() -> None:
     cfg_loaded = load_dynamic_config()
 
     parser = argparse.ArgumentParser(
-        description="מיון הזמנות לפי אזורי חלוקה, העמסה ממחסנים (רגיל/קירור/חומ\"ס) וחישוב שעות הגעה"
+        description="מיון הזמנות לפי אזורי חלוקה, העמסה מ-4 מחסנים (אוברסיז/קירור/חומ\"ס/גולד בונד) וחישוב שעות הגעה"
     )
     parser.add_argument(
         "input_excel",
@@ -2495,7 +2543,7 @@ def main() -> None:
         "--main-load-minutes",
         type=float,
         default=None,
-        help="זמן העמסה בדקות במחסן הרגיל במבוא הספנים 1 (ברירת מחדל: 60)",
+        help="זמן העמסה בדקות במחסן אוברסיז במבוא הספנים 1 (ברירת מחדל: 60)",
     )
     parser.add_argument(
         "--cooling-load-minutes",
@@ -2508,6 +2556,12 @@ def main() -> None:
         type=float,
         default=None,
         help='זמן העמסה בדקות במחסן חומ"ס בפארק נמלי ישראל (ברירת מחדל: 30)',
+    )
+    parser.add_argument(
+        "--goldbond-load-minutes",
+        type=float,
+        default=None,
+        help="זמן העמסה בדקות במחסן גולד בונד בהקידמה 1 (ברירת מחדל: 30)",
     )
     parser.add_argument(
         "-u",
@@ -2526,7 +2580,7 @@ def main() -> None:
         "--max-hours",
         type=float,
         default=None,
-        help="זמן משמרת מקסימלי לנהג בשעות מנתניה ועד החזרה לנתניה (ברירת מחדל: 12)",
+        help="זמן משמרת מקסימלי לנהג בשעות מיציאה מהבית ועד חזרה אל הבית (ברירת מחדל: 12)",
     )
     parser.add_argument(
         "--offline",
@@ -2562,6 +2616,11 @@ def main() -> None:
         args.hazmat_load_minutes
         if args.hazmat_load_minutes is not None
         else HAZMAT_WAREHOUSE_LOAD_MINUTES
+    )
+    eff_goldbond_load = (
+        args.goldbond_load_minutes
+        if args.goldbond_load_minutes is not None
+        else GOLDBOND_WAREHOUSE_LOAD_MINUTES
     )
     eff_unload_min = (
         args.unload_minutes if args.unload_minutes is not None else UNLOAD_MINUTES
@@ -2603,6 +2662,7 @@ def main() -> None:
         main_load_minutes=eff_main_load,
         cooling_load_minutes=eff_cooling_load,
         hazmat_load_minutes=eff_hazmat_load,
+        goldbond_load_minutes=eff_goldbond_load,
         unload_minutes=eff_unload_min,
     )
 
@@ -2611,8 +2671,9 @@ def main() -> None:
     if cfg_loaded:
         print(f"קובץ הגדרות פעיל: {cfg_loaded}")
     print(
-        f"זמני העמסה: רגיל={int(eff_main_load)} דק' | קירור={int(eff_cooling_load)} דק' | "
-        f'חומ"ס={int(eff_hazmat_load)} דק\' | פריקה אצל לקוח={int(eff_unload_min)} דק\''
+        f"זמני העמסה: אוברסיז={int(eff_main_load)} דק' | קירור={int(eff_cooling_load)} דק' | "
+        f'חומ"ס={int(eff_hazmat_load)} דק\' | גולד בונד={int(eff_goldbond_load)} דק\' | '
+        f"פריקה אצל לקוח={int(eff_unload_min)} דק'"
     )
     print(f"קובץ הפלט נשמר בנתיב:\n  {out_path}")
     print(f"סה\"כ שורות הזמנה: {len(records)} | סה\"כ נהגים/משאיות: {len(trucks)}")
@@ -2620,7 +2681,7 @@ def main() -> None:
         print(
             f"  * {tr['driver_name']}: העמסה [{tr['warehouses_summary_str']}] | "
             f"{len(tr['stop_schedules'])} עצירות | {tr['total_weight']:,.0f} ק\"ג | "
-            f"חזרה לנתניה: {tr['return_home_str']} (משמרת: {format_duration_hhmm(tr['total_shift_min'])} שעות)"
+            f"חזרה אל הבית: {tr['return_home_str']} (משמרת: {format_duration_hhmm(tr['total_shift_min'])} שעות)"
         )
     print(f"=======================================================\n")
 
