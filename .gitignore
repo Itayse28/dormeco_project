@@ -7,3 +7,4 @@ env/
 .env
 .vs/
 output_files/
+input_files/config_parameters.txt
