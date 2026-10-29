@@ -23,7 +23,7 @@ GOLDBOND_WAREHOUSE_LOAD_MINUTES = 30
 # זמן פריקת סחורה בכל עצירה אצל לקוח במסלול - ברירת מחדל: 30 דקות
 UNLOAD_MINUTES = 30
 # האם הנהג תמיד עוצר תחילה במחסן הראשי (מבוא הספנים 1) להעמסה ראשונית לפני שאר המחסנים
-ALWAYS_LOAD_AT_MAIN_WAREHOUSE = true
+ALWAYS_LOAD_AT_MAIN_WAREHOUSE = false
 
 # --- 3. מגבלות משאית ונהג (חריגה תגרום לפיצול אוטומטי ל-2 נהגים) ---
 MAX_TRUCK_WEIGHT_KG = 7500
