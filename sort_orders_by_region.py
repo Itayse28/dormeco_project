@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
 """
-מערכת אוטומטית למיון הזמנות, העמסה מ-4 מחסנים (אוברסיז / קירור / חומ"ס / גולד בונד) ותכנון מסלולי נהגים
-=========================================================================================================
+מערכת אוטומטית למיון הזמנות, ניהול 4 מחסנים באשדוד ותכנון מסלולי משאיות (דורמקו)
+=================================================================================
+- קריאת כל הפרמטרים הדינמיים מקובץ: input_files\config_parameters.txt
+- סיווג מוצרים אוטומטי ל-4 מחסנים באשדוד לפי מק"ט:
+  1. אוברסיז (מבוא הספנים 1 אשדוד) - העמסה של 60 דקות כברירת מחדל
+  2. מחסן קירור (מבוא הספנים 6 אשדוד) - מק"טים מ-Cooling_products.pdf (30 דקות כברירת מחדל)
+  3. מחסן חומ"ס (פארק נמלי ישראל, אשדוד) - מק"טים מ-dangerous_products.xlsx (30 דקות כברירת מחדל)
+  4. גולד בונד (הקידמה 1 אשדוד) - מק"טים מ-Gold_bond.xlsx (30 דקות כברירת מחדל)
+- זיהוי מדויק של ערים, קיבוצים, מושבים ויישובים קטנים (עדיפות לעמודת "יעד", מילון מורחב של 415+ יישובים,
+  קילוף קידומות קיבוץ/מושב/ד.נ., וחיפוש אוטומטי במאגר הממשלתי data.gov.il ו-Nominatim/Google Maps).
+- חישוב שעות הגעה מדויקות מהבית (05:30) -> מחסנים באשדוד -> לקוחות -> חזרה אל הבית.
+- אכיפת מגבלות 12 שעות משמרת ו-7,500 ק"ג למשאית עם פיצול אוטומטי לנהגים ואיחוד צפון + השרון.
 """
 
 from __future__ import annotations
 
 import argparse
-import datetime
 import io
 import itertools
 import json
@@ -26,52 +35,298 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 import requests
 
-# ==============================================================================
-# 0. הגדרת נתיבי ברירת מחדל ופרמטרים דינמיים
-# ==============================================================================
-BASE_DIR = r"C:\Users\itaik\OneDrive\מסמכים\dormeco-sorting-script"
-INPUT_FOLDER = BASE_DIR + r"\input_files"
-OUTPUT_FOLDER = BASE_DIR + r"\output_files"
+try:
+    import pypdf
+except ImportError:
+    pypdf = None
 
+
+# ==============================================================================
+# 0. הגדרת נתיבי ברירת מחדל ויצירת קובץ פרמטרים (config_parameters.txt)
+# ==============================================================================
+DEFAULT_BASE_DIR = r"C:\Users\itaik\OneDrive\מסמכים\dormeco-sorting-script"
 CONFIG_FILE_NAME = "config_parameters.txt"
-INPUT_FILE_NAME = "list.xlsx"
-COOLING_FILE_NAME = "Cooling_products.pdf"
-HAZMAT_FILE_NAME = "dangerous_products.xlsx"
-GOLDBOND_FILE_NAME = "Gold_bond.xlsx"
 
-# זמני העמסה נפרדים לכל מחסן באשדוד וזמן פריקה אצל לקוח (בדקות)
-MAIN_WAREHOUSE_LOAD_MINUTES: float = 60.0      # שעה העמסה ראשונית באוברסיז (מבוא הספנים 1)
-COOLING_WAREHOUSE_LOAD_MINUTES: float = 30.0   # 30 דקות העמסה במחסן קירור (מבוא הספנים 6)
-HAZMAT_WAREHOUSE_LOAD_MINUTES: float = 30.0    # 30 דקות העמסה במחסן חומ"ס (פארק נמלי ישראל)
-GOLDBOND_WAREHOUSE_LOAD_MINUTES: float = 30.0  # 30 דקות העמסה במחסן גולד בונד (הקידמה 1)
-UNLOAD_MINUTES: float = 30.0                   # 30 דקות פריקה בכל עצירה אצל לקוח
-ALWAYS_LOAD_AT_MAIN_WAREHOUSE: bool = True
+DEFAULT_CONFIG_TEMPLATE = """# ==============================================================================
+# קובץ הגדרות ופרמטרים דינמיים - מערכת מיון הזמנות ותכנון מסלולים (דורמקו)
+# ניתן לערוך כל ערך אחרי סימן השווה (=) ולשמור את הקובץ.
+# ==============================================================================
 
-MAX_TRUCK_WEIGHT_KG: float = 7500.0
-MAX_DRIVER_SHIFT_HOURS: float = 12.0
+# 1. נתיבי תיקיות ושמות קבצים (בתוך תיקיית input_files)
+BASE_DIR = C:\\Users\\itaik\\OneDrive\\מסמכים\\dormeco-sorting-script
+INPUT_FILE_NAME = list.xlsx
+COOLING_FILE_NAME = Cooling_products.pdf
+HAZMAT_FILE_NAME = dangerous_products.xlsx
+GOLDBOND_FILE_NAME = Gold_bond.xlsx
 
-DRIVER_HOME_NAME: str = "בית"
-DRIVER_HOME_COORDS: tuple[float, float] = (32.3215, 34.8532)
-DRIVER_DEPARTURE_TIME_STR: str = "05:30"
-DRIVER_START_MINUTES: float = 5 * 60 + 30  # 05:30 = 330 דקות מחצות
+# 2. זמני העמסה במחסנים באשדוד וזמן פריקה אצל לקוח (בדקות)
+MAIN_WAREHOUSE_LOAD_MINUTES = 60
+COOLING_WAREHOUSE_LOAD_MINUTES = 30
+HAZMAT_WAREHOUSE_LOAD_MINUTES = 30
+GOLDBOND_WAREHOUSE_LOAD_MINUTES = 30
+UNLOAD_MINUTES = 30
 
-MAIN_WAREHOUSE_ADDRESS: str = "מבוא הספנים 1 אשדוד"
-MAIN_WAREHOUSE_COORDS: tuple[float, float] = (31.8315, 34.6465)
+# 3. מגבלות משאית ונהג (מעבר למגבלות אלו האזור יפוצל אוטומטית לנהגים נוספים)
+MAX_TRUCK_WEIGHT_KG = 7500
+MAX_DRIVER_SHIFT_HOURS = 12.0
 
-COOLING_WAREHOUSE_ADDRESS: str = "מבוא הספנים 6 אשדוד"
-COOLING_WAREHOUSE_COORDS: tuple[float, float] = (31.8322, 34.6482)
+# 4. הגדרות יציאת נהגים ומיקומי 4 המחסנים באשדוד
+DRIVER_HOME_NAME = בית
+DRIVER_HOME_LAT = 32.3215
+DRIVER_HOME_LON = 34.8532
+DRIVER_DEPARTURE_TIME = 05:30
 
-HAZMAT_WAREHOUSE_ADDRESS: str = "פארק נמלי ישראל, אשדוד"
-HAZMAT_WAREHOUSE_COORDS: tuple[float, float] = (31.8245, 34.6610)
+MAIN_WAREHOUSE_NAME = אוברסיז
+MAIN_WAREHOUSE_ADDRESS = מבוא הספנים 1 אשדוד
+MAIN_WAREHOUSE_LAT = 31.8315
+MAIN_WAREHOUSE_LON = 34.6465
+ALWAYS_LOAD_AT_MAIN_WAREHOUSE = true
 
-GOLDBOND_WAREHOUSE_ADDRESS: str = "הקידמה 1 אשדוד"
-GOLDBOND_WAREHOUSE_COORDS: tuple[float, float] = (31.8210, 34.6595)
+COOLING_WAREHOUSE_NAME = מחסן קירור
+COOLING_WAREHOUSE_ADDRESS = מבוא הספנים 6 אשדוד
+COOLING_WAREHOUSE_LAT = 31.8322
+COOLING_WAREHOUSE_LON = 34.6482
 
-OSRM_TRUCK_SPEED_FACTOR: float = 1.20
-ENABLE_NORTH_SHARON_MERGE: bool = True
-USE_EXTERNAL_ROUTING_API: bool = True
-PREFER_SITE_NAME_CITY: bool = False
-AUTO_OPEN_OUTPUT_FOLDER: bool = True
+HAZMAT_WAREHOUSE_NAME = מחסן חומ"ס
+HAZMAT_WAREHOUSE_ADDRESS = פארק נמלי ישראל, אשדוד
+HAZMAT_WAREHOUSE_LAT = 31.8245
+HAZMAT_WAREHOUSE_LON = 34.6610
+
+GOLDBOND_WAREHOUSE_NAME = גולד בונד
+GOLDBOND_WAREHOUSE_ADDRESS = הקידמה 1 אשדוד
+GOLDBOND_WAREHOUSE_LAT = 31.8210
+GOLDBOND_WAREHOUSE_LON = 34.6595
+
+# 5. הגדרות חישוב כבישים ואופטימיזציית מסלולים
+OSRM_TRUCK_SPEED_FACTOR = 1.20
+ENABLE_NORTH_SHARON_MERGE = true
+USE_EXTERNAL_ROUTING_API = true
+PREFER_SITE_NAME_CITY = false
+AUTO_OPEN_OUTPUT_FOLDER = true
+GOOGLE_MAPS_API_KEY = 
+
+# 6. רשימת מק"טים נוספים (אופציונלי - מופרדים בפסיק, בנוסף לקבצים שבתיקיית input_files)
+EXTRA_COOLING_SKUS = 
+EXTRA_HAZMAT_SKUS = 
+EXTRA_GOLDBOND_SKUS = 
+"""
+
+
+def parse_bool(val: str, default: bool = True) -> bool:
+    v = str(val or "").strip().lower()
+    if v in ("true", "1", "yes", "y", "כן", "אמת"):
+        return True
+    if v in ("false", "0", "no", "n", "לא", "שקר"):
+        return False
+    return default
+
+
+def load_or_create_config(
+    custom_config_path: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    script_dir = pathlib.Path(__file__).resolve().parent
+    default_base = pathlib.Path(DEFAULT_BASE_DIR)
+    base_dir = default_base if default_base.exists() else script_dir
+
+    input_folder = pathlib.Path(str(base_dir) + r"\input_files")
+    if not input_folder.exists() and (base_dir / "input_files").exists():
+        input_folder = base_dir / "input_files"
+    try:
+        input_folder.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        input_folder = script_dir
+
+    cfg_path = custom_config_path or (input_folder / CONFIG_FILE_NAME)
+    if not cfg_path.exists():
+        try:
+            cfg_path.write_text(DEFAULT_CONFIG_TEMPLATE, encoding="utf-8-sig")
+            print(f"[*] נוצר קובץ פרמטרים חדש: {cfg_path}")
+        except Exception:
+            pass
+
+    raw_kv: dict[str, str] = {}
+    for line in DEFAULT_CONFIG_TEMPLATE.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            raw_kv[k.strip()] = v.strip()
+
+    if cfg_path.exists():
+        try:
+            content = cfg_path.read_text(encoding="utf-8-sig")
+            for line in content.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    raw_kv[k.strip()] = v.strip()
+        except Exception as e:
+            print(f"[!] אזהרה בקריאת קובץ הפרמטרים ({e}), משתמש בברירות מחדל.")
+
+    configured_base = raw_kv.get("BASE_DIR", DEFAULT_BASE_DIR).strip()
+    BASE_FILE = configured_base if configured_base else DEFAULT_BASE_DIR
+    INPUT_FOLDER = BASE_FILE + r"\input_files"
+    OUTPUT_FOLDER = BASE_FILE + r"\output_files"
+
+    base_path_obj = pathlib.Path(BASE_FILE)
+    if not base_path_obj.exists() and script_dir.exists():
+        in_dir_obj = script_dir / "input_files"
+        out_dir_obj = script_dir / "output_files"
+    else:
+        in_dir_obj = base_path_obj / "input_files"
+        out_dir_obj = base_path_obj / "output_files"
+
+    legacy_load = float(raw_kv.get("LOAD_MINUTES", "30") or 30.0)
+    main_load = float(
+        raw_kv.get("MAIN_WAREHOUSE_LOAD_MINUTES", "60") or legacy_load
+    )
+    cooling_load = float(
+        raw_kv.get("COOLING_WAREHOUSE_LOAD_MINUTES", str(legacy_load))
+        or legacy_load
+    )
+    hazmat_load = float(
+        raw_kv.get("HAZMAT_WAREHOUSE_LOAD_MINUTES", str(legacy_load))
+        or legacy_load
+    )
+    goldbond_load = float(
+        raw_kv.get("GOLDBOND_WAREHOUSE_LOAD_MINUTES", str(legacy_load))
+        or legacy_load
+    )
+
+    home_name = raw_kv.get("DRIVER_HOME_NAME", "בית").strip()
+    if home_name == "מרכז נתניה":
+        home_name = "בית"
+
+    main_wh_name = raw_kv.get("MAIN_WAREHOUSE_NAME", "אוברסיז").strip()
+    if main_wh_name in ("מחסן ראשי", "המחסן הראשי", ""):
+        main_wh_name = "אוברסיז"
+
+    return {
+        "CONFIG_PATH": cfg_path,
+        "BASE_DIR": BASE_FILE,
+        "INPUT_FOLDER": INPUT_FOLDER,
+        "OUTPUT_FOLDER": OUTPUT_FOLDER,
+        "INPUT_DIR_PATH": in_dir_obj,
+        "OUTPUT_DIR_PATH": out_dir_obj,
+        "INPUT_FILE_NAME": raw_kv.get("INPUT_FILE_NAME", "list.xlsx"),
+        "COOLING_FILE_NAME": raw_kv.get(
+            "COOLING_FILE_NAME", "Cooling_products.pdf"
+        ),
+        "HAZMAT_FILE_NAME": raw_kv.get(
+            "HAZMAT_FILE_NAME", "dangerous_products.xlsx"
+        ),
+        "GOLDBOND_FILE_NAME": raw_kv.get(
+            "GOLDBOND_FILE_NAME", "Gold_bond.xlsx"
+        ),
+        "MAIN_WAREHOUSE_LOAD_MINUTES": main_load,
+        "COOLING_WAREHOUSE_LOAD_MINUTES": cooling_load,
+        "HAZMAT_WAREHOUSE_LOAD_MINUTES": hazmat_load,
+        "GOLDBOND_WAREHOUSE_LOAD_MINUTES": goldbond_load,
+        "UNLOAD_MINUTES": float(raw_kv.get("UNLOAD_MINUTES", "30") or 30.0),
+        "MAX_TRUCK_WEIGHT_KG": float(
+            raw_kv.get("MAX_TRUCK_WEIGHT_KG", "7500") or 7500.0
+        ),
+        "MAX_DRIVER_SHIFT_HOURS": float(
+            raw_kv.get("MAX_DRIVER_SHIFT_HOURS", "12.0") or 12.0
+        ),
+        "DRIVER_HOME_NAME": home_name,
+        "DRIVER_HOME_COORDS": (
+            float(raw_kv.get("DRIVER_HOME_LAT", "32.3215") or 32.3215),
+            float(raw_kv.get("DRIVER_HOME_LON", "34.8532") or 34.8532),
+        ),
+        "DRIVER_DEPARTURE_TIME": raw_kv.get("DRIVER_DEPARTURE_TIME", "05:30"),
+        "MAIN_WAREHOUSE_NAME": main_wh_name,
+        "MAIN_WAREHOUSE_ADDRESS": raw_kv.get(
+            "MAIN_WAREHOUSE_ADDRESS", "מבוא הספנים 1 אשדוד"
+        ),
+        "MAIN_WAREHOUSE_COORDS": (
+            float(raw_kv.get("MAIN_WAREHOUSE_LAT", "31.8315") or 31.8315),
+            float(raw_kv.get("MAIN_WAREHOUSE_LON", "34.6465") or 34.6465),
+        ),
+        "ALWAYS_LOAD_AT_MAIN_WAREHOUSE": parse_bool(
+            raw_kv.get("ALWAYS_LOAD_AT_MAIN_WAREHOUSE", "true"), True
+        ),
+        "COOLING_WAREHOUSE_NAME": raw_kv.get(
+            "COOLING_WAREHOUSE_NAME", "מחסן קירור"
+        ),
+        "COOLING_WAREHOUSE_ADDRESS": raw_kv.get(
+            "COOLING_WAREHOUSE_ADDRESS", "מבוא הספנים 6 אשדוד"
+        ),
+        "COOLING_WAREHOUSE_COORDS": (
+            float(raw_kv.get("COOLING_WAREHOUSE_LAT", "31.8322") or 31.8322),
+            float(raw_kv.get("COOLING_WAREHOUSE_LON", "34.6482") or 34.6482),
+        ),
+        "HAZMAT_WAREHOUSE_NAME": raw_kv.get(
+            "HAZMAT_WAREHOUSE_NAME", 'מחסן חומ"ס'
+        ),
+        "HAZMAT_WAREHOUSE_ADDRESS": raw_kv.get(
+            "HAZMAT_WAREHOUSE_ADDRESS", "פארק נמלי ישראל, אשדוד"
+        ),
+        "HAZMAT_WAREHOUSE_COORDS": (
+            float(raw_kv.get("HAZMAT_WAREHOUSE_LAT", "31.8245") or 31.8245),
+            float(raw_kv.get("HAZMAT_WAREHOUSE_LON", "34.6610") or 34.6610),
+        ),
+        "GOLDBOND_WAREHOUSE_NAME": raw_kv.get(
+            "GOLDBOND_WAREHOUSE_NAME", "גולד בונד"
+        ),
+        "GOLDBOND_WAREHOUSE_ADDRESS": raw_kv.get(
+            "GOLDBOND_WAREHOUSE_ADDRESS", "הקידמה 1 אשדוד"
+        ),
+        "GOLDBOND_WAREHOUSE_COORDS": (
+            float(raw_kv.get("GOLDBOND_WAREHOUSE_LAT", "31.8210") or 31.8210),
+            float(raw_kv.get("GOLDBOND_WAREHOUSE_LON", "34.6595") or 34.6595),
+        ),
+        "OSRM_TRUCK_SPEED_FACTOR": float(
+            raw_kv.get("OSRM_TRUCK_SPEED_FACTOR", "1.20") or 1.20
+        ),
+        "ENABLE_NORTH_SHARON_MERGE": parse_bool(
+            raw_kv.get("ENABLE_NORTH_SHARON_MERGE", "true"), True
+        ),
+        "USE_EXTERNAL_ROUTING_API": parse_bool(
+            raw_kv.get("USE_EXTERNAL_ROUTING_API", "true"), True
+        ),
+        "PREFER_SITE_NAME_CITY": parse_bool(
+            raw_kv.get("PREFER_SITE_NAME_CITY", "false"), False
+        ),
+        "AUTO_OPEN_OUTPUT_FOLDER": parse_bool(
+            raw_kv.get("AUTO_OPEN_OUTPUT_FOLDER", "true"), True
+        ),
+        "GOOGLE_MAPS_API_KEY": raw_kv.get("GOOGLE_MAPS_API_KEY", "").strip(),
+        "EXTRA_COOLING_SKUS": raw_kv.get("EXTRA_COOLING_SKUS", ""),
+        "EXTRA_HAZMAT_SKUS": raw_kv.get("EXTRA_HAZMAT_SKUS", ""),
+        "EXTRA_GOLDBOND_SKUS": raw_kv.get("EXTRA_GOLDBOND_SKUS", ""),
+    }
+
+
+# ==============================================================================
+# 1. תיקון אוטומטי של קבצי אקסל ממערכות ERP וטעינת מק"טים מ-4 המחסנים
+# ==============================================================================
+def load_workbook_safe(excel_path: str | pathlib.Path) -> openpyxl.Workbook:
+    excel_path = pathlib.Path(excel_path)
+    try:
+        return openpyxl.load_workbook(excel_path)
+    except TypeError:
+        bio = io.BytesIO()
+        with zipfile.ZipFile(excel_path, "r") as zin, zipfile.ZipFile(
+            bio, "w"
+        ) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == "xl/styles.xml":
+                    text = data.decode("utf-8")
+                    text = re.sub(
+                        r"<([a-zA-Z0-9_]+:)?fill\s*/>",
+                        lambda m: (
+                            f"<{m.group(1) or ''}fill>"
+                            f'<{m.group(1) or ""}patternFill patternType="none"/>'
+                            f"</{m.group(1) or ''}fill>"
+                        ),
+                        text,
+                    )
+                    data = text.encode("utf-8")
+                zout.writestr(item, data)
+        bio.seek(0)
+        return openpyxl.load_workbook(bio)
+
 
 DEFAULT_COOLING_SKUS: set[str] = {
     "BANKBIOPRO10L25",
@@ -80,35 +335,35 @@ DEFAULT_COOLING_SKUS: set[str] = {
 }
 
 DEFAULT_HAZMAT_SKUS: set[str] = {
+    "250000010",
+    "ADD2230IBC",
+    "ADD642000",
+    "AKCASC2830",
     "BPSA4001",
-    "CCPAGE000",
-    "CCPBE11400",
-    "FUJNH4F40IBC",
-    "KECCMIT0151000",
-    "KECCMIT1425",
-    "KECCMIT15200",
-    "KECCTAC30200",
-    "KECGLUT50220F",
-    "OCIH2O2351100",
-    "OCIH2O235FG1100",
-    "OCIH2O2501150",
-    "PCCRKNGT5950",
-    "POIEPA1234",
-    "POIEPA1356",
-    "POIEPA1534",
-    "POIPC11000",
-    "ROTFORIBC",
-    "SEMSMK6001",
-    "SQM100125",
-    "UNIV5005",
-    "UNIV5005G",
-    "UNIVH20235TECH",
-    "UNIVHCLTE30",
-    "UNIVNIACC",
-    "UNIVNIACD",
-    "UNIVPHOSA85DR",
-    "UNIVPOHYDTEDR",
-    "VTRAAFG0030",
+    "BPSA4002",
+    "CHACAB3800",
+    "CHACAB5510",
+    "CSPCAR9500",
+    "DIAC10325",
+    "DOWDPMA210",
+    "DOWka50000",
+    "DOWROC2900",
+    "DOWSIL8040",
+    "ECOCAS2500",
+    "ECOCAS8000",
+    "EVOTEGbetain",
+    "gerform000",
+    "huasod0000",
+    "KADAC6100IBC",
+    "KADAC6244",
+    "KADAC6344IBC",
+    "KADAMC16220",
+    "KADets000",
+    "KADKemira0",
+    "luxkem0000",
+    "nourform01",
+    "shasol0000",
+    "WeylCareATBS",
 }
 
 DEFAULT_GOLDBOND_SKUS: set[str] = {
@@ -119,549 +374,133 @@ DEFAULT_GOLDBOND_SKUS: set[str] = {
     "INFSHEBUO25",
 }
 
-EXTRA_COOLING_SKUS: set[str] = set()
-EXTRA_HAZMAT_SKUS: set[str] = set()
-EXTRA_GOLDBOND_SKUS: set[str] = set()
 
-# ==============================================================================
-# 1. טעינה ויצירה אוטומטית של קובץ הפרמטרים הדינמיים ב-input_files
-# ==============================================================================
-DEFAULT_CONFIG_TEMPLATE = """# ==============================================================================
-# קובץ הגדרות ופרמטרים דינמיים - מערכת מיון הזמנות ורשימות ליקוט (דורמקו)
-# יש לשמור קובץ זה בתוך תיקיית input_files בשם: config_parameters.txt
-# ==============================================================================
-
-# --- 1. נתיבי תיקיות ושמות קבצים ---
-BASE_DIR = C:\\Users\\itaik\\OneDrive\\מסמכים\\dormeco-sorting-script
-INPUT_FILE_NAME = list.xlsx
-COOLING_FILE_NAME = Cooling_products.pdf
-HAZMAT_FILE_NAME = dangerous_products.xlsx
-GOLDBOND_FILE_NAME = Gold_bond.xlsx
-
-# --- 2. זמני העמסה בכל מחסן בנפרד וזמן פריקה אצל לקוחות (בדקות) ---
-MAIN_WAREHOUSE_LOAD_MINUTES = 60
-COOLING_WAREHOUSE_LOAD_MINUTES = 30
-HAZMAT_WAREHOUSE_LOAD_MINUTES = 30
-GOLDBOND_WAREHOUSE_LOAD_MINUTES = 30
-UNLOAD_MINUTES = 30
-ALWAYS_LOAD_AT_MAIN_WAREHOUSE = true
-
-# --- 3. מגבלות משאית ונהג (חריגה תגרום לפיצול אוטומטי ל-2 נהגים) ---
-MAX_TRUCK_WEIGHT_KG = 7500
-MAX_DRIVER_SHIFT_HOURS = 12.0
-
-# --- 4. שעת יציאה ומיקום הבית של הנהגים ---
-DRIVER_HOME_NAME = בית
-DRIVER_HOME_LAT = 32.3215
-DRIVER_HOME_LON = 34.8532
-DRIVER_DEPARTURE_TIME = 05:30
-
-# --- 5. כתובות וקואורדינטות של 4 המחסנים באשדוד ---
-MAIN_WAREHOUSE_ADDRESS = מבוא הספנים 1 אשדוד
-MAIN_WAREHOUSE_LAT = 31.8315
-MAIN_WAREHOUSE_LON = 34.6465
-
-COOLING_WAREHOUSE_ADDRESS = מבוא הספנים 6 אשדוד
-COOLING_WAREHOUSE_LAT = 31.8322
-COOLING_WAREHOUSE_LON = 34.6482
-
-HAZMAT_WAREHOUSE_ADDRESS = פארק נמלי ישראל, אשדוד
-HAZMAT_WAREHOUSE_LAT = 31.8245
-HAZMAT_WAREHOUSE_LON = 34.6610
-
-GOLDBOND_WAREHOUSE_ADDRESS = הקידמה 1 אשדוד
-GOLDBOND_WAREHOUSE_LAT = 31.8210
-GOLDBOND_WAREHOUSE_LON = 34.6595
-
-# --- 6. פרמטרים לחישוב כבישים ואופטימיזציית מסלולים ---
-OSRM_TRUCK_SPEED_FACTOR = 1.20
-ENABLE_NORTH_SHARON_MERGE = true
-USE_EXTERNAL_ROUTING_API = true
-PREFER_SITE_NAME_CITY = false
-AUTO_OPEN_OUTPUT_FOLDER = true
-GOOGLE_MAPS_API_KEY = 
-
-# --- 7. הוספת מק"טים ידנית לקירור, חומ"ס או גולד בונד (אופציונלי, מופרדים בפסיק) ---
-EXTRA_COOLING_SKUS = 
-EXTRA_HAZMAT_SKUS = 
-EXTRA_GOLDBOND_SKUS = 
-"""
-
-
-def parse_bool(val_str: str, default: bool = False) -> bool:
-    v = val_str.strip().lower()
-    if v in ("1", "true", "yes", "y", "כן", "אמת", "on"):
-        return True
-    if v in ("0", "false", "no", "n", "לא", "שקר", "off"):
-        return False
-    return default
-
-
-def parse_time_to_minutes(time_str: str, default_minutes: float = 330.0) -> float:
-    m = re.match(r"^(\d{1,2}):(\d{2})$", time_str.strip())
-    if m:
-        return float(int(m.group(1)) * 60 + int(m.group(2)))
-    return default_minutes
-
-
-def load_dynamic_config(custom_config_path: str | pathlib.Path | None = None) -> pathlib.Path | None:
-    global BASE_DIR, INPUT_FOLDER, OUTPUT_FOLDER
-    global INPUT_FILE_NAME, COOLING_FILE_NAME, HAZMAT_FILE_NAME, GOLDBOND_FILE_NAME
-    global MAIN_WAREHOUSE_LOAD_MINUTES, COOLING_WAREHOUSE_LOAD_MINUTES
-    global HAZMAT_WAREHOUSE_LOAD_MINUTES, GOLDBOND_WAREHOUSE_LOAD_MINUTES
-    global UNLOAD_MINUTES, ALWAYS_LOAD_AT_MAIN_WAREHOUSE
-    global MAX_TRUCK_WEIGHT_KG, MAX_DRIVER_SHIFT_HOURS
-    global DRIVER_HOME_NAME, DRIVER_HOME_COORDS, DRIVER_DEPARTURE_TIME_STR, DRIVER_START_MINUTES
-    global MAIN_WAREHOUSE_ADDRESS, MAIN_WAREHOUSE_COORDS
-    global COOLING_WAREHOUSE_ADDRESS, COOLING_WAREHOUSE_COORDS
-    global HAZMAT_WAREHOUSE_ADDRESS, HAZMAT_WAREHOUSE_COORDS
-    global GOLDBOND_WAREHOUSE_ADDRESS, GOLDBOND_WAREHOUSE_COORDS
-    global OSRM_TRUCK_SPEED_FACTOR, ENABLE_NORTH_SHARON_MERGE
-    global USE_EXTERNAL_ROUTING_API, PREFER_SITE_NAME_CITY, AUTO_OPEN_OUTPUT_FOLDER
-    global EXTRA_COOLING_SKUS, EXTRA_HAZMAT_SKUS, EXTRA_GOLDBOND_SKUS
-
-    candidates: list[pathlib.Path] = []
-    if custom_config_path:
-        candidates.append(pathlib.Path(custom_config_path))
-    candidates.append(pathlib.Path(INPUT_FOLDER) / CONFIG_FILE_NAME)
-    candidates.append(pathlib.Path(BASE_DIR) / CONFIG_FILE_NAME)
-    candidates.append(pathlib.Path(__file__).resolve().parent / "input_files" / CONFIG_FILE_NAME)
-    candidates.append(pathlib.Path(__file__).resolve().parent / CONFIG_FILE_NAME)
-
-    cfg_path: pathlib.Path | None = None
-    for cand in candidates:
-        if cand.exists() and cand.is_file():
-            cfg_path = cand
-            break
-
-    if cfg_path is None:
-        target_dir = pathlib.Path(INPUT_FOLDER)
-        try:
-            target_dir.mkdir(parents=True, exist_ok=True)
-            cfg_path = target_dir / CONFIG_FILE_NAME
-            cfg_path.write_text(DEFAULT_CONFIG_TEMPLATE, encoding="utf-8-sig")
-        except Exception:
-            return None
-
-    try:
-        raw_text = cfg_path.read_text(encoding="utf-8-sig")
-    except Exception:
-        try:
-            raw_text = cfg_path.read_text(encoding="utf-8")
-        except Exception:
-            return cfg_path
-
-    kv: dict[str, str] = {}
-    for line in raw_text.splitlines():
-        line_s = line.strip()
-        if not line_s or line_s.startswith("#") or line_s.startswith(";"):
-            continue
-        if "=" in line_s:
-            k, v = line_s.split("=", 1)
-            kv[k.strip().upper()] = v.strip().strip('"').strip("'")
-
-    if "BASE_DIR" in kv and kv["BASE_DIR"]:
-        BASE_DIR = kv["BASE_DIR"].rstrip("\\/")
-        INPUT_FOLDER = BASE_DIR + r"\input_files"
-        OUTPUT_FOLDER = BASE_DIR + r"\output_files"
-
-    if "INPUT_FILE_NAME" in kv and kv["INPUT_FILE_NAME"]:
-        INPUT_FILE_NAME = kv["INPUT_FILE_NAME"]
-    if "COOLING_FILE_NAME" in kv and kv["COOLING_FILE_NAME"]:
-        COOLING_FILE_NAME = kv["COOLING_FILE_NAME"]
-    if "HAZMAT_FILE_NAME" in kv and kv["HAZMAT_FILE_NAME"]:
-        HAZMAT_FILE_NAME = kv["HAZMAT_FILE_NAME"]
-    if "GOLDBOND_FILE_NAME" in kv and kv["GOLDBOND_FILE_NAME"]:
-        GOLDBOND_FILE_NAME = kv["GOLDBOND_FILE_NAME"]
-
-    if "MAIN_WAREHOUSE_LOAD_MINUTES" in kv and kv["MAIN_WAREHOUSE_LOAD_MINUTES"]:
-        try:
-            MAIN_WAREHOUSE_LOAD_MINUTES = float(kv["MAIN_WAREHOUSE_LOAD_MINUTES"])
-        except ValueError:
-            pass
-    if "COOLING_WAREHOUSE_LOAD_MINUTES" in kv and kv["COOLING_WAREHOUSE_LOAD_MINUTES"]:
-        try:
-            COOLING_WAREHOUSE_LOAD_MINUTES = float(kv["COOLING_WAREHOUSE_LOAD_MINUTES"])
-        except ValueError:
-            pass
-    if "HAZMAT_WAREHOUSE_LOAD_MINUTES" in kv and kv["HAZMAT_WAREHOUSE_LOAD_MINUTES"]:
-        try:
-            HAZMAT_WAREHOUSE_LOAD_MINUTES = float(kv["HAZMAT_WAREHOUSE_LOAD_MINUTES"])
-        except ValueError:
-            pass
-    if "GOLDBOND_WAREHOUSE_LOAD_MINUTES" in kv and kv["GOLDBOND_WAREHOUSE_LOAD_MINUTES"]:
-        try:
-            GOLDBOND_WAREHOUSE_LOAD_MINUTES = float(kv["GOLDBOND_WAREHOUSE_LOAD_MINUTES"])
-        except ValueError:
-            pass
-    if "UNLOAD_MINUTES" in kv and kv["UNLOAD_MINUTES"]:
-        try:
-            UNLOAD_MINUTES = float(kv["UNLOAD_MINUTES"])
-        except ValueError:
-            pass
-    if "ALWAYS_LOAD_AT_MAIN_WAREHOUSE" in kv:
-        ALWAYS_LOAD_AT_MAIN_WAREHOUSE = parse_bool(
-            kv["ALWAYS_LOAD_AT_MAIN_WAREHOUSE"], ALWAYS_LOAD_AT_MAIN_WAREHOUSE
-        )
-
-    if "MAX_TRUCK_WEIGHT_KG" in kv and kv["MAX_TRUCK_WEIGHT_KG"]:
-        try:
-            MAX_TRUCK_WEIGHT_KG = float(kv["MAX_TRUCK_WEIGHT_KG"])
-        except ValueError:
-            pass
-    if "MAX_DRIVER_SHIFT_HOURS" in kv and kv["MAX_DRIVER_SHIFT_HOURS"]:
-        try:
-            MAX_DRIVER_SHIFT_HOURS = float(kv["MAX_DRIVER_SHIFT_HOURS"])
-        except ValueError:
-            pass
-
-    if "DRIVER_HOME_NAME" in kv and kv["DRIVER_HOME_NAME"]:
-        DRIVER_HOME_NAME = kv["DRIVER_HOME_NAME"]
-    home_lat, home_lon = DRIVER_HOME_COORDS
-    if "DRIVER_HOME_LAT" in kv and kv["DRIVER_HOME_LAT"]:
-        try:
-            home_lat = float(kv["DRIVER_HOME_LAT"])
-        except ValueError:
-            pass
-    if "DRIVER_HOME_LON" in kv and kv["DRIVER_HOME_LON"]:
-        try:
-            home_lon = float(kv["DRIVER_HOME_LON"])
-        except ValueError:
-            pass
-    DRIVER_HOME_COORDS = (home_lat, home_lon)
-
-    if "DRIVER_DEPARTURE_TIME" in kv and kv["DRIVER_DEPARTURE_TIME"]:
-        DRIVER_DEPARTURE_TIME_STR = kv["DRIVER_DEPARTURE_TIME"]
-        DRIVER_START_MINUTES = parse_time_to_minutes(
-            DRIVER_DEPARTURE_TIME_STR, DRIVER_START_MINUTES
-        )
-
-    if "MAIN_WAREHOUSE_ADDRESS" in kv and kv["MAIN_WAREHOUSE_ADDRESS"]:
-        MAIN_WAREHOUSE_ADDRESS = kv["MAIN_WAREHOUSE_ADDRESS"]
-    m_lat, m_lon = MAIN_WAREHOUSE_COORDS
-    if "MAIN_WAREHOUSE_LAT" in kv and kv["MAIN_WAREHOUSE_LAT"]:
-        try:
-            m_lat = float(kv["MAIN_WAREHOUSE_LAT"])
-        except ValueError:
-            pass
-    if "MAIN_WAREHOUSE_LON" in kv and kv["MAIN_WAREHOUSE_LON"]:
-        try:
-            m_lon = float(kv["MAIN_WAREHOUSE_LON"])
-        except ValueError:
-            pass
-    MAIN_WAREHOUSE_COORDS = (m_lat, m_lon)
-
-    if "COOLING_WAREHOUSE_ADDRESS" in kv and kv["COOLING_WAREHOUSE_ADDRESS"]:
-        COOLING_WAREHOUSE_ADDRESS = kv["COOLING_WAREHOUSE_ADDRESS"]
-    c_lat, c_lon = COOLING_WAREHOUSE_COORDS
-    if "COOLING_WAREHOUSE_LAT" in kv and kv["COOLING_WAREHOUSE_LAT"]:
-        try:
-            c_lat = float(kv["COOLING_WAREHOUSE_LAT"])
-        except ValueError:
-            pass
-    if "COOLING_WAREHOUSE_LON" in kv and kv["COOLING_WAREHOUSE_LON"]:
-        try:
-            c_lon = float(kv["COOLING_WAREHOUSE_LON"])
-        except ValueError:
-            pass
-    COOLING_WAREHOUSE_COORDS = (c_lat, c_lon)
-
-    if "HAZMAT_WAREHOUSE_ADDRESS" in kv and kv["HAZMAT_WAREHOUSE_ADDRESS"]:
-        HAZMAT_WAREHOUSE_ADDRESS = kv["HAZMAT_WAREHOUSE_ADDRESS"]
-    h_lat, h_lon = HAZMAT_WAREHOUSE_COORDS
-    if "HAZMAT_WAREHOUSE_LAT" in kv and kv["HAZMAT_WAREHOUSE_LAT"]:
-        try:
-            h_lat = float(kv["HAZMAT_WAREHOUSE_LAT"])
-        except ValueError:
-            pass
-    if "HAZMAT_WAREHOUSE_LON" in kv and kv["HAZMAT_WAREHOUSE_LON"]:
-        try:
-            h_lon = float(kv["HAZMAT_WAREHOUSE_LON"])
-        except ValueError:
-            pass
-    HAZMAT_WAREHOUSE_COORDS = (h_lat, h_lon)
-
-    if "GOLDBOND_WAREHOUSE_ADDRESS" in kv and kv["GOLDBOND_WAREHOUSE_ADDRESS"]:
-        GOLDBOND_WAREHOUSE_ADDRESS = kv["GOLDBOND_WAREHOUSE_ADDRESS"]
-    g_lat, g_lon = GOLDBOND_WAREHOUSE_COORDS
-    if "GOLDBOND_WAREHOUSE_LAT" in kv and kv["GOLDBOND_WAREHOUSE_LAT"]:
-        try:
-            g_lat = float(kv["GOLDBOND_WAREHOUSE_LAT"])
-        except ValueError:
-            pass
-    if "GOLDBOND_WAREHOUSE_LON" in kv and kv["GOLDBOND_WAREHOUSE_LON"]:
-        try:
-            g_lon = float(kv["GOLDBOND_WAREHOUSE_LON"])
-        except ValueError:
-            pass
-    GOLDBOND_WAREHOUSE_COORDS = (g_lat, g_lon)
-
-    if "OSRM_TRUCK_SPEED_FACTOR" in kv and kv["OSRM_TRUCK_SPEED_FACTOR"]:
-        try:
-            OSRM_TRUCK_SPEED_FACTOR = float(kv["OSRM_TRUCK_SPEED_FACTOR"])
-        except ValueError:
-            pass
-    if "ENABLE_NORTH_SHARON_MERGE" in kv:
-        ENABLE_NORTH_SHARON_MERGE = parse_bool(
-            kv["ENABLE_NORTH_SHARON_MERGE"], ENABLE_NORTH_SHARON_MERGE
-        )
-    if "USE_EXTERNAL_ROUTING_API" in kv:
-        USE_EXTERNAL_ROUTING_API = parse_bool(
-            kv["USE_EXTERNAL_ROUTING_API"], USE_EXTERNAL_ROUTING_API
-        )
-    if "PREFER_SITE_NAME_CITY" in kv:
-        PREFER_SITE_NAME_CITY = parse_bool(
-            kv["PREFER_SITE_NAME_CITY"], PREFER_SITE_NAME_CITY
-        )
-    if "AUTO_OPEN_OUTPUT_FOLDER" in kv:
-        AUTO_OPEN_OUTPUT_FOLDER = parse_bool(
-            kv["AUTO_OPEN_OUTPUT_FOLDER"], AUTO_OPEN_OUTPUT_FOLDER
-        )
-    if "GOOGLE_MAPS_API_KEY" in kv and kv["GOOGLE_MAPS_API_KEY"]:
-        os.environ["GOOGLE_MAPS_API_KEY"] = kv["GOOGLE_MAPS_API_KEY"]
-
-    if "EXTRA_COOLING_SKUS" in kv and kv["EXTRA_COOLING_SKUS"]:
-        EXTRA_COOLING_SKUS = {
-            s.strip().upper()
-            for s in kv["EXTRA_COOLING_SKUS"].split(",")
-            if s.strip()
-        }
-    if "EXTRA_HAZMAT_SKUS" in kv and kv["EXTRA_HAZMAT_SKUS"]:
-        EXTRA_HAZMAT_SKUS = {
-            s.strip().upper()
-            for s in kv["EXTRA_HAZMAT_SKUS"].split(",")
-            if s.strip()
-        }
-    if "EXTRA_GOLDBOND_SKUS" in kv and kv["EXTRA_GOLDBOND_SKUS"]:
-        EXTRA_GOLDBOND_SKUS = {
-            s.strip().upper()
-            for s in kv["EXTRA_GOLDBOND_SKUS"].split(",")
-            if s.strip()
-        }
-
-    return cfg_path
-
-
-# ==============================================================================
-# 2. קריאה אוטומטית של קבצי המחסנים (קירור, חומ"ס, גולד בונד)
-# ==============================================================================
-def clean_sku_token(val: Any) -> str:
-    if val is None:
+def clean_sku_token(raw_val: Any) -> str:
+    if raw_val is None:
         return ""
-    s = str(val).strip()
+    s = str(raw_val).strip()
     s = re.sub(r'^="?|"?$', "", s).strip()
     return s.upper()
 
 
-def load_workbook_safe(excel_path: str | pathlib.Path) -> openpyxl.Workbook:
-    excel_path = pathlib.Path(excel_path)
-    try:
-        return openpyxl.load_workbook(excel_path, data_only=True)
-    except TypeError:
-        bio = io.BytesIO()
-        with zipfile.ZipFile(excel_path, "r") as zin, zipfile.ZipFile(bio, "w") as zout:
-            for item in zin.infolist():
-                data = zin.read(item.filename)
-                if item.filename == "xl/styles.xml":
-                    text = data.decode("utf-8")
-                    text = re.sub(
-                        r"<([a-zA-Z0-9_]+:)?fill\s*/>",
-                        lambda m: (
-                            f"<{m.group(1) or ''}fill>"
-                            f"<{m.group(1) or ''}patternFill patternType=\"none\"/>"
-                            f"</{m.group(1) or ''}fill>"
-                        ),
-                        text,
-                    )
-                    data = text.encode("utf-8")
-                zout.writestr(item, data)
-        bio.seek(0)
-        return openpyxl.load_workbook(bio, data_only=True)
-
-
-def extract_skus_from_excel_file(xlsx_path: pathlib.Path) -> set[str]:
-    skus: set[str] = set()
+def load_skus_from_excel(xlsx_path: pathlib.Path) -> set[str]:
+    found: set[str] = set()
+    if not xlsx_path.exists():
+        return found
     try:
         wb = load_workbook_safe(xlsx_path)
-    except Exception:
-        return skus
-
-    header_keywords = {"פריט", 'מק"ט', "מק'ט", "מקט", "SKU", "ITEM", "PART", "קוד פריט"}
-    ignored_words = header_keywords | {"סה\"כ", "סהכ", "TOTAL", "GOODS", "מחסן", "איתור", "שם המחסן"}
-
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        sku_col_idx: int | None = None
-        start_row = 2
-
-        for r in range(1, min(12, ws.max_row + 1)):
-            for c in range(1, min(15, ws.max_column + 1)):
-                cell_val = clean_sku_token(ws.cell(r, c).value)
-                if cell_val in header_keywords:
-                    sku_col_idx = c
-                    start_row = r + 1
-                    break
-            if sku_col_idx is not None:
-                break
-
-        if sku_col_idx is not None:
-            for r in range(start_row, ws.max_row + 1):
-                v = clean_sku_token(ws.cell(r, sku_col_idx).value)
-                if (
-                    v
-                    and v not in ignored_words
-                    and re.match(r"^[A-Z0-9][A-Z0-9_.-]{3,}$", v)
-                    and not v.isdigit()
-                ):
-                    skus.add(v)
-        else:
+        for ws in wb.worksheets:
+            sku_col_idx = 1
+            for r in range(1, min(10, ws.max_row + 1)):
+                row_vals = [
+                    str(ws.cell(r, c).value or "").strip()
+                    for c in range(1, ws.max_column + 1)
+                ]
+                for c_idx, val in enumerate(row_vals, start=1):
+                    if any(
+                        k in val
+                        for k in ("מק\"ט", "מק'ט", "מקט", "SKU", "פריט")
+                    ):
+                        sku_col_idx = c_idx
+                        break
             for r in range(1, ws.max_row + 1):
-                v = clean_sku_token(ws.cell(r, 1).value)
+                token = clean_sku_token(ws.cell(r, sku_col_idx).value)
                 if (
-                    v
-                    and v not in ignored_words
-                    and re.match(r"^[A-Z][A-Z0-9_.-]{4,}$", v)
+                    token
+                    and len(token) >= 4
+                    and re.match(r"^[A-Z0-9\-_]+$", token)
+                    and token not in ("NONE", "NULL")
                 ):
-                    skus.add(v)
+                    found.add(token)
+    except Exception as e:
+        print(f"[!] אזהרה בקריאת קובץ אקסל מחסן ({xlsx_path.name}): {e}")
+    return found
 
-    return skus
 
-
-def extract_skus_from_pdf_file(pdf_path: pathlib.Path) -> set[str]:
-    skus: set[str] = set()
-    pages_text: list[str] = []
-
-    for mod_name in ("pypdf", "PyPDF2"):
+def load_cooling_skus_from_file(file_path: pathlib.Path) -> set[str]:
+    found: set[str] = set()
+    if not file_path.exists():
+        return found
+    suffix = file_path.suffix.lower()
+    if suffix in (".xlsx", ".xlsm"):
+        return load_skus_from_excel(file_path)
+    if suffix == ".pdf" and pypdf is not None:
         try:
-            pdf_mod = __import__(mod_name)
-            reader = pdf_mod.PdfReader(str(pdf_path))
+            reader = pypdf.PdfReader(str(file_path))
             for page in reader.pages:
-                pages_text.append(page.extract_text() or "")
-            break
-        except Exception:
-            continue
-
-    if not pages_text:
+                text = page.extract_text() or ""
+                for line in text.splitlines():
+                    tokens = re.findall(r"\b[A-Z0-9]{6,20}\b", line.upper())
+                    if (
+                        "GOODS" in line.upper()
+                        or re.search(r"\d{2}/\d{2}/\d{4}", line)
+                    ) and tokens:
+                        for t in tokens:
+                            if not t.isdigit():
+                                found.add(t)
+        except Exception as e:
+            print(f"[!] אזהרה בקריאת PDF קירור ({file_path.name}): {e}")
+    elif suffix in (".txt", ".csv"):
         try:
-            import pdfplumber  # type: ignore
-
-            with pdfplumber.open(str(pdf_path)) as pdf:
-                for page in pdf.pages:
-                    pages_text.append(page.extract_text() or "")
+            for token in re.findall(
+                r"\b[A-Z0-9]{5,20}\b",
+                file_path.read_text(encoding="utf-8", errors="ignore").upper(),
+            ):
+                found.add(token)
         except Exception:
             pass
-
-    ignored_tokens = {
-        "DORMECO",
-        "LTD",
-        "GOODS",
-        "DAN",
-        "HTTP",
-        "HTTPS",
-        "NETFILES",
-        "PRI",
-        "HTM",
-    }
-
-    for text in pages_text:
-        for line in text.splitlines():
-            line_s = line.strip()
-            if not line_s or "http://" in line_s.lower() or "https://" in line_s.lower():
-                continue
-
-            if "Goods" in line_s or re.search(r"\b\d{2}/\d{2}/\d{4}\b", line_s):
-                tokens = re.findall(r"\b[A-Z][A-Z0-9_-]{4,}\b", line_s)
-                valid_tokens = [
-                    t.upper() for t in tokens if t.upper() not in ignored_tokens
-                ]
-                if valid_tokens:
-                    skus.add(valid_tokens[-1])
-
-    return skus
+    return found
 
 
-def load_warehouse_catalogs(
-    input_folder: str | pathlib.Path,
+def load_warehouse_sku_sets(
+    cfg: dict[str, Any],
 ) -> tuple[set[str], set[str], set[str]]:
-    in_dir = pathlib.Path(input_folder)
-    cooling_skus: set[str] = set(EXTRA_COOLING_SKUS)
-    hazmat_skus: set[str] = set(EXTRA_HAZMAT_SKUS)
-    goldbond_skus: set[str] = set(EXTRA_GOLDBOND_SKUS)
+    cooling_skus = {s.upper() for s in DEFAULT_COOLING_SKUS}
+    hazmat_skus = {s.upper() for s in DEFAULT_HAZMAT_SKUS}
+    goldbond_skus = {s.upper() for s in DEFAULT_GOLDBOND_SKUS}
 
-    if not in_dir.exists() or not in_dir.is_dir():
-        return (
-            cooling_skus | DEFAULT_COOLING_SKUS,
-            hazmat_skus | DEFAULT_HAZMAT_SKUS,
-            goldbond_skus | DEFAULT_GOLDBOND_SKUS,
-        )
+    in_dir: pathlib.Path = cfg["INPUT_DIR_PATH"]
+    script_dir = pathlib.Path(__file__).resolve().parent
 
-    cooling_candidates: list[pathlib.Path] = []
-    exact_cooling = in_dir / COOLING_FILE_NAME
-    if exact_cooling.exists():
-        cooling_candidates.append(exact_cooling)
-    for f in in_dir.iterdir():
-        if f.is_file() and f not in cooling_candidates:
-            name_low = f.name.lower()
-            if "cooling" in name_low or "קירור" in name_low:
-                cooling_candidates.append(f)
+    for folder in (in_dir, script_dir):
+        c_file = folder / cfg["COOLING_FILE_NAME"]
+        if c_file.exists():
+            loaded_c = load_cooling_skus_from_file(c_file)
+            if loaded_c:
+                cooling_skus.update(loaded_c)
 
-    loaded_cooling: set[str] = set()
-    for c_file in cooling_candidates:
-        suf = c_file.suffix.lower()
-        if suf == ".pdf":
-            loaded_cooling |= extract_skus_from_pdf_file(c_file)
-        elif suf in (".xlsx", ".xlsm"):
-            loaded_cooling |= extract_skus_from_excel_file(c_file)
-    cooling_skus |= loaded_cooling if loaded_cooling else DEFAULT_COOLING_SKUS
+        h_file = folder / cfg["HAZMAT_FILE_NAME"]
+        if h_file.exists():
+            loaded_h = load_skus_from_excel(h_file)
+            if loaded_h:
+                hazmat_skus.update(loaded_h)
 
-    hazmat_candidates: list[pathlib.Path] = []
-    exact_hazmat = in_dir / HAZMAT_FILE_NAME
-    if exact_hazmat.exists():
-        hazmat_candidates.append(exact_hazmat)
-    for f in in_dir.iterdir():
-        if f.is_file() and f not in hazmat_candidates:
-            name_low = f.name.lower()
-            if (
-                "dangerous" in name_low
-                or "hazmat" in name_low
-                or "חומס" in name_low
-                or 'חומ"ס' in name_low
-            ):
-                hazmat_candidates.append(f)
+        g_file = folder / cfg["GOLDBOND_FILE_NAME"]
+        if g_file.exists():
+            loaded_g = load_skus_from_excel(g_file)
+            if loaded_g:
+                goldbond_skus.update(loaded_g)
 
-    loaded_hazmat: set[str] = set()
-    for h_file in hazmat_candidates:
-        suf = h_file.suffix.lower()
-        if suf in (".xlsx", ".xlsm"):
-            loaded_hazmat |= extract_skus_from_excel_file(h_file)
-        elif suf == ".pdf":
-            loaded_hazmat |= extract_skus_from_pdf_file(h_file)
-    hazmat_skus |= loaded_hazmat if loaded_hazmat else DEFAULT_HAZMAT_SKUS
+    for extra_c in str(cfg.get("EXTRA_COOLING_SKUS", "")).split(","):
+        tok = clean_sku_token(extra_c)
+        if tok:
+            cooling_skus.add(tok)
 
-    goldbond_candidates: list[pathlib.Path] = []
-    exact_goldbond = in_dir / GOLDBOND_FILE_NAME
-    if exact_goldbond.exists():
-        goldbond_candidates.append(exact_goldbond)
-    for f in in_dir.iterdir():
-        if f.is_file() and f not in goldbond_candidates:
-            name_low = f.name.lower()
-            if "gold" in name_low or "bond" in name_low or "גולד" in name_low:
-                goldbond_candidates.append(f)
+    for extra_h in str(cfg.get("EXTRA_HAZMAT_SKUS", "")).split(","):
+        tok = clean_sku_token(extra_h)
+        if tok:
+            hazmat_skus.add(tok)
 
-    loaded_goldbond: set[str] = set()
-    for g_file in goldbond_candidates:
-        suf = g_file.suffix.lower()
-        if suf in (".xlsx", ".xlsm"):
-            loaded_goldbond |= extract_skus_from_excel_file(g_file)
-        elif suf == ".pdf":
-            loaded_goldbond |= extract_skus_from_pdf_file(g_file)
-    goldbond_skus |= loaded_goldbond if loaded_goldbond else DEFAULT_GOLDBOND_SKUS
+    for extra_g in str(cfg.get("EXTRA_GOLDBOND_SKUS", "")).split(","):
+        tok = clean_sku_token(extra_g)
+        if tok:
+            goldbond_skus.add(tok)
 
     return cooling_skus, hazmat_skus, goldbond_skus
 
 
 # ==============================================================================
-# 3. הגדרת סדר אזורי החלוקה ומילון יישובים
+# 2. מילון יישובים, קיבוצים, מושבים ואזורי תעשייה מורחב (415+ יישובים בישראל)
 # ==============================================================================
 REGION_ORDER: list[str] = [
     "צפון מזרח",
@@ -671,223 +510,443 @@ REGION_ORDER: list[str] = [
     "איזור גוש דן",
     "דרום הארץ",
 ]
-
 REGION_RANK: dict[str, int] = {name: idx for idx, name in enumerate(REGION_ORDER)}
-CACHE_FILE = pathlib.Path("geocoding_cache.json")
+CACHE_FILE = pathlib.Path("geocoding_cache_v2.json")
 
 KNOWN_LOCALITIES: dict[str, tuple[str, float, float]] = {
-    # --- 1. צפון מזרח ---
-    "קריית שמונה": ("צפון מזרח", 33.2073, 35.5702),
-    "קרית שמונה": ("צפון מזרח", 33.2073, 35.5702),
-    "צפת": ("צפון מזרח", 32.9646, 35.4960),
-    "טבריה": ("צפון מזרח", 32.7922, 35.5312),
-    "עפולה": ("צפון מזרח", 32.6078, 35.2897),
-    "בית שאן": ("צפון מזרח", 32.4971, 35.4974),
-    "נצרת": ("צפון מזרח", 32.6996, 35.3035),
-    "נוף הגליל": ("צפון מזרח", 32.7058, 35.3268),
-    "נצרת עילית": ("צפון מזרח", 32.7058, 35.3268),
-    "מגדל העמק": ("צפון מזרח", 32.6750, 35.2414),
-    "קצרין": ("צפון מזרח", 32.9926, 35.6915),
-    "חצור הגלילית": ("צפון מזרח", 32.9814, 35.5458),
-    "ראש פינה": ("צפון מזרח", 32.9689, 35.5425),
-    "מטולה": ("צפון מזרח", 33.2775, 35.5739),
-    "צמח": ("צפון מזרח", 32.7042, 35.5861),
-    "עמק הירדן": ("צפון מזרח", 32.7042, 35.5861),
-    "עמק המעיינות": ("צפון מזרח", 32.4900, 35.5100),
-    "כפר תבור": ("צפון מזרח", 32.6869, 35.4214),
-    "יבנאל": ("צפון מזרח", 32.7044, 35.5036),
-    "מגדל": ("צפון מזרח", 32.8392, 35.5161),
-    "רמת הגולן": ("צפון מזרח", 32.9926, 35.6915),
-    "גולן": ("צפון מזרח", 32.9926, 35.6915),
-    "אלון תבור": ("צפון מזרח", 32.6414, 35.3536),
-    "ציפורית": ("צפון מזרח", 32.7480, 35.3440),
-    "תל חי": ("צפון מזרח", 33.2356, 35.5769),
-    "קדמת גליל": ("צפון מזרח", 32.7830, 35.4650),
+    # --- 1. צפון מזרח (גליל עליון מזרחי, רמת הגולן, כנרת, עמק יזרעאל מזרח, נצרת, יפיע, עפולה, בית שאן) ---
+    "קריית שמונה": ("צפון מזרח", 33.2073, 35.5702), "קרית שמונה": ("צפון מזרח", 33.2073, 35.5702),
+    "מטולה": ("צפון מזרח", 33.2775, 35.5739), "תל חי": ("צפון מזרח", 33.2356, 35.5769),
+    "כפר גלעדי": ("צפון מזרח", 33.2425, 35.5750), "מעיין ברוך": ("צפון מזרח", 33.2386, 35.6094),
+    "הגושרים": ("צפון מזרח", 33.2219, 35.6231), "דפנה": ("צפון מזרח", 33.2300, 35.6353),
+    "דן": ("צפון מזרח", 33.2403, 35.6528), "שאר ישוב": ("צפון מזרח", 33.2269, 35.6461),
+    "שניר": ("צפון מזרח", 33.2411, 35.6756), "נאות מרדכי": ("צפון מזרח", 33.1592, 35.6083),
+    "כפר בלום": ("צפון מזרח", 33.1714, 35.6122), "עמיר": ("צפון מזרח", 33.1711, 35.6256),
+    "שדה נחמיה": ("צפון מזרח", 33.1897, 35.6228), "כפר סאלד": ("צפון מזרח", 33.1917, 35.6561),
+    "שמיר": ("צפון מזרח", 33.1628, 35.6589), "להבות הבשן": ("צפון מזרח", 33.1408, 35.6494),
+    "גונן": ("צפון מזרח", 33.1197, 35.6469), "גדות": ("צפון מזרח", 33.0169, 35.6214),
+    "משמר הירדן": ("צפון מזרח", 33.0089, 35.5986), "יסוד המעלה": ("צפון מזרח", 33.0561, 35.6056),
+    "חולתה": ("צפון מזרח", 33.0508, 35.6164), "איילת השחר": ("צפון מזרח", 33.0225, 35.5750),
+    "מחניים": ("צפון מזרח", 32.9878, 35.5700), "צחר": ("צפון מזרח", 32.9780, 35.5580),
+    "ראש פינה": ("צפון מזרח", 32.9689, 35.5425), "חצור הגלילית": ("צפון מזרח", 32.9814, 35.5458),
+    "טובא זנגריה": ("צפון מזרח", 32.9681, 35.5925), "כפר הנשיא": ("צפון מזרח", 32.9742, 35.6056),
+    "עמיעד": ("צפון מזרח", 32.9278, 35.5414), "כרי דשא": ("צפון מזרח", 32.8622, 35.5350),
+    "גינוסר": ("צפון מזרח", 32.8475, 35.5236), "מגדל": ("צפון מזרח", 32.8392, 35.5161),
+    "צפת": ("צפון מזרח", 32.9646, 35.4960), "דלתון": ("צפון מזרח", 33.0156, 35.4897),
+    "עלמה": ("צפון מזרח", 33.0528, 35.4981), "ריחאניה": ("צפון מזרח", 33.0469, 35.4856),
+    "יראון": ("צפון מזרח", 33.0772, 35.4547), "ברעם": ("צפון מזרח", 33.0600, 35.4322),
+    "מלכיה": ("צפון מזרח", 33.0992, 35.5119), "רמות נפתלי": ("צפון מזרח", 33.1044, 35.5494),
+    "יפתח": ("צפון מזרח", 33.1258, 35.5528), "מנרה": ("צפון מזרח", 33.1961, 35.5442),
+    "משגב עם": ("צפון מזרח", 33.2481, 35.5494), "מרגליות": ("צפון מזרח", 33.2147, 35.5458),
+    "מירון": ("צפון מזרח", 32.9833, 35.4419), "אור הגנוז": ("צפון מזרח", 32.9992, 35.4425),
+    "בר יוחאי": ("צפון מזרח", 32.9978, 35.4525), "ספסופה": ("צפון מזרח", 33.0119, 35.4397),
+    "גוש חלב": ("צפון מזרח", 33.0239, 35.4469), "ג'יש": ("צפון מזרח", 33.0239, 35.4469),
+    "עמוקה": ("צפון מזרח", 33.0006, 35.5194), "ביריה": ("צפון מזרח", 32.9794, 35.4983),
+    "קדיתא": ("צפון מזרח", 33.0053, 35.4694), "פרוד": ("צפון מזרח", 32.9333, 35.4325),
+    "אמירים": ("צפון מזרח", 32.9378, 35.4517), "שפר": ("צפון מזרח", 32.9428, 35.4422),
+    "כפר שמאי": ("צפון מזרח", 32.9539, 35.4567), "גליל עליון": ("צפון מזרח", 33.1714, 35.6122),
+    "מבואות החרמון": ("צפון מזרח", 33.0700, 35.5800), "מרום הגליל": ("צפון מזרח", 32.9833, 35.4419),
+    "קצרין": ("צפון מזרח", 32.9926, 35.6915), "רמת הגולן": ("צפון מזרח", 32.9926, 35.6915),
+    "גולן": ("צפון מזרח", 32.9926, 35.6915), "מג'דל שמס": ("צפון מזרח", 33.2694, 35.7708),
+    "מסעדה": ("צפון מזרח", 33.2319, 35.7564), "בוקעאתא": ("צפון מזרח", 33.1997, 35.7628),
+    "עין קנייא": ("צפון מזרח", 33.2356, 35.7317), "מרום גולן": ("צפון מזרח", 33.1339, 35.7758),
+    "עין זיוון": ("צפון מזרח", 33.0956, 35.7964), "אורטל": ("צפון מזרח", 33.0819, 35.7606),
+    "אל רום": ("צפון מזרח", 33.1800, 35.7706), "נווה אטיב": ("צפון מזרח", 33.2572, 35.7411),
+    "שעל": ("צפון מזרח", 33.1281, 35.7247), "קלע אלון": ("צפון מזרח", 33.1389, 35.6914),
+    "קדמת צבי": ("צפון מזרח", 33.0211, 35.6956), "יונתן": ("צפון מזרח", 32.9522, 35.7775),
+    "אלוני הבשן": ("צפון מזרח", 33.0442, 35.8358), "קשת": ("צפון מזרח", 32.9822, 35.8094),
+    "אניעם": ("צפון מזרח", 32.9675, 35.7406), "חד נס": ("צפון מזרח", 32.9097, 35.6317),
+    "מעלה גמלא": ("צפון מזרח", 32.8886, 35.6844), "רמות": ("צפון מזרח", 32.8511, 35.6639),
+    "בני יהודה": ("צפון מזרח", 32.7967, 35.6939), "גבעת יואב": ("צפון מזרח", 32.7972, 35.7022),
+    "נאות גולן": ("צפון מזרח", 32.7850, 35.6894), "אפיק": ("צפון מזרח", 32.7781, 35.7042),
+    "כפר חרוב": ("צפון מזרח", 32.7611, 35.6714), "מבוא חמה": ("צפון מזרח", 32.7358, 35.6542),
+    "עין גב": ("צפון מזרח", 32.7853, 35.6406), "האון": ("צפון מזרח", 32.7247, 35.6242),
+    "טבריה": ("צפון מזרח", 32.7922, 35.5312), "קדמת גליל": ("צפון מזרח", 32.7830, 35.4650),
+    "לביא": ("צפון מזרח", 32.7797, 35.4422), "גבעת אבני": ("צפון מזרח", 32.7764, 35.4528),
+    "הודיות": ("צפון מזרח", 32.7667, 35.4556), "ארבל": ("צפון מזרח", 32.8117, 35.4908),
+    "כפר זיתים": ("צפון מזרח", 32.8056, 35.4686), "פוריה": ("צפון מזרח", 32.7422, 35.5428),
+    "אלומות": ("צפון מזרח", 32.7158, 35.5472), "דגניה": ("צפון מזרח", 32.7078, 35.5750),
+    "דגניה א": ("צפון מזרח", 32.7078, 35.5750), "דגניה ב": ("צפון מזרח", 32.6994, 35.5742),
+    "כנרת": ("צפון מזרח", 32.7192, 35.5653), "קבוצת כנרת": ("צפון מזרח", 32.7192, 35.5653),
+    "אפיקים": ("צפון מזרח", 32.6811, 35.5789), "אשדות יעקב": ("צפון מזרח", 32.6606, 35.5828),
+    "אשדות יעקב איחוד": ("צפון מזרח", 32.6606, 35.5828), "אשדות יעקב מאוחד": ("צפון מזרח", 32.6581, 35.5786),
+    "בית זרע": ("צפון מזרח", 32.6908, 35.5719), "שער הגולן": ("צפון מזרח", 32.6869, 35.6022),
+    "מסדה": ("צפון מזרח", 32.6814, 35.5961), "צמח": ("צפון מזרח", 32.7042, 35.5861),
+    "עמק הירדן": ("צפון מזרח", 32.7042, 35.5861), "מנחמיה": ("צפון מזרח", 32.6644, 35.5578),
+    "גשר": ("צפון מזרח", 32.6214, 35.5586), "יבנאל": ("צפון מזרח", 32.7044, 35.5036),
+    "כפר תבור": ("צפון מזרח", 32.6869, 35.4214), "שדמות דבורה": ("צפון מזרח", 32.6917, 35.4461),
+    "כפר כמא": ("צפון מזרח", 32.7219, 35.4414), "אילניה": ("צפון מזרח", 32.7525, 35.4083),
+    "שדה אילן": ("צפון מזרח", 32.7422, 35.4244), "כדורי": ("צפון מזרח", 32.7022, 35.4050),
+    "בית קשת": ("צפון מזרח", 32.7192, 35.3944), "גזית": ("צפון מזרח", 32.6378, 35.4472),
+    "עין דור": ("צפון מזרח", 32.6553, 35.4158), "דברת": ("צפון מזרח", 32.6481, 35.3667),
+    "אחוזת ברק": ("צפון מזרח", 32.6361, 35.3444), "אלון תבור": ("צפון מזרח", 32.6414, 35.3536),
+    "גליל תחתון": ("צפון מזרח", 32.7022, 35.4050),
+    "נצרת": ("צפון מזרח", 32.6996, 35.3035), "נוף הגליל": ("צפון מזרח", 32.7058, 35.3268),
+    "נצרת עילית": ("צפון מזרח", 32.7058, 35.3268), "יפיע": ("צפון מזרח", 32.6867, 35.2764),
+    "מגדל העמק": ("צפון מזרח", 32.6750, 35.2414), "שגיא 2000": ("צפון מזרח", 32.6600, 35.2400),
+    "יפעת": ("צפון מזרח", 32.6689, 35.2256), "גבת": ("צפון מזרח", 32.6736, 35.2119),
+    "שריד": ("צפון מזרח", 32.6656, 35.2244), "מזרע": ("צפון מזרח", 32.6525, 35.2869),
+    "תל עדשים": ("צפון מזרח", 32.6561, 35.3017), "בלפוריה": ("צפון מזרח", 32.6317, 35.2994),
+    "כפר גדעון": ("צפון מזרח", 32.6428, 35.2847), "גניגר": ("צפון מזרח", 32.6636, 35.2572),
+    "ריינה": ("צפון מזרח", 32.7239, 35.3164), "משהד": ("צפון מזרח", 32.7372, 35.3239),
+    "כפר כנא": ("צפון מזרח", 32.7475, 35.3414), "ציפורית": ("צפון מזרח", 32.7480, 35.3440),
+    "עין מאהל": ("צפון מזרח", 32.7178, 35.3497), "דבורייה": ("צפון מזרח", 32.6928, 35.3711),
+    "דבוריה": ("צפון מזרח", 32.6928, 35.3711), "אכסאל": ("צפון מזרח", 32.6819, 35.3264),
+    "איכסל": ("צפון מזרח", 32.6819, 35.3264), "שיבלי": ("צפון מזרח", 32.6956, 35.3900),
+    "עילוט": ("צפון מזרח", 32.7139, 35.2719), "זרזיר": ("צפון מזרח", 32.7289, 35.2139),
+    "כעביה": ("צפון מזרח", 32.7489, 35.1889), "טורעאן": ("צפון מזרח", 32.7758, 35.3728),
+    "בועיינה נוג'ידאת": ("צפון מזרח", 32.8058, 35.3639), "עיילבון": ("צפון מזרח", 32.8369, 35.4008),
+    "עילבון": ("צפון מזרח", 32.8369, 35.4008), "מראר": ("צפון מזרח", 32.8889, 35.4072),
+    "מע'אר": ("צפון מזרח", 32.8889, 35.4072),
+    "עפולה": ("צפון מזרח", 32.6078, 35.2897), "מרחביה": ("צפון מזרח", 32.6047, 35.3086),
+    "עין חרוד": ("צפון מזרח", 32.5600, 35.3917), "עין חרוד איחוד": ("צפון מזרח", 32.5639, 35.3917),
+    "עין חרוד מאוחד": ("צפון מזרח", 32.5592, 35.3911), "תל יוסף": ("צפון מזרח", 32.5558, 35.4017),
+    "גבע": ("צפון מזרח", 32.5661, 35.3694), "כפר יחזקאל": ("צפון מזרח", 32.5686, 35.3578),
+    "בית השיטה": ("צפון מזרח", 32.5517, 35.4375), "חפציבה": ("צפון מזרח", 32.5189, 35.4264),
+    "בית אלפא": ("צפון מזרח", 32.5175, 35.4306), "ניר דוד": ("צפון מזרח", 32.5042, 35.4561),
+    "מסילות": ("צפון מזרח", 32.4981, 35.4767), "רשפים": ("צפון מזרח", 32.4875, 35.4775),
+    "שלוחות": ("צפון מזרח", 32.4733, 35.4836), "עין הנציב": ("צפון מזרח", 32.4706, 35.5008),
+    "שדה אליהו": ("צפון מזרח", 32.4594, 35.5122), "טירת צבי": ("צפון מזרח", 32.4225, 35.5269),
+    "כפר רופין": ("צפון מזרח", 32.4597, 35.5542), "מעוז חיים": ("צפון מזרח", 32.4939, 35.5517),
+    "נווה איתן": ("צפון מזרח", 32.4944, 35.5344), "חמדיה": ("צפון מזרח", 32.5206, 35.5175),
+    "שדה נחום": ("צפון מזרח", 32.5264, 35.4828), "בית שאן": ("צפון מזרח", 32.4971, 35.4974),
+    "עמק המעיינות": ("צפון מזרח", 32.4900, 35.5100), "גלבוע": ("צפון מזרח", 32.5500, 35.3800),
+    "מולדת": ("צפון מזרח", 32.6019, 35.4419), "רמת צבי": ("צפון מזרח", 32.5878, 35.4158),
+    "ניר יפה": ("צפון מזרח", 32.5678, 35.2528), "אומן": ("צפון מזרח", 32.5639, 35.2639),
+    "גן נר": ("צפון מזרח", 32.5319, 35.3375), "תענך": ("צפון מזרח", 32.5550, 35.2550),
 
-    # --- 2. צפון מערב ---
-    "בקה אלגרבייה": ("צפון מערב", 32.4189, 35.0408),
-    "באקה אל-גרבייה": ("צפון מערב", 32.4189, 35.0408),
-    "באקה אל גרביה": ("צפון מערב", 32.4189, 35.0408),
-    "חדרה": ("צפון מערב", 32.4340, 34.9197),
-    "אור עקיבא": ("צפון מערב", 32.5064, 34.9200),
-    "קיסריה": ("צפון מערב", 32.5089, 34.9092),
-    "פרדס חנה": ("צפון מערב", 32.4739, 34.9706),
-    "פרדס חנה כרכור": ("צפון מערב", 32.4739, 34.9706),
-    "בנימינה": ("צפון מערב", 32.5214, 34.9469),
-    "זכרון יעקב": ("צפון מערב", 32.5708, 34.9517),
-    "אום אל פחם": ("צפון מערב", 32.5186, 35.1536),
-    "אום אל-פחם": ("צפון מערב", 32.5186, 35.1536),
-    "יקנעם": ("צפון מערב", 32.6594, 35.1100),
-    "יקנעם עילית": ("צפון מערב", 32.6594, 35.1100),
-    "עתלית": ("צפון מערב", 32.6872, 34.9383),
-    "דלית אל כרמל": ("צפון מערב", 32.6936, 35.0469),
-    "עספיא": ("צפון מערב", 32.7194, 35.0650),
-    "טירת כרמל": ("צפון מערב", 32.7603, 34.9719),
-    "חיפה": ("צפון מערב", 32.7940, 34.9896),
-    "נשר": ("צפון מערב", 32.7708, 35.0394),
-    "מפרץ חיפה": ("צפון מערב", 32.8120, 35.0520),
-    "קריית טבעון": ("צפון מערב", 32.7236, 35.1275),
-    "קרית טבעון": ("צפון מערב", 32.7236, 35.1275),
-    "קריית אתא": ("צפון מערב", 32.8064, 35.1050),
-    "קרית אתא": ("צפון מערב", 32.8064, 35.1050),
-    "קריית ביאליק": ("צפון מערב", 32.8275, 35.0858),
-    "קרית ביאליק": ("צפון מערב", 32.8275, 35.0858),
-    "קריית מוצקין": ("צפון מערב", 32.8331, 35.0778),
-    "קרית מוצקין": ("צפון מערב", 32.8331, 35.0778),
-    "קריית ים": ("צפון מערב", 32.8492, 35.0689),
-    "קרית ים": ("צפון מערב", 32.8492, 35.0689),
-    "שפרעם": ("צפון מערב", 32.8056, 35.1694),
-    "טמרה": ("צפון מערב", 32.8536, 35.1978),
-    "סחנין": ("צפון מערב", 32.8639, 35.2972),
-    "סח'נין": ("צפון מערב", 32.8639, 35.2972),
-    "עראבה": ("צפון מערב", 32.8519, 35.3375),
-    "בר לב": ("צפון מערב", 32.9056, 35.1889),
-    "כרמיאל": ("צפון מערב", 32.9136, 35.2961),
-    "עכו": ("צפון מערב", 32.9278, 35.0817),
-    "מילואות": ("צפון מערב", 33.0250, 35.1050),
-    "נהריה": ("צפון מערב", 33.0058, 35.0989),
-    "תפן": ("צפון מערב", 32.9772, 35.2747),
-    "מעלות": ("צפון מערב", 33.0167, 35.2708),
-    "מעלות תרשיחא": ("צפון מערב", 33.0167, 35.2708),
-    "קורן": ("צפון מערב", 33.0200, 35.2800),
-    "שלומי": ("צפון מערב", 33.0722, 35.1436),
+    # --- 2. צפון מערב (גליל מערבי, עכו, נהריה, יחיעם, כרמיאל, קריות, חיפה, כרמל, יקנעם, חדרה, מנשה, ואדי ערה) ---
+    "ראש הנקרה": ("צפון מערב", 33.0864, 35.1136), "שלומי": ("צפון מערב", 33.0722, 35.1436),
+    "בצת": ("צפון מערב", 33.0711, 35.1258), "לימן": ("צפון מערב", 33.0589, 35.1128),
+    "חניתה": ("צפון מערב", 33.0875, 35.1742), "מצובה": ("צפון מערב", 33.0608, 35.1561),
+    "אילון": ("צפון מערב", 33.0636, 35.2200), "אדמית": ("צפון מערב", 33.0789, 35.1972),
+    "יערה": ("צפון מערב", 33.0628, 35.1872), "גרנות הגליל": ("צפון מערב", 33.0561, 35.2439),
+    "גורן": ("צפון מערב", 33.0569, 35.2361), "שומרה": ("צפון מערב", 33.0819, 35.2764),
+    "זרעית": ("צפון מערב", 33.0972, 35.2889), "שתולה": ("צפון מערב", 33.0858, 35.3136),
+    "נטועה": ("צפון מערב", 33.0814, 35.3378), "מתת": ("צפון מערב", 33.0461, 35.3578),
+    "פסוטה": ("צפון מערב", 33.0481, 35.3094), "אבירים": ("צפון מערב", 33.0408, 35.2894),
+    "מעיליא": ("צפון מערב", 33.0278, 35.2583), "הילה": ("צפון מערב", 33.0369, 35.2442),
+    "מנות": ("צפון מערב", 33.0389, 35.1939), "כברי": ("צפון מערב", 33.0197, 35.1494),
+    "געתון": ("צפון מערב", 33.0169, 35.2169), "עין יעקב": ("צפון מערב", 33.0114, 35.2356),
+    "יחיעם": ("צפון מערב", 32.9958, 35.2225), "קיבוץ יחיעם": ("צפון מערב", 32.9958, 35.2225),
+    "מעונה": ("צפון מערב", 33.0147, 35.2572), "עין המפרץ": ("צפון מערב", 32.9036, 35.0958),
+    "כפר מסריק": ("צפון מערב", 32.8878, 35.1031), "אפק": ("צפון מערב", 32.8397, 35.1258),
+    "אושה": ("צפון מערב", 32.8017, 35.1158), "רמת יוחנן": ("צפון מערב", 32.8003, 35.1253),
+    "כפר המכבי": ("צפון מערב", 32.7931, 35.1219), "שער העמקים": ("צפון מערב", 32.7192, 35.1181),
+    "יגור": ("צפון מערב", 32.7406, 35.0764), "כפר חסידים": ("צפון מערב", 32.7525, 35.0939),
+    "רכסים": ("צפון מערב", 32.7506, 35.1028), "אבטין": ("צפון מערב", 32.7625, 35.1156),
+    "נהריה": ("צפון מערב", 33.0058, 35.0989), "סער": ("צפון מערב", 33.0242, 35.1069),
+    "גשר הזיו": ("צפון מערב", 33.0389, 35.1117), "שבי ציון": ("צפון מערב", 32.9803, 35.0853),
+    "רגבה": ("צפון מערב", 32.9764, 35.0981), "לוחמי הגטאות": ("צפון מערב", 32.9614, 35.0964),
+    "בוסתן הגליל": ("צפון מערב", 32.9481, 35.0928), "שמרת": ("צפון מערב", 32.9469, 35.0994),
+    "מילואות": ("צפון מערב", 33.0250, 35.1050), "מטה אשר": ("צפון מערב", 32.9764, 35.0981),
+    "בן עמי": ("צפון מערב", 33.0058, 35.1342), "נתיב השיירה": ("צפון מערב", 32.9903, 35.1389),
+    "שייח דנון": ("צפון מערב", 32.9817, 35.1464), "אשרת": ("צפון מערב", 32.9658, 35.1583),
+    "עמקה": ("צפון מערב", 32.9650, 35.1678), "בית העמק": ("צפון מערב", 32.9697, 35.1461),
+    "כפר יאסיף": ("צפון מערב", 32.9539, 35.1642), "אבו סנאן": ("צפון מערב", 32.9586, 35.1764),
+    "ירכא": ("צפון מערב", 32.9539, 35.2014), "ג'וליס": ("צפון מערב", 32.9414, 35.1828),
+    "ג'דיידה מכר": ("צפון מערב", 32.9275, 35.1564), "טל אל": ("צפון מערב", 32.9194, 35.2039),
+    "אחיהוד": ("צפון מערב", 32.9114, 35.1786), "בר לב": ("צפון מערב", 32.9056, 35.1889),
+    "ברלב": ("צפון מערב", 32.9056, 35.1889), "יסעור": ("צפון מערב", 32.8936, 35.1678),
+    "שעב": ("צפון מערב", 32.8897, 35.2361), "כאבול": ("צפון מערב", 32.8686, 35.2117),
+    "טמרה": ("צפון מערב", 32.8536, 35.1978), "אעבלין": ("צפון מערב", 32.8236, 35.1869),
+    "שפרעם": ("צפון מערב", 32.8056, 35.1694), "ביר אל מכסור": ("צפון מערב", 32.7794, 35.2261),
+    "מעלות": ("צפון מערב", 33.0167, 35.2708), "מעלות תרשיחא": ("צפון מערב", 33.0167, 35.2708),
+    "תרשיחא": ("צפון מערב", 33.0150, 35.2610), "קורן": ("צפון מערב", 33.0200, 35.2800),
+    "כפר ורדים": ("צפון מערב", 32.9942, 35.2750), "תפן": ("צפון מערב", 32.9772, 35.2747),
+    "מגדל תפן": ("צפון מערב", 32.9772, 35.2747), "יאנוח ג'ת": ("צפון מערב", 32.9869, 35.2439),
+    "כסרא סמיע": ("צפון מערב", 32.9711, 35.3022), "פקיעין": ("צפון מערב", 32.9778, 35.3333),
+    "בית ג'ן": ("צפון מערב", 32.9669, 35.3806), "חורפיש": ("צפון מערב", 33.0167, 35.3492),
+    "סאג'ור": ("צפון מערב", 32.9417, 35.3422), "ראמה": ("צפון מערב", 32.9383, 35.3672),
+    "נחף": ("צפון מערב", 32.9317, 35.3183), "בענה": ("צפון מערב", 32.9308, 35.2725),
+    "דייר אל אסד": ("צפון מערב", 32.9347, 35.2633), "מג'ד אל כרום": ("צפון מערב", 32.9219, 35.2564),
+    "כרמיאל": ("צפון מערב", 32.9136, 35.2961), "משגב": ("צפון מערב", 32.8528, 35.2647),
+    "תובל": ("צפון מערב", 32.9450, 35.2360), "לבון": ("צפון מערב", 32.9480, 35.2670),
+    "סחנין": ("צפון מערב", 32.8639, 35.2972), "סח'נין": ("צפון מערב", 32.8639, 35.2972),
+    "עראבה": ("צפון מערב", 32.8519, 35.3375), "דייר חנא": ("צפון מערב", 32.8617, 35.3647),
+    "תראדיון": ("צפון מערב", 32.8528, 35.2722), "תרדיון": ("צפון מערב", 32.8528, 35.2722),
+    "כאוכב אבו אל היג'א": ("צפון מערב", 32.8317, 35.2481), "יודפת": ("צפון מערב", 32.8364, 35.2725),
+    "עצמון": ("צפון מערב", 32.8550, 35.2600), "קורנית": ("צפון מערב", 32.8458, 35.2508),
+    "שכניה": ("צפון מערב", 32.8475, 35.2433), "מנוף": ("צפון מערב", 32.8481, 35.2356),
+    "רקפת": ("צפון מערב", 32.8525, 35.2669), "יעד": ("צפון מערב", 32.8722, 35.2414),
+    "גילון": ("צפון מערב", 32.9039, 35.2528), "צורית": ("צפון מערב", 32.9056, 35.2392),
+    "עכו": ("צפון מערב", 32.9278, 35.0817), "קריית ים": ("צפון מערב", 32.8492, 35.0689),
+    "קרית ים": ("צפון מערב", 32.8492, 35.0689), "קריית מוצקין": ("צפון מערב", 32.8331, 35.0778),
+    "קרית מוצקין": ("צפון מערב", 32.8331, 35.0778), "קריית ביאליק": ("צפון מערב", 32.8275, 35.0858),
+    "קרית ביאליק": ("צפון מערב", 32.8275, 35.0858), "קריית אתא": ("צפון מערב", 32.8064, 35.1050),
+    "קרית אתא": ("צפון מערב", 32.8064, 35.1050), "קריית חיים": ("צפון מערב", 32.8256, 35.0642),
+    "קרית חיים": ("צפון מערב", 32.8256, 35.0642), "קריית שמואל": ("צפון מערב", 32.8364, 35.0681),
+    "קרית שמואל": ("צפון מערב", 32.8364, 35.0681), "מפרץ חיפה": ("צפון מערב", 32.8120, 35.0520),
+    "צ'ק פוסט": ("צפון מערב", 32.7900, 35.0350), "חיפה": ("צפון מערב", 32.7940, 34.9896),
+    "נשר": ("צפון מערב", 32.7708, 35.0394), "טירת הכרמל": ("צפון מערב", 32.7603, 34.9719),
+    "טירת כרמל": ("צפון מערב", 32.7603, 34.9719), "קריית טבעון": ("צפון מערב", 32.7236, 35.1275),
+    "קרית טבעון": ("צפון מערב", 32.7236, 35.1275), "טבעון": ("צפון מערב", 32.7236, 35.1275),
+    "רמת ישי": ("צפון מערב", 32.7042, 35.1706), "אלונים": ("צפון מערב", 32.7192, 35.1436),
+    "שדה יעקב": ("צפון מערב", 32.6956, 35.1419), "כפר יהושע": ("צפון מערב", 32.6819, 35.1525),
+    "נהלל": ("צפון מערב", 32.6900, 35.1947), "בית שערים": ("צפון מערב", 32.6994, 35.1797),
+    "תמרת": ("צפון מערב", 32.7047, 35.2247), "אלון הגליל": ("צפון מערב", 32.7608, 35.2197),
+    "הסוללים": ("צפון מערב", 32.7611, 35.2392), "ציפורי": ("צפון מערב", 32.7458, 35.2764),
+    "הרדוף": ("צפון מערב", 32.7647, 35.1742), "זבולון": ("צפון מערב", 32.7950, 35.1150),
+    "עספיא": ("צפון מערב", 32.7194, 35.0650), "עוספיא": ("צפון מערב", 32.7194, 35.0650),
+    "דלית אל כרמל": ("צפון מערב", 32.6936, 35.0469), "דאלית אל כרמל": ("צפון מערב", 32.6936, 35.0469),
+    "יקנעם": ("צפון מערב", 32.6594, 35.1100), "יקנעם עילית": ("צפון מערב", 32.6594, 35.1100),
+    "יקנעם מושבה": ("צפון מערב", 32.6639, 35.1072), "מבוא כרמל": ("צפון מערב", 32.6580, 35.0760),
+    "הזורע": ("צפון מערב", 32.6419, 35.1219), "משמר העמק": ("צפון מערב", 32.6119, 35.1419),
+    "עין השופט": ("צפון מערב", 32.5961, 35.0958), "רמת השופט": ("צפון מערב", 32.6094, 35.0950),
+    "דליה": ("צפון מערב", 32.5878, 35.0681), "גלעד": ("צפון מערב", 32.5592, 35.0744),
+    "רמות מנשה": ("צפון מערב", 32.5956, 35.0581), "עין העמק": ("צפון מערב", 32.6256, 35.0806),
+    "אליקים": ("צפון מערב", 32.6361, 35.0672), "מגידו": ("צפון מערב", 32.5786, 35.1828),
+    "גבעת עוז": ("צפון מערב", 32.5494, 35.1972), "עתלית": ("צפון מערב", 32.6872, 34.9383),
+    "בית אורן": ("צפון מערב", 32.7314, 35.0114), "עין הוד": ("צפון מערב", 32.7003, 34.9806),
+    "ניר עציון": ("צפון מערב", 32.6956, 34.9897), "עין כרמל": ("צפון מערב", 32.6778, 34.9531),
+    "גבע כרמל": ("צפון מערב", 32.6669, 34.9522), "צרופה": ("צפון מערב", 32.6486, 34.9489),
+    "עופר": ("צפון מערב", 32.6256, 34.9794), "כרם מהרל": ("צפון מערב", 32.6425, 34.9853),
+    "נחשולים": ("צפון מערב", 32.6144, 34.9222), "דור": ("צפון מערב", 32.6078, 34.9242),
+    "מעגן מיכאל": ("צפון מערב", 32.5567, 34.9169), "מעיין צבי": ("צפון מערב", 32.5661, 34.9369),
+    "חוף הכרמל": ("צפון מערב", 32.6778, 34.9531), "פוריידיס": ("צפון מערב", 32.5969, 34.9519),
+    "ג'סר א זרקא": ("צפון מערב", 32.5394, 34.9122), "זכרון יעקב": ("צפון מערב", 32.5708, 34.9517),
+    "בנימינה": ("צפון מערב", 32.5214, 34.9469), "גבעת עדה": ("צפון מערב", 32.5172, 35.0022),
+    "אביאל": ("צפון מערב", 32.5333, 35.0056), "עמיקם": ("צפון מערב", 32.5481, 35.0211),
+    "רגבים": ("צפון מערב", 32.5247, 35.0258), "כפר קרע": ("צפון מערב", 32.5050, 35.0528),
+    "ערערה": ("צפון מערב", 32.4958, 35.1028), "אום אל פחם": ("צפון מערב", 32.5186, 35.1536),
+    "אום אל-פחם": ("צפון מערב", 32.5186, 35.1536), "מעלה עירון": ("צפון מערב", 32.5400, 35.1550),
+    'בסמ"ה': ("צפון מערב", 32.4980, 35.0850), "קציר": ("צפון מערב", 32.4878, 35.0919),
+    "חריש": ("צפון מערב", 32.4631, 35.0439), "מצפה אילן": ("צפון מערב", 32.4697, 35.0836),
+    "ברקאי": ("צפון מערב", 32.4758, 35.0267), "מענית": ("צפון מערב", 32.4567, 35.0258),
+    "קיבוץ מענית": ("צפון מערב", 32.4567, 35.0258), "דואר נע מנשה": ("צפון מערב", 32.4567, 35.0258),
+    "מנשה": ("צפון מערב", 32.4567, 35.0258), "עין שמר": ("צפון מערב", 32.4633, 35.0044),
+    "גן שמואל": ("צפון מערב", 32.4517, 34.9508), "קיבוץ גן שמואל": ("צפון מערב", 32.4517, 34.9508),
+    "תלמי אלעזר": ("צפון מערב", 32.4439, 34.9689), "שדה יצחק": ("צפון מערב", 32.4269, 34.9917),
+    "להבות חביבה": ("צפון מערב", 32.4169, 35.0086), "מגל": ("צפון מערב", 32.3936, 35.0339),
+    "משמרות": ("צפון מערב", 32.4822, 34.9889), "כפר פינס": ("צפון מערב", 32.4800, 34.9964),
+    "עין עירון": ("צפון מערב", 32.4861, 35.0028), "פרדס חנה": ("צפון מערב", 32.4739, 34.9706),
+    "פרדס חנה כרכור": ("צפון מערב", 32.4739, 34.9706), "כרכור": ("צפון מערב", 32.4739, 34.9706),
+    "אור עקיבא": ("צפון מערב", 32.5064, 34.9200), "קיסריה": ("צפון מערב", 32.5089, 34.9092),
+    "שדות ים": ("צפון מערב", 32.4928, 34.8922), "חדרה": ("צפון מערב", 32.4340, 34.9197),
+    "בקה אלגרבייה": ("צפון מערב", 32.4189, 35.0408), "באקה אל-גרבייה": ("צפון מערב", 32.4189, 35.0408),
+    "באקה אל גרביה": ("צפון מערב", 32.4189, 35.0408), "ג'ת": ("צפון מערב", 32.3989, 35.0369),
 
-    # --- 3. איזור ירושלים ---
-    "מודיעין": ("איזור ירושלים", 31.8969, 35.0104),
-    "מודיעין מכבים רעות": ("איזור ירושלים", 31.8969, 35.0104),
-    "מודיעין עילית": ("איזור ירושלים", 31.9333, 35.0419),
-    "בית שמש": ("איזור ירושלים", 31.7456, 34.9867),
-    "הר טוב": ("איזור ירושלים", 31.7610, 34.9940),
-    "צור הדסה": ("איזור ירושלים", 31.7192, 35.0972),
-    "אבו גוש": ("איזור ירושלים", 31.8058, 35.1092),
-    "בית נקופה": ("איזור ירושלים", 31.8028, 35.1258),
-    "מבשרת ציון": ("איזור ירושלים", 31.8019, 35.1525),
-    "גבעת זאב": ("איזור ירושלים", 31.8614, 35.1681),
-    "עטרות": ("איזור ירושלים", 31.8550, 35.2150),
-    "ירושלים": ("איזור ירושלים", 31.7683, 35.2137),
-    "ביתר עילית": ("איזור ירושלים", 31.6978, 35.1156),
-    "אפרת": ("איזור ירושלים", 31.6547, 35.1508),
-    "גוש עציון": ("איזור ירושלים", 31.6547, 35.1300),
-    "מעלה אדומים": ("איזור ירושלים", 31.7772, 35.2992),
-    "מישור אדומים": ("איזור ירושלים", 31.7970, 35.3360),
-    "שער בנימין": ("איזור ירושלים", 31.8780, 35.2570),
+    # --- 3. איזור ירושלים (ירושלים, בית שמש, מטה יהודה, מודיעין, גוש עציון, בנימין) ---
+    "ירושלים": ("איזור ירושלים", 31.7683, 35.2137), "עטרות": ("איזור ירושלים", 31.8550, 35.2150),
+    "הר חוצבים": ("איזור ירושלים", 31.8014, 35.2131), "תלפיות": ("איזור ירושלים", 31.7519, 35.2158),
+    "גבעת שאול": ("איזור ירושלים", 31.7897, 35.1886), "מבשרת ציון": ("איזור ירושלים", 31.8019, 35.1525),
+    "מוצא": ("איזור ירושלים", 31.7925, 35.1661), "בית זית": ("איזור ירושלים", 31.7808, 35.1614),
+    "אבן ספיר": ("איזור ירושלים", 31.7611, 35.1342), "עמינדב": ("איזור ירושלים", 31.7536, 35.1444),
+    "אורה": ("איזור ירושלים", 31.7544, 35.1517), "בית נקופה": ("איזור ירושלים", 31.8028, 35.1258),
+    "קריית ענבים": ("איזור ירושלים", 31.8117, 35.1183), "קרית ענבים": ("איזור ירושלים", 31.8117, 35.1183),
+    "מעלה החמישה": ("איזור ירושלים", 31.8197, 35.1119), "הר אדר": ("איזור ירושלים", 31.8275, 35.1306),
+    "אבו גוש": ("איזור ירושלים", 31.8058, 35.1092), "עין ראפה": ("איזור ירושלים", 31.7969, 35.1119),
+    "שואבה": ("איזור ירושלים", 31.7964, 35.0833), "שורש": ("איזור ירושלים", 31.7928, 35.0692),
+    "נווה אילן": ("איזור ירושלים", 31.8069, 35.0764), "קריית יערים": ("איזור ירושלים", 31.8031, 35.0972),
+    "טלז סטון": ("איזור ירושלים", 31.8031, 35.0972), "צובה": ("איזור ירושלים", 31.7847, 35.1228),
+    "גבעת יערים": ("איזור ירושלים", 31.7847, 35.0958), "רמת רזיאל": ("איזור ירושלים", 31.7736, 35.0758),
+    "כסלון": ("איזור ירושלים", 31.7697, 35.0558), "אשתאול": ("איזור ירושלים", 31.7808, 35.0094),
+    "מסילת ציון": ("איזור ירושלים", 31.8022, 35.0119), "תרום": ("איזור ירושלים", 31.7819, 34.9839),
+    "נחשון": ("איזור ירושלים", 31.8317, 34.9564), "הראל": ("איזור ירושלים", 31.8172, 34.9519),
+    "כפר אוריה": ("איזור ירושלים", 31.7911, 34.9464), "צרעה": ("איזור ירושלים", 31.7664, 34.9658),
+    "בית שמש": ("איזור ירושלים", 31.7456, 34.9867), "הר טוב": ("איזור ירושלים", 31.7610, 34.9940),
+    "נחם": ("איזור ירושלים", 31.7633, 35.0044), "זנוח": ("איזור ירושלים", 31.7253, 35.0047),
+    "מחסיה": ("איזור ירושלים", 31.7417, 35.0156), "נס הרים": ("איזור ירושלים", 31.7447, 35.0569),
+    "בר גיורא": ("איזור ירושלים", 31.7278, 35.0806), "צור הדסה": ("איזור ירושלים", 31.7192, 35.0972),
+    "מבוא ביתר": ("איזור ירושלים", 31.7200, 35.1069), "מטע": ("איזור ירושלים", 31.7114, 35.0631),
+    'נתיב הל"ה': ("איזור ירושלים", 31.6908, 34.9794), "אביעזר": ("איזור ירושלים", 31.6897, 35.0133),
+    "נווה מיכאל": ("איזור ירושלים", 31.6850, 35.0189), "שריגים": ("איזור ירושלים", 31.6719, 34.9422),
+    "מטה יהודה": ("איזור ירושלים", 31.7610, 34.9940), "ביתר עילית": ("איזור ירושלים", 31.6978, 35.1156),
+    "אפרת": ("איזור ירושלים", 31.6547, 35.1508), "גוש עציון": ("איזור ירושלים", 31.6547, 35.1300),
+    "כפר עציון": ("איזור ירושלים", 31.6486, 35.1150), "אלון שבות": ("איזור ירושלים", 31.6550, 35.1258),
+    "ראש צורים": ("איזור ירושלים", 31.6625, 35.1256), "מגדל עוז": ("איזור ירושלים", 31.6383, 35.1419),
+    "תקוע": ("איזור ירושלים", 31.6528, 35.2292), "נוקדים": ("איזור ירושלים", 31.6431, 35.2439),
+    "מעלה אדומים": ("איזור ירושלים", 31.7772, 35.2992), "מישור אדומים": ("איזור ירושלים", 31.7970, 35.3360),
+    "כפר אדומים": ("איזור ירושלים", 31.8253, 35.3414), "עלמון": ("איזור ירושלים", 31.8300, 35.2992),
+    "אדם": ("איזור ירושלים", 31.8553, 35.2597), "גבע בנימין": ("איזור ירושלים", 31.8553, 35.2597),
+    "שער בנימין": ("איזור ירושלים", 31.8780, 35.2570), "פסגות": ("איזור ירושלים", 31.9006, 35.2256),
+    "כוכב יעקב": ("איזור ירושלים", 31.8806, 35.2456), "גבעת זאב": ("איזור ירושלים", 31.8614, 35.1681),
+    "בית חורון": ("איזור ירושלים", 31.8781, 35.1186), "מודיעין": ("איזור ירושלים", 31.8969, 35.0104),
+    "מודיעין מכבים רעות": ("איזור ירושלים", 31.8969, 35.0104), "מודיעין עילית": ("איזור ירושלים", 31.9333, 35.0419),
+    "חשמונאים": ("איזור ירושלים", 31.9306, 35.0239), "כפר רות": ("איזור ירושלים", 31.9189, 35.0297),
+    "לפיד": ("איזור ירושלים", 31.9197, 35.0378), "שילת": ("איזור ירושלים", 31.9208, 35.0189),
+    "מבוא חורון": ("איזור ירושלים", 31.8492, 35.0347), "לטרון": ("איזור ירושלים", 31.8383, 34.9806),
+    "נווה שלום": ("איזור ירושלים", 31.8292, 34.9789), "Nablus": ("איזור ירושלים", 31.9074, 35.2156),
+    "AlBireh": ("איזור ירושלים", 31.9074, 35.2156), "St-AlBireh": ("איזור ירושלים", 31.9074, 35.2156),
+    "רמאללה": ("איזור ירושלים", 31.9038, 35.2034), "אל בירה": ("איזור ירושלים", 31.9074, 35.2156),
+    "בית לחם": ("איזור ירושלים", 31.7054, 35.2024),
 
-    # --- 4. אזור השרון ---
-    "כפר קאסם": ("אזור השרון", 32.1142, 34.9764),
-    "רמת השרון": ("אזור השרון", 32.1461, 34.8394),
-    "הרצליה": ("אזור השרון", 32.1624, 34.8447),
-    "ג'לג'וליה": ("אזור השרון", 32.1547, 34.9536),
-    "הוד השרון": ("אזור השרון", 32.1558, 34.8947),
-    "רעננה": ("אזור השרון", 32.1848, 34.8713),
-    "כפר סבא": ("אזור השרון", 32.1780, 34.9065),
-    "בצרה": ("אזור השרון", 32.2150, 34.8780),
-    "שפיים": ("אזור השרון", 32.2194, 34.8286),
-    "געש": ("אזור השרון", 32.2281, 34.8322),
-    "יקום": ("אזור השרון", 32.2478, 34.8419),
-    "כוכב יאיר": ("אזור השרון", 32.2269, 34.9964),
-    "צור יגאל": ("אזור השרון", 32.2220, 34.9960),
-    "טירה": ("אזור השרון", 32.2342, 34.9503),
-    "תל מונד": ("אזור השרון", 32.2536, 34.9175),
-    "בני דרור": ("אזור השרון", 32.2611, 34.9006),
-    "אבן יהודה": ("אזור השרון", 32.2697, 34.8875),
-    "קדימה": ("אזור השרון", 32.2792, 34.9156),
-    "קדימה צורן": ("אזור השרון", 32.2792, 34.9156),
-    "טייבה": ("אזור השרון", 32.2661, 35.0089),
-    "קלנסווה": ("אזור השרון", 32.2850, 34.9811),
-    "נתניה": ("אזור השרון", 32.2770, 34.8640),
-    "תנובות": ("אזור השרון", 32.3092, 34.9686),
-    "ניצני עוז": ("אזור השרון", 32.3080, 35.0060),
-    "כפר יונה": ("אזור השרון", 32.3167, 34.9358),
-    "עמק חפר": ("אזור השרון", 32.3820, 34.9070),
+    # --- 4. אזור השרון (נתניה, עמק חפר, לב השרון, כפר סבא, רעננה, הרצליה, הוד השרון, רמת השרון, משולש דרומי) ---
+    "מכמורת": ("אזור השרון", 32.4050, 34.8725), "בית ינאי": ("אזור השרון", 32.3853, 34.8644),
+    "כפר ויתקין": ("אזור השרון", 32.3822, 34.8794), "חופית": ("אזור השרון", 32.3867, 34.8717),
+    "בית חרות": ("אזור השרון", 32.3769, 34.8756), "נעורים": ("אזור השרון", 32.3694, 34.8622),
+    "גבעת שפירא": ("אזור השרון", 32.3578, 34.8758), "אביחיל": ("אזור השרון", 32.3500, 34.8669),
+    "משמר השרון": ("אזור השרון", 32.3636, 34.9044), "מעברות": ("אזור השרון", 32.3694, 34.9047),
+    "העוגן": ("אזור השרון", 32.3683, 34.9228), "עין החורש": ("אזור השרון", 32.3853, 34.9369),
+    "גבעת חיים": ("אזור השרון", 32.3958, 34.9325), "גבעת חיים איחוד": ("אזור השרון", 32.3958, 34.9325),
+    "גבעת חיים מאוחד": ("אזור השרון", 32.3897, 34.9308), "חגלה": ("אזור השרון", 32.3814, 34.9225),
+    "אלישיב": ("אזור השרון", 32.3747, 34.9097), 'כפר הרא"ה': ("אזור השרון", 32.3869, 34.9136),
+    "גאולי תימן": ("אזור השרון", 32.3792, 34.9078), "אחיטוב": ("אזור השרון", 32.3936, 34.9597),
+    "אמץ": ("אזור השרון", 32.3811, 34.9756), "בחן": ("אזור השרון", 32.3497, 35.0169),
+    "בת חפר": ("אזור השרון", 32.3372, 35.0136), "יד חנה": ("אזור השרון", 32.3342, 35.0067),
+    "בארותיים": ("אזור השרון", 32.3236, 34.9806), "עולש": ("אזור השרון", 32.3239, 34.9711),
+    "בורגתה": ("אזור השרון", 32.3233, 34.9625), "חניאל": ("אזור השרון", 32.3244, 34.9519),
+    "כפר מונש": ("אזור השרון", 32.3492, 34.9169), "בית הלוי": ("אזור השרון", 32.3500, 34.9278),
+    "הדר עם": ("אזור השרון", 32.3544, 34.8969), "כפר ידידיה": ("אזור השרון", 32.3506, 34.8950),
+    "כפר חיים": ("אזור השרון", 32.3456, 34.8981), "עמק חפר": ("אזור השרון", 32.3820, 34.9070),
+    'אזה"ת עמק חפר': ("אזור השרון", 32.3820, 34.9070), "פארק תעשיות עמק חפר": ("אזור השרון", 32.3820, 34.9070),
+    "נתניה": ("אזור השרון", 32.2770, 34.8640), "כפר יונה": ("אזור השרון", 32.3167, 34.9358),
+    "נורדיה": ("אזור השרון", 32.3119, 34.8964), "בית יצחק": ("אזור השרון", 32.3247, 34.8906),
+    "שער חפר": ("אזור השרון", 32.3247, 34.8906), "כפר הס": ("אזור השרון", 32.2536, 34.9369),
+    "עין ורד": ("אזור השרון", 32.2669, 34.9325), "עין שריד": ("אזור השרון", 32.2731, 34.9356),
+    "פורת": ("אזור השרון", 32.2725, 34.9539), "גאולים": ("אזור השרון", 32.2997, 34.9469),
+    "תנובות": ("אזור השרון", 32.3092, 34.9686), "ינות": ("אזור השרון", 32.3119, 34.9686),
+    "ניצני עוז": ("אזור השרון", 32.3080, 35.0060), "קלנסווה": ("אזור השרון", 32.2850, 34.9811),
+    "זמר": ("אזור השרון", 32.3611, 35.0278), "טייבה": ("אזור השרון", 32.2661, 35.0089),
+    "טירה": ("אזור השרון", 32.2342, 34.9503), "כוכב יאיר": ("אזור השרון", 32.2269, 34.9964),
+    "צור יגאל": ("אזור השרון", 32.2220, 34.9960), "צור יצחק": ("אזור השרון", 32.2414, 35.0067),
+    "צור נתן": ("אזור השרון", 32.2392, 35.0197), "סלעית": ("אזור השרון", 32.2494, 35.0414),
+    "אילנות": ("אזור השרון", 32.2914, 34.9022), "קדימה": ("אזור השרון", 32.2792, 34.9156),
+    "קדימה צורן": ("אזור השרון", 32.2792, 34.9156), "צורן": ("אזור השרון", 32.2947, 34.9350),
+    "אבן יהודה": ("אזור השרון", 32.2697, 34.8875), "כפר נטר": ("אזור השרון", 32.2683, 34.8694),
+    "בית יהושע": ("אזור השרון", 32.2608, 34.8594), "תל יצחק": ("אזור השרון", 32.2533, 34.8669),
+    "אודים": ("אזור השרון", 32.2567, 34.8442), "יקום": ("אזור השרון", 32.2478, 34.8419),
+    "געש": ("אזור השרון", 32.2281, 34.8322), "שפיים": ("אזור השרון", 32.2194, 34.8286),
+    "ארסוף": ("אזור השרון", 32.2100, 34.8190), "רישפון": ("אזור השרון", 32.2019, 34.8256),
+    "רשפון": ("אזור השרון", 32.2019, 34.8256), "כפר שמריהו": ("אזור השרון", 32.1856, 34.8236),
+    "בני ציון": ("אזור השרון", 32.2208, 34.8694), "בצרה": ("אזור השרון", 32.2150, 34.8780),
+    "חרוצים": ("אזור השרון", 32.2261, 34.8725), "בני דרור": ("אזור השרון", 32.2611, 34.9006),
+    "תל מונד": ("אזור השרון", 32.2536, 34.9175), "משמרת": ("אזור השרון", 32.2389, 34.9222),
+    "חרות": ("אזור השרון", 32.2469, 34.9197), "כפר עבודה": ("אזור השרון", 32.2544, 34.9122),
+    "לב השרון": ("אזור השרון", 32.2536, 34.9175), "רמת הכובש": ("אזור השרון", 32.2178, 34.9378),
+    "ניר אליהו": ("אזור השרון", 32.2047, 34.9531), "בית ברל": ("אזור השרון", 32.1969, 34.9258),
+    "צופית": ("אזור השרון", 32.1964, 34.9169), "שדה ורבורג": ("אזור השרון", 32.2089, 34.9125),
+    "גן חיים": ("אזור השרון", 32.1936, 34.9044), 'כפר מל"ל': ("אזור השרון", 32.1711, 34.8944),
+    "רמות השבים": ("אזור השרון", 32.1694, 34.8878), 'גבעת ח"ן': ("אזור השרון", 32.1694, 34.8758),
+    "רעננה": ("אזור השרון", 32.1848, 34.8713), "כפר סבא": ("אזור השרון", 32.1780, 34.9065),
+    "הוד השרון": ("אזור השרון", 32.1558, 34.8947), "נווה ירק": ("אזור השרון", 32.1361, 34.9258),
+    "אלישמע": ("אזור השרון", 32.1567, 34.9297), "עדנים": ("אזור השרון", 32.1422, 34.9122),
+    "ירקונה": ("אזור השרון", 32.1478, 34.9103), "גני עם": ("אזור השרון", 32.1544, 34.9144),
+    "הרצליה": ("אזור השרון", 32.1624, 34.8447), "גליל ים": ("אזור השרון", 32.1506, 34.8322),
+    "רמת השרון": ("אזור השרון", 32.1461, 34.8394), "ג'לג'וליה": ("אזור השרון", 32.1547, 34.9536),
+    "כפר ברא": ("אזור השרון", 32.1369, 34.9742), "חגור": ("אזור השרון", 32.1381, 34.9564),
+    "מתן": ("אזור השרון", 32.1564, 34.9717), "ירחיב": ("אזור השרון", 32.1528, 34.9681),
+    "נירית": ("אזור השרון", 32.1481, 34.9850), "אורנית": ("אזור השרון", 32.1306, 34.9942),
+    "שערי תקווה": ("אזור השרון", 32.1231, 35.0206), "אלקנה": ("אזור השרון", 32.1114, 35.0339),
+    "כפר קאסם": ("אזור השרון", 32.1142, 34.9764), "פארק אפק": ("אזור השרון", 32.1030, 34.9650),
 
-    # --- 5. איזור גוש דן והמרכז ---
-    "יבנה": ("איזור גוש דן", 31.8781, 34.7394),
-    "מזכרת בתיה": ("איזור גוש דן", 31.8536, 34.8414),
-    "קריית עקרון": ("איזור גוש דן", 31.8608, 34.8236),
-    "קרית עקרון": ("איזור גוש דן", 31.8608, 34.8236),
-    "רחובות": ("איזור גוש דן", 31.8928, 34.8113),
-    "נס ציונה": ("איזור גוש דן", 31.9292, 34.7989),
-    "באר יעקב": ("איזור גוש דן", 31.9406, 34.8353),
-    "רמלה": ("איזור גוש דן", 31.9275, 34.8625),
-    "לוד": ("איזור גוש דן", 31.9514, 34.8881),
-    "ראשון לציון": ("איזור גוש דן", 31.9730, 34.7925),
-    "ראשלצ": ("איזור גוש דן", 31.9730, 34.7925),
-    'ראשל"צ': ("איזור גוש דן", 31.9730, 34.7925),
-    "איירפורט סיטי": ("איזור גוש דן", 31.9917, 34.9189),
-    "קריית שדה התעופה": ("איזור גוש דן", 31.9917, 34.9189),
-    "שוהם": ("איזור גוש דן", 31.9986, 34.9456),
-    "קרית אסם": ("איזור גוש דן", 31.9920, 34.9380),
-    "בית דגן": ("איזור גוש דן", 32.0019, 34.8297),
-    "חולון": ("איזור גוש דן", 32.0158, 34.7874),
-    'אזה"ת חולון': ("איזור גוש דן", 32.0110, 34.8050),
-    "בת ים": ("איזור גוש דן", 32.0132, 34.7480),
-    "אזור": ("איזור גוש דן", 32.0242, 34.8053),
-    "אור יהודה": ("איזור גוש דן", 32.0292, 34.8572),
-    "יהוד": ("איזור גוש דן", 32.0331, 34.8881),
-    "יהוד מונוסון": ("איזור גוש דן", 32.0331, 34.8881),
-    "סביון": ("איזור גוש דן", 32.0469, 34.8772),
-    "גני תקווה": ("איזור גוש דן", 32.0600, 34.8736),
-    "קריית אונו": ("איזור גוש דן", 32.0622, 34.8553),
-    "קרית אונו": ("איזור גוש דן", 32.0622, 34.8553),
-    "גבעת שמואל": ("איזור גוש דן", 32.0781, 34.8475),
-    "תל אביב": ("איזור גוש דן", 32.0853, 34.7818),
-    "תל אביב יפו": ("איזור גוש דן", 32.0853, 34.7818),
-    "תל-אביב": ("איזור גוש דן", 32.0853, 34.7818),
-    "גבעתיים": ("איזור גוש דן", 32.0722, 34.8089),
-    "רמת גן": ("איזור גוש דן", 32.0823, 34.8106),
-    "בני ברק": ("איזור גוש דן", 32.0849, 34.8352),
-    "אלעד": ("איזור גוש דן", 32.0519, 34.9514),
-    "פתח תקווה": ("איזור גוש דן", 32.0889, 34.8864),
-    "פתח-תקווה": ("איזור גוש דן", 32.0889, 34.8864),
-    "ראש העין": ("איזור גוש דן", 32.0958, 34.9567),
-    "ברקן": ("איזור גוש דן", 32.1060, 35.1060),
-    "אריאל": ("איזור גוש דן", 32.1047, 35.1844),
+    # --- 5. איזור גוש דן (תל אביב, ר"ג, גבעתיים, ב"ב, פ"ת, ראש העין, חולון, בת ים, ראשל"צ, רחובות, יבנה, רמלה, לוד, שוהם, ברקן) ---
+    "תל אביב": ("איזור גוש דן", 32.0853, 34.7818), "תל אביב יפו": ("איזור גוש דן", 32.0853, 34.7818),
+    "תל-אביב": ("איזור גוש דן", 32.0853, 34.7818), "יפו": ("איזור גוש דן", 32.0504, 34.7522),
+    "רמת גן": ("איזור גוש דן", 32.0823, 34.8106), "גבעתיים": ("איזור גוש דן", 32.0722, 34.8089),
+    "בני ברק": ("איזור גוש דן", 32.0849, 34.8352), "גבעת שמואל": ("איזור גוש דן", 32.0781, 34.8475),
+    "קריית אונו": ("איזור גוש דן", 32.0622, 34.8553), "קרית אונו": ("איזור גוש דן", 32.0622, 34.8553),
+    "גני תקווה": ("איזור גוש דן", 32.0600, 34.8736), "סביון": ("איזור גוש דן", 32.0469, 34.8772),
+    "אור יהודה": ("איזור גוש דן", 32.0292, 34.8572), "יהוד": ("איזור גוש דן", 32.0331, 34.8881),
+    "יהוד מונוסון": ("איזור גוש דן", 32.0331, 34.8881), "מגשימים": ("איזור גוש דן", 32.0497, 34.9006),
+    "בני עטרות": ("איזור גוש דן", 32.0239, 34.9169), "בארות יצחק": ("איזור גוש דן", 32.0422, 34.9097),
+    "נחלים": ("איזור גוש דן", 32.0606, 34.9122), "רינתיה": ("איזור גוש דן", 32.0442, 34.9228),
+    "מזור": ("איזור גוש דן", 32.0539, 34.9278), "נופך": ("איזור גוש דן", 32.0439, 34.9333),
+    'גבעת כ"ח': ("איזור גוש דן", 32.0319, 34.9469), "ברקת": ("איזור גוש דן", 32.0197, 34.9539),
+    "טירת יהודה": ("איזור גוש דן", 32.0089, 34.9439), "בית נחמיה": ("איזור גוש דן", 31.9817, 34.9578),
+    "שוהם": ("איזור גוש דן", 31.9986, 34.9456), "קרית אסם": ("איזור גוש דן", 31.9920, 34.9380),
+    "חבל מודיעין": ("איזור גוש דן", 31.9986, 34.9456), "איירפורט סיטי": ("איזור גוש דן", 31.9917, 34.9189),
+    "קריית שדה התעופה": ("איזור גוש דן", 31.9917, 34.9189), 'נתב"ג': ("איזור גוש דן", 32.0055, 34.8854),
+    "אלעד": ("איזור גוש דן", 32.0519, 34.9514), "ראש העין": ("איזור גוש דן", 32.0958, 34.9567),
+    "עינת": ("איזור גוש דן", 32.0839, 34.9369), "גבעת השלושה": ("איזור גוש דן", 32.0994, 34.9219),
+    "כפר סירקין": ("איזור גוש דן", 32.0789, 34.9189), "גת רימון": ("איזור גוש דן", 32.0672, 34.8869),
+    "מעש": ("איזור גוש דן", 32.0706, 34.8969), "פתח תקווה": ("איזור גוש דן", 32.0889, 34.8864),
+    "פתח-תקווה": ("איזור גוש דן", 32.0889, 34.8864), "פארק ינאי": ("איזור גוש דן", 32.0950, 34.8630),
+    "קריית אריה": ("איזור גוש דן", 32.0950, 34.8630), "קרית אריה": ("איזור גוש דן", 32.0950, 34.8630),
+    "קריית מטלון": ("איזור גוש דן", 32.0880, 34.8560), "סגולה": ("איזור גוש דן", 32.1040, 34.9020),
+    "ברקן": ("איזור גוש דן", 32.1060, 35.1060), 'אזה"ת ברקן': ("איזור גוש דן", 32.1060, 35.1060),
+    "אריאל": ("איזור גוש דן", 32.1047, 35.1844), "קרני שומרון": ("איזור גוש דן", 32.1714, 35.0975),
+    "עמנואל": ("איזור גוש דן", 32.1611, 35.1369), "חולון": ("איזור גוש דן", 32.0158, 34.7874),
+    'אזה"ת חולון': ("איזור גוש דן", 32.0110, 34.8050), "בת ים": ("איזור גוש דן", 32.0132, 34.7480),
+    "אזור": ("איזור גוש דן", 32.0242, 34.8053), "משמר השבעה": ("איזור גוש דן", 32.0108, 34.8258),
+    "בית דגן": ("איזור גוש דן", 32.0019, 34.8297), 'כפר חב"ד': ("איזור גוש דן", 31.9886, 34.8517),
+    "צפריה": ("איזור גוש דן", 32.0017, 34.8617), "יגל": ("איזור גוש דן", 31.9942, 34.8722),
+    "אחיסמך": ("איזור גוש דן", 31.9469, 34.9108), "בן שמן": ("איזור גוש דן", 31.9589, 34.9297),
+    "גינתון": ("איזור גוש דן", 31.9569, 34.9189), "ניר צבי": ("איזור גוש דן", 31.9617, 34.8644),
+    "באר יעקב": ("איזור גוש דן", 31.9406, 34.8353), "רמלה": ("איזור גוש דן", 31.9275, 34.8625),
+    "לוד": ("איזור גוש דן", 31.9514, 34.8881), "נשר רמלה": ("איזור גוש דן", 31.9150, 34.8920),
+    "מצליח": ("איזור גוש דן", 31.9114, 34.8758), "ישרש": ("איזור גוש דן", 31.9067, 34.8542),
+    "נצר סרני": ("איזור גוש דן", 31.9225, 34.8228), "ראשון לציון": ("איזור גוש דן", 31.9730, 34.7925),
+    "ראשלצ": ("איזור גוש דן", 31.9730, 34.7925), 'ראשל"צ': ("איזור גוש דן", 31.9730, 34.7925),
+    "נס ציונה": ("איזור גוש דן", 31.9292, 34.7989), "רחובות": ("איזור גוש דן", 31.8928, 34.8113),
+    "פארק המדע": ("איזור גוש דן", 31.9080, 34.8050), "קריית עקרון": ("איזור גוש דן", 31.8608, 34.8236),
+    "קרית עקרון": ("איזור גוש דן", 31.8608, 34.8236), "גבעת ברנר": ("איזור גוש דן", 31.8658, 34.8031),
+    "מזכרת בתיה": ("איזור גוש דן", 31.8536, 34.8414), "יבנה": ("איזור גוש דן", 31.8781, 34.7394),
+    "פלמחים": ("איזור גוש דן", 31.9306, 34.7069), "בית עובד": ("איזור גוש דן", 31.9219, 34.7694),
+    "עיינות": ("איזור גוש דן", 31.9158, 34.7575), "בית חנן": ("איזור גוש דן", 31.9311, 34.7564),
+    "נטעים": ("איזור גוש דן", 31.9428, 34.7556), "גן שורק": ("איזור גוש דן", 31.9469, 34.7664),
+    "כפר הנגיד": ("איזור גוש דן", 31.8950, 34.7550), "גאליה": ("איזור גוש דן", 31.8839, 34.7658),
+    "בית גמליאל": ("איזור גוש דן", 31.8617, 34.7569), "בניה": ("איזור גוש דן", 31.8506, 34.7561),
+    "קבוצת יבנה": ("איזור גוש דן", 31.8153, 34.7219), "בן זכאי": ("איזור גוש דן", 31.8586, 34.7397),
+    "נען": ("איזור גוש דן", 31.8819, 34.8592), "גזר": ("איזור גוש דן", 31.8719, 34.9189),
+    "חולדה": ("איזור גוש דן", 31.8322, 34.8842), "משמר דוד": ("איזור גוש דן", 31.8225, 34.8994),
+    "טל שחר": ("איזור גוש דן", 31.8058, 34.9014), "יסודות": ("איזור גוש דן", 31.8069, 34.8617),
+    "נצר חזני": ("איזור גוש דן", 31.8086, 34.8528), "יד בנימין": ("איזור גוש דן", 31.7975, 34.8225),
+    "בית חלקיה": ("איזור גוש דן", 31.7908, 34.8156), "חפץ חיים": ("איזור גוש דן", 31.7919, 34.7989),
 
-    # --- 6. דרום הארץ ---
-    "אשדוד": ("דרום הארץ", 31.8044, 34.6553),
-    "עד הלום": ("דרום הארץ", 31.7750, 34.6660),
-    "גן יבנה": ("דרום הארץ", 31.7872, 34.7064),
-    "כנות": ("דרום הארץ", 31.7764, 34.7564),
-    "גדרה": ("דרום הארץ", 31.8147, 34.7797),
-    "באר טוביה": ("דרום הארץ", 31.7370, 34.7450),
-    "קריית מלאכי": ("דרום הארץ", 31.7372, 34.7480),
-    "קרית מלאכי": ("דרום הארץ", 31.7372, 34.7480),
-    "אשקלון": ("דרום הארץ", 31.6440, 34.5800),
-    "קריית גת": ("דרום הארץ", 31.6020, 34.7820),
-    "קרית גת": ("דרום הארץ", 31.6020, 34.7820),
-    "שדרות": ("דרום הארץ", 31.5250, 34.5956),
-    "נתיבות": ("דרום הארץ", 31.4231, 34.5886),
-    "רהט": ("דרום הארץ", 31.3953, 34.7544),
-    "להבים": ("דרום הארץ", 31.3728, 34.8169),
-    "לקיה": ("דרום הארץ", 31.3283, 34.8586),
-    "מיתר": ("דרום הארץ", 31.3264, 34.9389),
-    "חורה": ("דרום הארץ", 31.2961, 34.9367),
-    "אופקים": ("דרום הארץ", 31.3142, 34.6203),
-    "עומר": ("דרום הארץ", 31.2672, 34.8494),
-    "באר שבע": ("דרום הארץ", 31.2530, 34.7915),
-    "תל שבע": ("דרום הארץ", 31.2469, 34.8292),
-    "מושב עמיעוז": ("דרום הארץ", 31.2461, 34.4125),
-    "עמיעוז": ("דרום הארץ", 31.2461, 34.4125),
-    "אשכול": ("דרום הארץ", 31.2461, 34.4125),
-    "כסייפה": ("דרום הארץ", 31.2439, 35.0919),
-    "ערד": ("דרום הארץ", 31.2589, 35.2128),
-    "רמת חובב": ("דרום הארץ", 31.1336, 34.7889),
-    "נאות חובב": ("דרום הארץ", 31.1336, 34.7889),
-    "דימונה": ("דרום הארץ", 31.0694, 35.0333),
-    "ירוחם": ("דרום הארץ", 30.9881, 34.9314),
-    "מצפה רמון": ("דרום הארץ", 30.6103, 34.8019),
-    "אילת": ("דרום הארץ", 29.5577, 34.9519),
+    # --- 6. דרום הארץ (אשדוד, גדרה, כנות, אשקלון, קריית מלאכי, קריית גת, שדרות, נתיבות, אופקים, באר שבע, נגב, אילת) ---
+    "אשדוד": ("דרום הארץ", 31.8044, 34.6553), "ניר גלים": ("דרום הארץ", 31.8272, 34.6828),
+    "בני דרום": ("דרום הארץ", 31.8194, 34.6897), "עד הלום": ("דרום הארץ", 31.7750, 34.6660),
+    "גן יבנה": ("דרום הארץ", 31.7872, 34.7064), "חצור אשדוד": ("דרום הארץ", 31.7744, 34.7214),
+    "חצור": ("דרום הארץ", 31.7744, 34.7214), "כנות": ("דרום הארץ", 31.7764, 34.7564),
+    "פארק תעשיות כנות": ("דרום הארץ", 31.7764, 34.7564), "גדרה": ("דרום הארץ", 31.8147, 34.7797),
+    "קדרון": ("דרום הארץ", 31.8178, 34.7969), "בית אלעזרי": ("דרום הארץ", 31.8358, 34.8075),
+    'בני עי"ש': ("דרום הארץ", 31.7819, 34.7397), "בני עייש": ("דרום הארץ", 31.7819, 34.7397),
+    "ביצרון": ("דרום הארץ", 31.7911, 34.7269), "נווה מבטח": ("דרום הארץ", 31.7969, 34.7339),
+    "באר טוביה": ("דרום הארץ", 31.7370, 34.7450), "קריית מלאכי": ("דרום הארץ", 31.7372, 34.7480),
+    "קרית מלאכי": ("דרום הארץ", 31.7372, 34.7480), "תימורים": ("דרום הארץ", 31.7169, 34.7636),
+    "כפר אחים": ("דרום הארץ", 31.7436, 34.7631), "ערוגות": ("דרום הארץ", 31.7322, 34.7706),
+    "ינון": ("דרום הארץ", 31.7336, 34.7806), "כפר ורבורג": ("דרום הארץ", 31.7186, 34.7239),
+    "אביגדור": ("דרום הארץ", 31.7114, 34.7381), "שפיר": ("דרום הארץ", 31.6989, 34.7269),
+    "מרכז שפירא": ("דרום הארץ", 31.6989, 34.7069), "עין צורים": ("דרום הארץ", 31.6961, 34.7169),
+    "משואות יצחק": ("דרום הארץ", 31.7036, 34.6894), "נגבה": ("דרום הארץ", 31.6661, 34.6828),
+    "שדה יואב": ("דרום הארץ", 31.6489, 34.6778), "ניצנים": ("דרום הארץ", 31.7169, 34.6344),
+    "אשקלון": ("דרום הארץ", 31.6440, 34.5800), "ברכיה": ("דרום הארץ", 31.6711, 34.6214),
+    "משען": ("דרום הארץ", 31.6531, 34.6219), "כפר סילבר": ("דרום הארץ", 31.6719, 34.6075),
+    "בת הדר": ("דרום הארץ", 31.6461, 34.6022), "מבקיעים": ("דרום הארץ", 31.6175, 34.5789),
+    "כרמיה": ("דרום הארץ", 31.6083, 34.5442), "זיקים": ("דרום הארץ", 31.6078, 34.5222),
+    "יד מרדכי": ("דרום הארץ", 31.5886, 34.5586), "נתיב העשרה": ("דרום הארץ", 31.5719, 34.5422),
+    "ארז": ("דרום הארץ", 31.5597, 34.5664), "אור הנר": ("דרום הארץ", 31.5553, 34.5847),
+    "גברעם": ("דרום הארץ", 31.5942, 34.6119), "רוחמה": ("דרום הארץ", 31.4969, 34.7042),
+    "דורות": ("דרום הארץ", 31.5092, 34.6461), "ברור חיל": ("דרום הארץ", 31.5558, 34.6458),
+    "ניר עם": ("דרום הארץ", 31.5194, 34.5819), "מפלסים": ("דרום הארץ", 31.5019, 34.5578),
+    "כפר עזה": ("דרום הארץ", 31.4828, 34.5342), "סעד": ("דרום הארץ", 31.4706, 34.5356),
+    "נחל עוז": ("דרום הארץ", 31.4725, 34.4975), "עלומים": ("דרום הארץ", 31.4539, 34.5125),
+    "בארי": ("דרום הארץ", 31.4239, 34.4914), "רעים": ("דרום הארץ", 31.3858, 34.4594),
+    "כיסופים": ("דרום הארץ", 31.3742, 34.3983), "עין השלושה": ("דרום הארץ", 31.3522, 34.4042),
+    "נירים": ("דרום הארץ", 31.3358, 34.3956), "ניר עוז": ("דרום הארץ", 31.3100, 34.4022),
+    "מגן": ("דרום הארץ", 31.2994, 34.4269), "עין הבשור": ("דרום הארץ", 31.2817, 34.4478),
+    "אורים": ("דרום הארץ", 31.3039, 34.5247), "צאלים": ("דרום הארץ", 31.2028, 34.5364),
+    "רביבים": ("דרום הארץ", 31.0439, 34.7214), "משאבי שדה": ("דרום הארץ", 31.0044, 34.7867),
+    "שדה בוקר": ("דרום הארץ", 30.8736, 34.7931), "מדרשת בן גוריון": ("דרום הארץ", 30.8522, 34.7831),
+    "עמיעוז": ("דרום הארץ", 31.2461, 34.4125), "מושב עמיעוז": ("דרום הארץ", 31.2461, 34.4125),
+    "אשכול": ("דרום הארץ", 31.2461, 34.4125), "שער הנגב": ("דרום הארץ", 31.5150, 34.5950),
+    "שדות נגב": ("דרום הארץ", 31.4250, 34.5880), "חוף אשקלון": ("דרום הארץ", 31.6461, 34.6022),
+    "קריית גת": ("דרום הארץ", 31.6020, 34.7820), "קרית גת": ("דרום הארץ", 31.6020, 34.7820),
+    "שדרות": ("דרום הארץ", 31.5250, 34.5956), "נתיבות": ("דרום הארץ", 31.4231, 34.5886),
+    "אופקים": ("דרום הארץ", 31.3142, 34.6203), "רהט": ("דרום הארץ", 31.3953, 34.7544),
+    "בית קמה": ("דרום הארץ", 31.4461, 34.7636), "שובל": ("דרום הארץ", 31.4139, 34.7436),
+    "משמר הנגב": ("דרום הארץ", 31.3622, 34.7186), "חצרים": ("דרום הארץ", 31.2408, 34.7156),
+    "להבים": ("דרום הארץ", 31.3728, 34.8169), "דביר": ("דרום הארץ", 31.4114, 34.8256),
+    "להב": ("דרום הארץ", 31.3792, 34.8711), "כרמים": ("דרום הארץ", 31.3414, 34.9169),
+    "מיתר": ("דרום הארץ", 31.3264, 34.9389), "לקיה": ("דרום הארץ", 31.3283, 34.8586),
+    "חורה": ("דרום הארץ", 31.2961, 34.9367), "עומר": ("דרום הארץ", 31.2672, 34.8494),
+    "באר שבע": ("דרום הארץ", 31.2530, 34.7915), "עמק שרה": ("דרום הארץ", 31.2250, 34.8150),
+    "תל שבע": ("דרום הארץ", 31.2469, 34.8292), "נבטים": ("דרום הארץ", 31.2194, 34.8819),
+    "שגב שלום": ("דרום הארץ", 31.1981, 34.8392), "רמת חובב": ("דרום הארץ", 31.1336, 34.7889),
+    "נאות חובב": ("דרום הארץ", 31.1336, 34.7889), "כסייפה": ("דרום הארץ", 31.2439, 35.0919),
+    "ערד": ("דרום הארץ", 31.2589, 35.2128), "דימונה": ("דרום הארץ", 31.0694, 35.0333),
+    "מישור רותם": ("דרום הארץ", 31.0500, 35.1650), "ירוחם": ("דרום הארץ", 30.9881, 34.9314),
+    "מצפה רמון": ("דרום הארץ", 30.6103, 34.8019), "יטבתה": ("דרום הארץ", 29.8953, 35.0619),
+    "אילות": ("דרום הארץ", 29.5789, 34.9614), "אילת": ("דרום הארץ", 29.5577, 34.9519),
 }
 
 SPECIFIC_ADDRESS_COORDS: list[tuple[str, str, float, float]] = [
     ("ראשון לציון", "אליהו איתן", 31.9868, 34.7695),
     ("ראשון לציון", "שמוטקין", 31.9702, 34.8065),
     ("חיפה", "חלוצי התעשיה", 32.8055, 35.0480),
+    ("מפרץ חיפה", "חלוצי התעשייה", 32.8055, 35.0480),
     ("מפרץ חיפה", "הקיטור", 32.8135, 35.0540),
-    ("אשדוד", "מבוא הספנים 1", 31.8315, 34.6465),
-    ("אשדוד", "מבוא הספנים 6", 31.8322, 34.6482),
-    ("אשדוד", "פארק נמלי ישראל", 31.8245, 34.6610),
-    ("אשדוד", "הקידמה 1", 31.8210, 34.6595),
 ]
 
 CBS_SUBDISTRICT_TO_REGION: dict[str, tuple[str, float, float]] = {
@@ -916,9 +975,6 @@ CBS_SUBDISTRICT_TO_REGION: dict[str, tuple[str, float, float]] = {
 }
 
 
-# ==============================================================================
-# 4. סיווג גיאוגרפי ופענוח כתובות
-# ==============================================================================
 def classify_coordinates_to_region(lat: float, lon: float) -> str:
     if 31.62 <= lat <= 31.95 and lon >= 34.93:
         return "איזור ירושלים"
@@ -926,7 +982,7 @@ def classify_coordinates_to_region(lat: float, lon: float) -> str:
         return "דרום הארץ"
     if 31.83 <= lat < 32.13:
         return "איזור גוש דן"
-    if 32.13 <= lat < 32.42 and lon < 35.12:
+    if 32.13 <= lat < 32.41 and lon < 35.05:
         return "אזור השרון"
     if lat >= 32.35:
         if lon >= 35.22:
@@ -935,15 +991,78 @@ def classify_coordinates_to_region(lat: float, lon: float) -> str:
     return "איזור גוש דן"
 
 
-def clean_location_text(raw_text: str | None) -> str:
+def normalize_locality_text(
+    raw_text: str | None, remove_parens: bool = True
+) -> str:
     if not raw_text:
         return ""
     text = str(raw_text).strip()
+    if remove_parens:
+        text = re.sub(r"\([^)]*\)", " ", text)
     text = re.sub(r"ת\.?ד\.?\s*\d+\s*,?", " ", text)
-    text = re.sub(r"\([^)]*\)", " ", text)
-    text = re.sub(r'אזה"?ת|אזור תעשייה|איזור תעשיה|תעשיות|מרלו"?ג', " ", text)
+    text = re.sub(r"מיקוד\s*\d+\s*,?", " ", text)
+    text = re.sub(r"\b\d{5,7}\b", " ", text)
+    text = re.sub(
+        r'^(?:קיבוץ|קבוץ|קבוצת|מושב|כפר שיתופי|יישוב|ישוב|מועצה אזורית|מ\.?א\.?|ד\.?נ\.?|דואר נע|אזה"?ת|א\.?ת\.?|אזור תעשייה|אזור התעשיה|איזור תעשיה|פארק תעשיות|פארק תעשייה|פארק תעשיה)\s+',
+        "",
+        text.strip(),
+    )
+    text = text.replace("-", " ").replace("/", " ")
     text = re.sub(r"\s+", " ", text).strip(" ,.-")
     return text
+
+
+def match_in_known_localities(
+    text: str | None, is_address_field: bool = False
+) -> tuple[str, float, float] | None:
+    if not text:
+        return None
+    raw = str(text).strip().strip(" ,.-")
+    if not raw:
+        return None
+
+    if raw in KNOWN_LOCALITIES:
+        return KNOWN_LOCALITIES[raw]
+
+    norm = normalize_locality_text(raw, remove_parens=True)
+    if norm in KNOWN_LOCALITIES:
+        return KNOWN_LOCALITIES[norm]
+
+    for variant in (
+        norm.replace("קריית ", "קרית "),
+        norm.replace("קרית ", "קריית "),
+        norm.replace("טירת הכרמל", "טירת כרמל"),
+    ):
+        if variant in KNOWN_LOCALITIES:
+            return KNOWN_LOCALITIES[variant]
+
+    search_target = norm
+    if is_address_field:
+        search_target = re.sub(
+            r"(?:רחוב|רח'|שד'|שדרות|דרך)\s+[א-ת\"'\-\s]+?\d+",
+            " ",
+            search_target,
+        )
+        search_target = re.sub(r"[א-ת\"'\-]+\s+\d+\b", " ", search_target)
+        search_target = re.sub(r"\s+", " ", search_target).strip(" ,.-")
+        if not search_target:
+            return None
+        if search_target in KNOWN_LOCALITIES:
+            return KNOWN_LOCALITIES[search_target]
+        norm_addr2 = normalize_locality_text(search_target, remove_parens=True)
+        if norm_addr2 in KNOWN_LOCALITIES:
+            return KNOWN_LOCALITIES[norm_addr2]
+
+    for loc_name, info in sorted(
+        KNOWN_LOCALITIES.items(), key=lambda x: len(x[0]), reverse=True
+    ):
+        if len(loc_name) < 3:
+            continue
+        pattern = rf"(?:^|[\s,.\-/()]){re.escape(loc_name)}(?:$|[\s,.\-/()])"
+        if re.search(pattern, search_target):
+            return info
+
+    return None
 
 
 def load_cache() -> dict[str, Any]:
@@ -965,90 +1084,92 @@ def save_cache(cache: dict[str, Any]) -> None:
 
 
 def query_external_geocoding_coords(
-    query: str, timeout: int = 6
+    query: str, api_key: str = "", timeout: int = 5
 ) -> tuple[str, float, float] | None:
-    search_query = f"{query}, ישראל"
-    google_api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+    clean_q = normalize_locality_text(query, remove_parens=True)
+    if not clean_q or len(clean_q) < 2:
+        return None
 
-    if google_api_key:
+    queries_to_try = [clean_q]
+    raw_no_parens = re.sub(r"\([^)]*\)", " ", str(query)).strip(" ,.-")
+    if raw_no_parens and raw_no_parens not in queries_to_try:
+        queries_to_try.insert(0, raw_no_parens)
+
+    if api_key:
+        for q in queries_to_try:
+            try:
+                resp = requests.get(
+                    "https://maps.googleapis.com/maps/api/geocode/json",
+                    params={
+                        "address": f"{q}, ישראל",
+                        "key": api_key,
+                        "language": "iw",
+                    },
+                    timeout=timeout,
+                )
+                if resp.status_code == 200:
+                    results = resp.json().get("results", [])
+                    if results:
+                        loc = results[0]["geometry"]["location"]
+                        lat, lon = float(loc["lat"]), float(loc["lng"])
+                        return classify_coordinates_to_region(lat, lon), lat, lon
+            except Exception:
+                pass
+
+    for q in queries_to_try:
         try:
-            g_url = "https://maps.googleapis.com/maps/api/geocode/json"
             resp = requests.get(
-                g_url,
-                params={"address": search_query, "key": google_api_key, "language": "iw"},
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "q": f"{q}, ישראל",
+                    "format": "json",
+                    "limit": 1,
+                    "countrycodes": "il",
+                },
+                headers={"User-Agent": "DormacoOrderRouter/4.0"},
                 timeout=timeout,
             )
             if resp.status_code == 200:
-                results = resp.json().get("results", [])
-                if results:
-                    loc = results[0]["geometry"]["location"]
-                    lat, lon = float(loc["lat"]), float(loc["lng"])
+                data = resp.json()
+                if data:
+                    lat = float(data[0]["lat"])
+                    lon = float(data[0]["lon"])
                     return classify_coordinates_to_region(lat, lon), lat, lon
         except Exception:
             pass
 
-    try:
-        nom_url = "https://nominatim.openstreetmap.org/search"
-        headers = {"User-Agent": "DormacoOrderRegionSorter/6.1 (Python/3.12)"}
-        resp = requests.get(
-            nom_url,
-            params={
-                "q": search_query,
-                "format": "json",
-                "limit": 1,
-                "countrycodes": "il",
-            },
-            headers=headers,
-            timeout=timeout,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if data:
-                lat = float(data[0]["lat"])
-                lon = float(data[0]["lon"])
-                return classify_coordinates_to_region(lat, lon), lat, lon
-        time.sleep(1.0)
-    except Exception:
-        pass
+    for q in queries_to_try:
+        try:
+            resp = requests.get(
+                "https://data.gov.il/api/3/action/datastore_search",
+                params={
+                    "resource_id": "5c78e9fa-c2e2-4771-93ff-7f400a12f7ba",
+                    "q": q,
+                    "limit": 5,
+                },
+                timeout=timeout,
+            )
+            if resp.status_code == 200:
+                records = resp.json().get("result", {}).get("records", [])
+                for rec in records:
+                    nafa = str(rec.get("שם_נפה", "")).strip()
+                    for key, info in CBS_SUBDISTRICT_TO_REGION.items():
+                        if key in nafa:
+                            return info
+        except Exception:
+            pass
 
-    return None
-
-
-def query_data_gov_il_api(
-    locality_query: str, timeout: int = 5
-) -> tuple[str, float, float] | None:
-    url = "https://data.gov.il/api/3/action/datastore_search"
-    params = {
-        "resource_id": "5c78e9fa-c2e2-4771-93ff-7f400a12f7ba",
-        "q": locality_query,
-        "limit": 5,
-    }
-    try:
-        resp = requests.get(url, params=params, timeout=timeout)
-        if resp.status_code == 200:
-            records = resp.json().get("result", {}).get("records", [])
-            for rec in records:
-                nafa = str(rec.get("שם_נפה", "")).strip()
-                for key, info in CBS_SUBDISTRICT_TO_REGION.items():
-                    if key in nafa:
-                        return info
-    except Exception:
-        pass
     return None
 
 
 def resolve_region_and_coords(
     destination: str | None,
     address: str | None,
-    site_name: str | None = None,
-    phone: str | None = None,
-    cache: dict[str, Any] | None = None,
-    use_external_api: bool = True,
-    prefer_site_name_city: bool = False,
+    site_name: str | None,
+    phone: str | None,
+    cache: dict[str, Any],
+    cfg: dict[str, Any],
 ) -> tuple[str, float, float]:
-    if cache is None:
-        cache = {}
-
     dest_str = str(destination or "").strip()
     addr_str = str(address or "").strip()
     site_str = str(site_name or "").strip()
@@ -1058,82 +1179,84 @@ def resolve_region_and_coords(
             reg = KNOWN_LOCALITIES[city_kw][0]
             return reg, s_lat, s_lon
 
-    candidates: list[str] = []
-    if prefer_site_name_city and site_str:
-        candidates.append(site_str)
+    is_dn_postal = bool(
+        re.match(r"^(?:ד\.?נ\.?|דואר נע|מועצה אזורית|מ\.?א\.?)\b", dest_str)
+    )
+
+    if cfg.get("PREFER_SITE_NAME_CITY") and site_str:
+        res = match_in_known_localities(site_str, is_address_field=False)
+        if res:
+            return res
+
+    # אם היעד הוא "דואר נע מנשה" וכד', נבדוק קודם אם שם הקיבוץ הספציפי רשום בכתובת (למשל "קיבוץ מענית")
+    if is_dn_postal and addr_str:
+        res = match_in_known_localities(addr_str, is_address_field=True)
+        if res:
+            return res
+
+    # 1. בדיקה בעמודת היעד (העמודה הקובעת של היישוב)
     if dest_str:
-        candidates.append(dest_str)
-    if addr_str:
-        candidates.append(addr_str)
-    if not prefer_site_name_city and site_str:
-        candidates.append(site_str)
+        res = match_in_known_localities(dest_str, is_address_field=False)
+        if res:
+            return res
 
-    for cand in candidates:
-        if not cand:
-            continue
-        if cand in KNOWN_LOCALITIES:
-            return KNOWN_LOCALITIES[cand]
-        cleaned = clean_location_text(cand)
-        if cleaned in KNOWN_LOCALITIES:
-            return KNOWN_LOCALITIES[cleaned]
-        if cand in cache and isinstance(cache[cand], list) and len(cache[cand]) == 3:
-            reg, lat, lon = cache[cand]
-            return str(reg), float(lat), float(lon)
-        for loc_name, info in sorted(
-            KNOWN_LOCALITIES.items(), key=lambda x: len(x[0]), reverse=True
+        if (
+            dest_str in cache
+            and isinstance(cache[dest_str], list)
+            and len(cache[dest_str]) == 3
         ):
-            if loc_name in cand or loc_name in cleaned:
-                return info
+            reg, lat, lon = cache[dest_str]
+            return str(reg), float(lat), float(lon)
 
-    if use_external_api:
-        if dest_str and addr_str:
-            combined = f"{clean_location_text(addr_str)}, {clean_location_text(dest_str)}"
-            res = query_external_geocoding_coords(combined)
-            if res:
-                cache[combined] = list(res)
+        if cfg.get("USE_EXTERNAL_ROUTING_API", True):
+            ext_res = query_external_geocoding_coords(
+                dest_str, api_key=cfg.get("GOOGLE_MAPS_API_KEY", "")
+            )
+            if ext_res:
+                cache[dest_str] = list(ext_res)
                 save_cache(cache)
-                return res
+                return ext_res
 
-        for cand in candidates:
-            cleaned = clean_location_text(cand)
-            if not cleaned:
-                continue
-            res = query_external_geocoding_coords(cleaned)
-            if res:
-                cache[cand] = list(res)
-                save_cache(cache)
-                return res
-            res_gov = query_data_gov_il_api(cleaned)
-            if res_gov:
-                cache[cand] = list(res_gov)
-                save_cache(cache)
-                return res_gov
+    # 2. רק אם היעד ריק או לא זוהה כלל - בדיקה זהירה בעמודת הכתובת (ללא הערות בסוגריים וללא רחובות)
+    if addr_str:
+        res = match_in_known_localities(addr_str, is_address_field=True)
+        if res:
+            return res
 
-    phone_str = str(phone or "").strip()
+        if cfg.get("USE_EXTERNAL_ROUTING_API", True) and not dest_str:
+            ext_res = query_external_geocoding_coords(
+                addr_str, api_key=cfg.get("GOOGLE_MAPS_API_KEY", "")
+            )
+            if ext_res:
+                cache[addr_str] = list(ext_res)
+                save_cache(cache)
+                return ext_res
+
+    # 3. בדיקה בשם האתר
+    if site_str:
+        res = match_in_known_localities(site_str, is_address_field=True)
+        if res:
+            return res
+
+    # 4. גיבוי לפי קידומת טלפון קווי
+    phone_str = re.sub(r"\D", "", str(phone or ""))
     if phone_str.startswith("02"):
         return ("איזור ירושלים", 31.7683, 35.2137)
     if phone_str.startswith("09"):
         return ("אזור השרון", 32.2770, 34.8640)
-    if phone_str.startswith("03"):
-        return ("איזור גוש דן", 32.0158, 34.7874)
     if phone_str.startswith("08"):
         return ("דרום הארץ", 31.6440, 34.5800)
     if phone_str.startswith("04"):
         return ("צפון מערב", 32.7940, 34.9896)
+    if phone_str.startswith("03"):
+        return ("איזור גוש דן", 32.0158, 34.7874)
 
-    return ("איזור גוש דן", 32.0158, 34.7874)
+    return ("איזור גוש דן", 32.0853, 34.8500)
 
 
 # ==============================================================================
-# 5. חישוב זמני נסיעה בכבישי ישראל + העמסה מ-4 מחסנים באשדוד
+# 3. חישוב זמני נסיעה אמיתיים בכבישי ישראל למשאיות (Google Maps / OSRM / Offline)
 # ==============================================================================
-NODE_HOME = 0
-NODE_MAIN_WH = 1
-NODE_COOLING_WH = 2
-NODE_HAZMAT_WH = 3
-NODE_GOLDBOND_WH = 4
-
-
 def haversine_air_km(c1: tuple[float, float], c2: tuple[float, float]) -> float:
     lat1, lon1 = math.radians(c1[0]), math.radians(c1[1])
     lat2, lon2 = math.radians(c2[0]), math.radians(c2[1])
@@ -1146,703 +1269,441 @@ def haversine_air_km(c1: tuple[float, float], c2: tuple[float, float]) -> float:
     return 6371.0 * (2 * math.asin(math.sqrt(a)))
 
 
-def estimate_israel_road_drive_minutes(
-    c1: tuple[float, float], c2: tuple[float, float]
+def estimate_israel_truck_travel_minutes(
+    c1: tuple[float, float],
+    c2: tuple[float, float],
+    speed_factor: float = 1.20,
 ) -> float:
     air_km = haversine_air_km(c1, c2)
-    if air_km < 0.05:
-        return 1.0
-    if air_km < 0.8:
-        return 3.0
+    if air_km < 0.15:
+        return 0.0
+    if air_km < 1.2:
+        return 4.0
 
-    avg_lon = (c1[1] + c2[1]) / 2.0
-    avg_lat = (c1[0] + c2[0]) / 2.0
-    if avg_lon > 35.05 or (31.65 <= avg_lat <= 31.92 and avg_lon > 34.95):
-        circuity = 1.35
-    else:
-        circuity = 1.24
-
+    in_mountain = (c1[1] > 35.05 and 31.60 <= c1[0] <= 32.05) or (
+        c2[1] > 35.05 and 31.60 <= c2[0] <= 32.05
+    )
+    circuity = 1.35 if in_mountain else 1.24
     road_km = air_km * circuity
 
-    if road_km < 8.0:
-        speed_kmh = 32.0
-    elif road_km < 25.0:
-        speed_kmh = 50.0
-    elif road_km < 65.0:
-        speed_kmh = 64.0
+    if road_km <= 8.0:
+        avg_speed_kmh = 34.0
+    elif road_km <= 25.0:
+        avg_speed_kmh = 48.0
+    elif road_km <= 65.0:
+        avg_speed_kmh = 62.0
     else:
-        speed_kmh = 70.0
+        avg_speed_kmh = 68.0
 
-    return round((road_km / speed_kmh) * 60.0 + 4.0, 1)
+    base_minutes = (road_km / avg_speed_kmh) * 60.0 + 4.0
+    return round(base_minutes * (speed_factor / 1.20), 1)
 
 
-def fetch_google_distance_matrix(
-    points: list[tuple[float, float]],
-    api_key: str,
-    truck_speed_factor: float,
-    fallback_matrix: list[list[float]],
-) -> list[list[float]] | None:
+def build_travel_minutes_matrix(
+    points: list[tuple[float, float]], cfg: dict[str, Any]
+) -> list[list[float]]:
     n = len(points)
-    if n > 25:
-        return None
-    try:
-        locs = "|".join(f"{lat:.5f},{lon:.5f}" for lat, lon in points)
-        url = "https://maps.googleapis.com/maps/api/distancematrix/json"
-        matrix = [[fallback_matrix[i][j] for j in range(n)] for i in range(n)]
-        batch_size = max(1, 100 // n)
-        for start_i in range(0, n, batch_size):
-            end_i = min(n, start_i + batch_size)
-            origins_str = "|".join(
-                f"{points[i][0]:.5f},{points[i][1]:.5f}" for i in range(start_i, end_i)
-            )
+    speed_factor = float(cfg.get("OSRM_TRUCK_SPEED_FACTOR", 1.20))
+    use_api = bool(cfg.get("USE_EXTERNAL_ROUTING_API", True))
+    g_key = str(cfg.get("GOOGLE_MAPS_API_KEY", "")).strip()
+
+    if use_api and g_key and 2 <= n <= 25:
+        try:
+            locs = "|".join(f"{lat:.5f},{lon:.5f}" for lat, lon in points)
             resp = requests.get(
-                url,
+                "https://maps.googleapis.com/maps/api/distancematrix/json",
                 params={
-                    "origins": origins_str,
+                    "origins": locs,
                     "destinations": locs,
                     "mode": "driving",
-                    "language": "iw",
-                    "region": "il",
-                    "key": api_key,
+                    "key": g_key,
                 },
                 timeout=6,
             )
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            if data.get("status") != "OK":
-                return None
-            rows = data.get("rows", [])
-            for r_offset, row_obj in enumerate(rows):
-                i = start_i + r_offset
-                elements = row_obj.get("elements", [])
-                for j, el in enumerate(elements):
-                    if i == j:
-                        matrix[i][j] = 0.0
-                    elif el.get("status") == "OK" and "duration" in el:
-                        sec = float(el["duration"]["value"])
-                        g_min = (sec / 60.0) * truck_speed_factor
-                        matrix[i][j] = round(max(g_min, fallback_matrix[i][j] * 0.8), 1)
-        return matrix
-    except Exception:
-        return None
+            if resp.status_code == 200:
+                rows = resp.json().get("rows", [])
+                if len(rows) == n:
+                    mat: list[list[float]] = []
+                    for i, r in enumerate(rows):
+                        row_vals: list[float] = []
+                        for j, elem in enumerate(r.get("elements", [])):
+                            if i == j:
+                                row_vals.append(0.0)
+                            elif elem.get("status") == "OK":
+                                secs = float(elem["duration"]["value"])
+                                row_vals.append(
+                                    round((secs / 60.0) * speed_factor, 1)
+                                )
+                            else:
+                                row_vals.append(
+                                    estimate_israel_truck_travel_minutes(
+                                        points[i], points[j], speed_factor
+                                    )
+                                )
+                        mat.append(row_vals)
+                    return mat
+        except Exception:
+            pass
 
+    if use_api and 2 <= n <= 50:
+        coords_str = ";".join(f"{lon:.5f},{lat:.5f}" for lat, lon in points)
+        url = f"https://router.project-osrm.org/table/v1/driving/{coords_str}?annotations=duration"
+        try:
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                durations = resp.json().get("durations")
+                if durations and len(durations) == n:
+                    return [
+                        [
+                            0.0
+                            if i == j
+                            else round(
+                                (float(durations[i][j]) / 60.0) * speed_factor,
+                                1,
+                            )
+                            if durations[i][j] is not None
+                            else estimate_israel_truck_travel_minutes(
+                                points[i], points[j], speed_factor
+                            )
+                            for j in range(n)
+                        ]
+                        for i in range(n)
+                    ]
+        except Exception:
+            pass
 
-def fetch_real_road_minutes_matrix(
-    points: list[tuple[float, float]],
-    use_external_api: bool = True,
-    truck_speed_factor: float = OSRM_TRUCK_SPEED_FACTOR,
-) -> list[list[float]]:
-    n = len(points)
-    fallback_matrix = [
+    return [
         [
-            0.0 if i == j else estimate_israel_road_drive_minutes(points[i], points[j])
+            0.0
+            if i == j
+            else estimate_israel_truck_travel_minutes(
+                points[i], points[j], speed_factor
+            )
             for j in range(n)
         ]
         for i in range(n)
     ]
 
-    if not use_external_api or n <= 1 or n > 65:
-        return fallback_matrix
 
-    google_api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
-    if google_api_key:
-        g_matrix = fetch_google_distance_matrix(
-            points, google_api_key, truck_speed_factor, fallback_matrix
-        )
-        if g_matrix is not None:
-            return g_matrix
-
-    coords_str = ";".join(f"{lon:.5f},{lat:.5f}" for lat, lon in points)
-    url = f"https://router.project-osrm.org/table/v1/driving/{coords_str}?annotations=duration"
+def parse_hhmm_to_minutes(hhmm: str) -> float:
+    parts = str(hhmm or "05:30").strip().split(":")
     try:
-        resp = requests.get(url, timeout=6)
-        if resp.status_code == 200:
-            data = resp.json()
-            durations = data.get("durations")
-            if durations and len(durations) == n:
-                matrix: list[list[float]] = []
-                for i in range(n):
-                    row_vals: list[float] = []
-                    for j in range(n):
-                        if i == j:
-                            row_vals.append(0.0)
-                        elif durations[i][j] is not None and durations[i][j] > 0:
-                            osrm_min = (float(durations[i][j]) / 60.0) * truck_speed_factor
-                            row_vals.append(
-                                round(max(osrm_min, fallback_matrix[i][j] * 0.8), 1)
-                            )
-                        else:
-                            row_vals.append(fallback_matrix[i][j])
-                    matrix.append(row_vals)
-                return matrix
+        return int(parts[0]) * 60 + int(parts[1])
     except Exception:
-        pass
-
-    return fallback_matrix
+        return 5 * 60 + 30
 
 
-def format_hhmm(minutes_from_midnight: float) -> str:
-    total_min = int(round(minutes_from_midnight))
-    hh = (total_min // 60) % 24
-    mm = total_min % 60
-    return f"{hh:02d}:{mm:02d}"
+def format_minutes_to_hhmm(total_minutes: float) -> str:
+    m = int(round(total_minutes)) % (24 * 60)
+    return f"{m // 60:02d}:{m % 60:02d}"
 
 
 def format_duration_hhmm(duration_minutes: float) -> str:
-    total_min = max(0, int(round(duration_minutes)))
-    hh = total_min // 60
-    mm = total_min % 60
-    return f"{hh:02d}:{mm:02d}"
+    m = max(0, int(round(duration_minutes)))
+    return f"{m // 60:02d}:{m % 60:02d}"
 
 
-def optimize_open_tsp_order(
+# ==============================================================================
+# 4. סימולציית משמרת נהג מלאה (בית -> 4 מחסנים באשדוד -> לקוחות -> בית)
+# ==============================================================================
+def solve_open_or_closed_tsp(
     stop_indices: list[int],
-    start_node: int,
-    end_node: int,
-    drive_matrix: list[list[float]],
+    start_idx: int,
+    end_idx: int | None,
+    matrix: list[list[float]],
 ) -> list[int]:
     k = len(stop_indices)
     if k <= 1:
         return list(stop_indices)
 
     if k <= 8:
-        best_perm = tuple(stop_indices)
+        best_perm = list(stop_indices)
         best_cost = float("inf")
         for perm in itertools.permutations(stop_indices):
-            cost = drive_matrix[start_node][perm[0]]
+            cost = matrix[start_idx][perm[0]]
             for idx in range(k - 1):
-                cost += drive_matrix[perm[idx]][perm[idx + 1]]
+                cost += matrix[perm[idx]][perm[idx + 1]]
                 if cost >= best_cost:
                     break
-            cost += drive_matrix[perm[-1]][end_node]
+            if end_idx is not None:
+                cost += matrix[perm[-1]][end_idx]
             if cost < best_cost:
                 best_cost = cost
-                best_perm = perm
-        return list(best_perm)
+                best_perm = list(perm)
+        return best_perm
 
     unvisited = set(stop_indices)
-    current = start_node
+    curr = start_idx
     tour: list[int] = []
     while unvisited:
-        nxt = min(unvisited, key=lambda node: drive_matrix[current][node])
+        nxt = min(unvisited, key=lambda node: matrix[curr][node])
         tour.append(nxt)
         unvisited.remove(nxt)
-        current = nxt
+        curr = nxt
 
     improved = True
     while improved:
         improved = False
         for i in range(k - 1):
             for j in range(i + 1, k):
-                prev_node = start_node if i == 0 else tour[i - 1]
-                next_node = end_node if j + 1 == k else tour[j + 1]
-                old_edge = drive_matrix[prev_node][tour[i]] + drive_matrix[tour[j]][next_node]
-                new_edge = drive_matrix[prev_node][tour[j]] + drive_matrix[tour[i]][next_node]
-                if new_edge + 1e-6 < old_edge:
+                prev_n = start_idx if i == 0 else tour[i - 1]
+                next_n = tour[j + 1] if j + 1 < k else end_idx
+                old_c = matrix[prev_n][tour[i]] + (
+                    matrix[tour[j]][next_n] if next_n is not None else 0.0
+                )
+                new_c = matrix[prev_n][tour[j]] + (
+                    matrix[tour[i]][next_n] if next_n is not None else 0.0
+                )
+                if new_c + 1e-4 < old_c:
                     tour[i : j + 1] = reversed(tour[i : j + 1])
                     improved = True
-
     return tour
 
 
-def evaluate_truck_route(
-    ordered_stops: list[dict[str, Any]],
-    drive_matrix: list[list[float]],
-    main_load_minutes: float = MAIN_WAREHOUSE_LOAD_MINUTES,
-    cooling_load_minutes: float = COOLING_WAREHOUSE_LOAD_MINUTES,
-    hazmat_load_minutes: float = HAZMAT_WAREHOUSE_LOAD_MINUTES,
-    goldbond_load_minutes: float = GOLDBOND_WAREHOUSE_LOAD_MINUTES,
-    unload_minutes: float = UNLOAD_MINUTES,
-    start_minutes: float = DRIVER_START_MINUTES,
-    always_load_main_wh: bool = ALWAYS_LOAD_AT_MAIN_WAREHOUSE,
+def simulate_driver_shift(
+    stops: list[dict[str, Any]],
+    matrix: list[list[float]],
+    cfg: dict[str, Any],
+    preserve_region_sequence: bool = False,
 ) -> dict[str, Any]:
-    has_regular = False
-    has_cooling = False
-    has_hazmat = False
-    has_goldbond = False
+    """
+    נקודות קבועות במטריצה:
+    0 = בית (32.3215, 34.8532)
+    1 = אוברסיז (מבוא הספנים 1 אשדוד)
+    2 = מחסן קירור (מבוא הספנים 6 אשדוד)
+    3 = מחסן חומ"ס (פארק נמלי ישראל, אשדוד)
+    4 = גולד בונד (הקידמה 1 אשדוד)
+    """
+    start_min = parse_hhmm_to_minutes(cfg["DRIVER_DEPARTURE_TIME"])
+    unload_min = float(cfg["UNLOAD_MINUTES"])
+    home_name = str(cfg.get("DRIVER_HOME_NAME", "בית"))
 
-    for st in ordered_stops:
-        for r in st["records"]:
-            w_type = r.get("warehouse_type", "אוברסיז")
-            if w_type == "קירור":
-                has_cooling = True
-            elif w_type == 'חומ"ס':
-                has_hazmat = True
-            elif w_type == "גולד בונד":
-                has_goldbond = True
+    wh_configs = [
+        (
+            1,
+            cfg["MAIN_WAREHOUSE_NAME"],
+            cfg["MAIN_WAREHOUSE_ADDRESS"],
+            float(cfg["MAIN_WAREHOUSE_LOAD_MINUTES"]),
+            "needs_main",
+        ),
+        (
+            2,
+            cfg["COOLING_WAREHOUSE_NAME"],
+            cfg["COOLING_WAREHOUSE_ADDRESS"],
+            float(cfg["COOLING_WAREHOUSE_LOAD_MINUTES"]),
+            "needs_cooling",
+        ),
+        (
+            3,
+            cfg["HAZMAT_WAREHOUSE_NAME"],
+            cfg["HAZMAT_WAREHOUSE_ADDRESS"],
+            float(cfg["HAZMAT_WAREHOUSE_LOAD_MINUTES"]),
+            "needs_hazmat",
+        ),
+        (
+            4,
+            cfg["GOLDBOND_WAREHOUSE_NAME"],
+            cfg["GOLDBOND_WAREHOUSE_ADDRESS"],
+            float(cfg["GOLDBOND_WAREHOUSE_LOAD_MINUTES"]),
+            "needs_goldbond",
+        ),
+    ]
+
+    active_whs: list[tuple[int, str, str, float]] = []
+    for wh_idx, wh_name, wh_addr, wh_load_min, flag_key in wh_configs:
+        has_flag = any(s.get(flag_key, False) for s in stops)
+        if wh_idx == 1 and cfg.get("ALWAYS_LOAD_AT_MAIN_WAREHOUSE", True):
+            has_flag = True
+        if has_flag:
+            active_whs.append((wh_idx, wh_name, wh_addr, wh_load_min))
+
+    if not active_whs:
+        active_whs.append(
+            (
+                1,
+                cfg["MAIN_WAREHOUSE_NAME"],
+                cfg["MAIN_WAREHOUSE_ADDRESS"],
+                float(cfg["MAIN_WAREHOUSE_LOAD_MINUTES"]),
+            )
+        )
+
+    curr_time = start_min
+    curr_node = 0
+    wh_logs: list[str] = []
+
+    for wh_node, wh_name, _wh_addr, wh_load_min in active_whs:
+        curr_time += matrix[curr_node][wh_node]
+        arr_s = format_minutes_to_hhmm(curr_time)
+        curr_time += wh_load_min
+        dep_s = format_minutes_to_hhmm(curr_time)
+        wh_logs.append(f"{wh_name} ({int(wh_load_min)} דק') [{arr_s}-{dep_s}]")
+        curr_node = wh_node
+
+    stop_map = {s["matrix_idx"]: s for s in stops}
+    if not preserve_region_sequence:
+        ordered_idxs = solve_open_or_closed_tsp(
+            [s["matrix_idx"] for s in stops],
+            start_idx=curr_node,
+            end_idx=0,
+            matrix=matrix,
+        )
+    else:
+        ordered_idxs = []
+        grouped_regs: list[tuple[str, list[int]]] = []
+        for s in stops:
+            if not grouped_regs or grouped_regs[-1][0] != s["region"]:
+                grouped_regs.append((s["region"], [s["matrix_idx"]]))
             else:
-                has_regular = True
+                grouped_regs[-1][1].append(s["matrix_idx"])
+        temp_start = curr_node
+        for g_idx, (_r_name, idxs) in enumerate(grouped_regs):
+            end_target = 0 if g_idx == len(grouped_regs) - 1 else None
+            sub_order = solve_open_or_closed_tsp(
+                idxs, start_idx=temp_start, end_idx=end_target, matrix=matrix
+            )
+            ordered_idxs.extend(sub_order)
+            temp_start = sub_order[-1]
 
-    warehouse_visits: list[dict[str, Any]] = []
-    current_time = start_minutes
-    current_node = NODE_HOME
-    total_drive_min = 0.0
-    total_load_min = 0.0
+    ordered_stops: list[dict[str, Any]] = []
+    schedule_details: list[dict[str, Any]] = []
+    timeline_parts = [f"יציאה מה{home_name} ({cfg['DRIVER_DEPARTURE_TIME']})"]
+    timeline_parts.extend(wh_logs)
 
-    # 1. מחסן אוברסיז - מבוא הספנים 1 אשדוד
-    if (
-        always_load_main_wh
-        or has_regular
-        or (not has_cooling and not has_hazmat and not has_goldbond)
-    ):
-        leg = drive_matrix[current_node][NODE_MAIN_WH]
-        arr = current_time + leg
-        dep = arr + main_load_minutes
-        total_drive_min += leg
-        total_load_min += main_load_minutes
-        warehouse_visits.append(
+    for route_pos, m_idx in enumerate(ordered_idxs, start=1):
+        st = stop_map[m_idx]
+        leg_min = matrix[curr_node][m_idx]
+        curr_time += leg_min
+        arr_min = curr_time
+        dep_min = arr_min + unload_min
+        curr_time = dep_min
+        curr_node = m_idx
+
+        arr_str = format_minutes_to_hhmm(arr_min)
+        dep_str = format_minutes_to_hhmm(dep_min)
+        timeline_parts.append(f"{st['effective_dest']} ({arr_str})")
+
+        ordered_stops.append(st)
+        schedule_details.append(
             {
-                "name": f"אוברסיז ({MAIN_WAREHOUSE_ADDRESS})",
-                "short_name": f"אוברסיז ({int(main_load_minutes)} דק')",
-                "node": NODE_MAIN_WH,
-                "arrival_min": arr,
-                "arrival_str": format_hhmm(arr),
-                "departure_min": dep,
-                "departure_str": format_hhmm(dep),
-            }
-        )
-        current_time = dep
-        current_node = NODE_MAIN_WH
-
-    # 2. מחסן קירור - מבוא הספנים 6 אשדוד
-    if has_cooling:
-        leg = drive_matrix[current_node][NODE_COOLING_WH]
-        arr = current_time + leg
-        dep = arr + cooling_load_minutes
-        total_drive_min += leg
-        total_load_min += cooling_load_minutes
-        warehouse_visits.append(
-            {
-                "name": f"מחסן קירור ({COOLING_WAREHOUSE_ADDRESS})",
-                "short_name": f"מחסן קירור ({int(cooling_load_minutes)} דק')",
-                "node": NODE_COOLING_WH,
-                "arrival_min": arr,
-                "arrival_str": format_hhmm(arr),
-                "departure_min": dep,
-                "departure_str": format_hhmm(dep),
-            }
-        )
-        current_time = dep
-        current_node = NODE_COOLING_WH
-
-    # 3. מחסן חומ"ס - פארק נמלי ישראל, אשדוד
-    if has_hazmat:
-        leg = drive_matrix[current_node][NODE_HAZMAT_WH]
-        arr = current_time + leg
-        dep = arr + hazmat_load_minutes
-        total_drive_min += leg
-        total_load_min += hazmat_load_minutes
-        warehouse_visits.append(
-            {
-                "name": f'מחסן חומ"ס ({HAZMAT_WAREHOUSE_ADDRESS})',
-                "short_name": f'מחסן חומ"ס ({int(hazmat_load_minutes)} דק\')',
-                "node": NODE_HAZMAT_WH,
-                "arrival_min": arr,
-                "arrival_str": format_hhmm(arr),
-                "departure_min": dep,
-                "departure_str": format_hhmm(dep),
-            }
-        )
-        current_time = dep
-        current_node = NODE_HAZMAT_WH
-
-    # 4. מחסן גולד בונד - הקידמה 1 אשדוד
-    if has_goldbond:
-        leg = drive_matrix[current_node][NODE_GOLDBOND_WH]
-        arr = current_time + leg
-        dep = arr + goldbond_load_minutes
-        total_drive_min += leg
-        total_load_min += goldbond_load_minutes
-        warehouse_visits.append(
-            {
-                "name": f"גולד בונד ({GOLDBOND_WAREHOUSE_ADDRESS})",
-                "short_name": f"גולד בונד ({int(goldbond_load_minutes)} דק')",
-                "node": NODE_GOLDBOND_WH,
-                "arrival_min": arr,
-                "arrival_str": format_hhmm(arr),
-                "departure_min": dep,
-                "departure_str": format_hhmm(dep),
-            }
-        )
-        current_time = dep
-        current_node = NODE_GOLDBOND_WH
-
-    stop_schedules: list[dict[str, Any]] = []
-    total_unload_min = 0.0
-    total_weight = 0.0
-
-    for stop_idx, stop in enumerate(ordered_stops, start=1):
-        mat_idx = stop["matrix_idx"]
-        leg_drive = drive_matrix[current_node][mat_idx]
-        arrival_min = current_time + leg_drive
-        departure_min = arrival_min + unload_minutes
-
-        total_drive_min += leg_drive
-        total_unload_min += unload_minutes
-        total_weight += stop["weight"]
-
-        stop_schedules.append(
-            {
-                "stop": stop,
-                "route_stop_num": stop_idx,
-                "leg_drive_min": leg_drive,
-                "arrival_min": arrival_min,
-                "arrival_str": format_hhmm(arrival_min),
-                "departure_min": departure_min,
-                "departure_str": format_hhmm(departure_min),
+                "stop_key": st["stop_key"],
+                "route_stop_num": route_pos,
+                "arrival_str": arr_str,
+                "departure_str": dep_str,
+                "leg_minutes": round(leg_min, 1),
             }
         )
 
-        current_time = departure_min
-        current_node = mat_idx
+    return_leg_min = matrix[curr_node][0]
+    return_home_min = curr_time + return_leg_min
+    return_home_str = format_minutes_to_hhmm(return_home_min)
+    total_shift_min = return_home_min - start_min
+    timeline_parts.append(f"חזרה אל ה{home_name} ({return_home_str})")
 
-    last_to_home_min = drive_matrix[current_node][NODE_HOME] if ordered_stops else 0.0
-    total_drive_min += last_to_home_min
-    return_home_min = current_time + last_to_home_min
-    total_shift_min = return_home_min - start_minutes
-
-    wh_summary_str = " -> ".join(
-        f"{w['short_name']} [{w['arrival_str']}-{w['departure_str']}]"
-        for w in warehouse_visits
-    )
+    total_weight = sum(s["weight"] for s in stops)
+    max_shift_min = float(cfg["MAX_DRIVER_SHIFT_HOURS"]) * 60.0
+    max_weight = float(cfg["MAX_TRUCK_WEIGHT_KG"])
 
     return {
         "ordered_stops": ordered_stops,
-        "warehouse_visits": warehouse_visits,
-        "warehouses_summary_str": wh_summary_str,
-        "has_cooling": has_cooling,
-        "has_hazmat": has_hazmat,
-        "has_goldbond": has_goldbond,
-        "stop_schedules": stop_schedules,
-        "return_home_min": return_home_min,
-        "return_home_str": format_hhmm(return_home_min),
-        "total_drive_min": total_drive_min,
-        "total_load_min": total_load_min,
-        "total_unload_min": total_unload_min,
-        "total_shift_min": total_shift_min,
-        "total_shift_hours": total_shift_min / 60.0,
-        "total_weight": total_weight,
+        "schedule_by_stop": {d["stop_key"]: d for d in schedule_details},
+        "warehouses_summary": " -> ".join(wh_logs),
+        "return_home_str": return_home_str,
+        "total_shift_min": round(total_shift_min, 1),
+        "total_shift_hhmm": format_duration_hhmm(total_shift_min),
+        "total_weight": round(total_weight, 2),
+        "Timeline_str": " -> ".join(timeline_parts),
+        "is_feasible": (total_weight <= max_weight + 1e-6)
+        and (total_shift_min <= max_shift_min + 1e-6),
     }
 
 
-def build_region_stops(
-    reg_records: list[dict[str, Any]],
-    max_truck_weight: float = MAX_TRUCK_WEIGHT_KG,
-) -> list[dict[str, Any]]:
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    order_of_keys: list[str] = []
-    for rec in reg_records:
-        s_key = rec["stop_key"]
-        if s_key not in grouped:
-            grouped[s_key] = []
-            order_of_keys.append(s_key)
-        grouped[s_key].append(rec)
-
-    stops: list[dict[str, Any]] = []
-    for s_key in order_of_keys:
-        recs = grouped[s_key]
-        total_w = sum(r["qty"] for r in recs)
-        if total_w <= max_truck_weight or len(recs) == 1:
-            stops.append(
-                {
-                    "stop_key": s_key,
-                    "region": recs[0]["region"],
-                    "effective_dest": recs[0]["effective_dest"],
-                    "cust_name": recs[0]["cust_name"],
-                    "lat": recs[0]["lat"],
-                    "lon": recs[0]["lon"],
-                    "weight": total_w,
-                    "records": recs,
-                }
-            )
-        else:
-            current_batch: list[dict[str, Any]] = []
-            current_w = 0.0
-            part_num = 1
-            for r in recs:
-                if current_batch and (current_w + r["qty"] > max_truck_weight):
-                    stops.append(
-                        {
-                            "stop_key": f"{s_key}#part{part_num}",
-                            "region": current_batch[0]["region"],
-                            "effective_dest": current_batch[0]["effective_dest"],
-                            "cust_name": current_batch[0]["cust_name"],
-                            "lat": current_batch[0]["lat"],
-                            "lon": current_batch[0]["lon"],
-                            "weight": current_w,
-                            "records": current_batch,
-                        }
-                    )
-                    part_num += 1
-                    current_batch = [r]
-                    current_w = r["qty"]
-                else:
-                    current_batch.append(r)
-                    current_w += r["qty"]
-            if current_batch:
-                stops.append(
-                    {
-                        "stop_key": f"{s_key}#part{part_num}",
-                        "region": current_batch[0]["region"],
-                        "effective_dest": current_batch[0]["effective_dest"],
-                        "cust_name": current_batch[0]["cust_name"],
-                        "lat": current_batch[0]["lat"],
-                        "lon": current_batch[0]["lon"],
-                        "weight": current_w,
-                        "records": current_batch,
-                    }
-                )
-    return stops
-
-
-def get_last_warehouse_node_for_stops(stops_slice: list[dict[str, Any]]) -> int:
-    for st in stops_slice:
-        for r in st["records"]:
-            if r.get("warehouse_type") == "גולד בונד":
-                return NODE_GOLDBOND_WH
-    for st in stops_slice:
-        for r in st["records"]:
-            if r.get("warehouse_type") == 'חומ"ס':
-                return NODE_HAZMAT_WH
-    for st in stops_slice:
-        for r in st["records"]:
-            if r.get("warehouse_type") == "קירור":
-                return NODE_COOLING_WH
-    return NODE_MAIN_WH
-
-
 def split_region_into_trucks(
-    region_name: str,
     region_stops: list[dict[str, Any]],
-    drive_matrix: list[list[float]],
-    max_truck_weight: float = MAX_TRUCK_WEIGHT_KG,
-    max_shift_hours: float = MAX_DRIVER_SHIFT_HOURS,
-    main_load_minutes: float = MAIN_WAREHOUSE_LOAD_MINUTES,
-    cooling_load_minutes: float = COOLING_WAREHOUSE_LOAD_MINUTES,
-    hazmat_load_minutes: float = HAZMAT_WAREHOUSE_LOAD_MINUTES,
-    goldbond_load_minutes: float = GOLDBOND_WAREHOUSE_LOAD_MINUTES,
-    unload_minutes: float = UNLOAD_MINUTES,
+    matrix: list[list[float]],
+    cfg: dict[str, Any],
 ) -> list[dict[str, Any]]:
     if not region_stops:
         return []
 
-    max_shift_min = max_shift_hours * 60.0
-    start_wh_node = get_last_warehouse_node_for_stops(region_stops)
+    single_sim = simulate_driver_shift(region_stops, matrix, cfg)
+    if single_sim["is_feasible"] or len(region_stops) == 1:
+        single_sim["split_note"] = (
+            "תקין"
+            if single_sim["is_feasible"]
+            else "הזמנה בודדת חריגה במשקל/זמן"
+        )
+        return [single_sim]
 
-    stop_idxs = [s["matrix_idx"] for s in region_stops]
-    idx_to_stop_list: dict[int, list[dict[str, Any]]] = {}
-    for s in region_stops:
-        idx_to_stop_list.setdefault(s["matrix_idx"], []).append(s)
+    max_w = float(cfg["MAX_TRUCK_WEIGHT_KG"])
 
-    unique_mat_idxs = list(dict.fromkeys(stop_idxs))
-    ordered_mat_idxs = optimize_open_tsp_order(
-        unique_mat_idxs,
-        start_node=start_wh_node,
-        end_node=NODE_HOME,
-        drive_matrix=drive_matrix,
-    )
-
-    master_stops: list[dict[str, Any]] = []
-    for m_idx in ordered_mat_idxs:
-        master_stops.extend(idx_to_stop_list[m_idx])
-
-    k = len(master_stops)
-
-    single_eval = evaluate_truck_route(
-        master_stops,
-        drive_matrix=drive_matrix,
-        main_load_minutes=main_load_minutes,
-        cooling_load_minutes=cooling_load_minutes,
-        hazmat_load_minutes=hazmat_load_minutes,
-        goldbond_load_minutes=goldbond_load_minutes,
-        unload_minutes=unload_minutes,
-    )
-    if (
-        single_eval["total_weight"] <= max_truck_weight + 1e-6
-        and single_eval["total_shift_min"] <= max_shift_min + 1e-6
-    ):
-        single_eval["regions"] = [region_name]
-        single_eval["region_label"] = region_name
-        single_eval["was_split"] = False
-        return [single_eval]
-
-    dp: list[tuple[int, float, int, dict[str, Any] | None]] = [
-        (999999, float("inf"), -1, None) for _ in range(k + 1)
-    ]
-    dp[0] = (0, 0.0, -1, None)
-
-    for i in range(k):
-        if dp[i][0] >= 999999:
-            continue
-        for j in range(i + 1, k + 1):
-            sub_slice = master_stops[i:j]
-            sub_w = sum(s["weight"] for s in sub_slice)
-            if j > i + 1 and sub_w > max_truck_weight + 1e-6:
-                break
-
-            sub_wh_node = get_last_warehouse_node_for_stops(sub_slice)
-            sub_mat_idxs = list(dict.fromkeys(s["matrix_idx"] for s in sub_slice))
-            opt_sub_mat = optimize_open_tsp_order(
-                sub_mat_idxs,
-                start_node=sub_wh_node,
-                end_node=NODE_HOME,
-                drive_matrix=drive_matrix,
-            )
-            sub_map: dict[int, list[dict[str, Any]]] = {}
-            for s in sub_slice:
-                sub_map.setdefault(s["matrix_idx"], []).append(s)
-            opt_sub_stops: list[dict[str, Any]] = []
-            for m_idx in opt_sub_mat:
-                opt_sub_stops.extend(sub_map[m_idx])
-
-            ev = evaluate_truck_route(
-                opt_sub_stops,
-                drive_matrix=drive_matrix,
-                main_load_minutes=main_load_minutes,
-                cooling_load_minutes=cooling_load_minutes,
-                hazmat_load_minutes=hazmat_load_minutes,
-                goldbond_load_minutes=goldbond_load_minutes,
-                unload_minutes=unload_minutes,
-            )
-            if j > i + 1 and ev["total_shift_min"] > max_shift_min + 1e-6:
-                continue
-
-            cand_trucks = dp[i][0] + 1
-            cand_shift = dp[i][1] + ev["total_shift_min"]
-            if (cand_trucks < dp[j][0]) or (
-                cand_trucks == dp[j][0] and cand_shift + 1e-6 < dp[j][1]
-            ):
-                dp[j] = (cand_trucks, cand_shift, i, ev)
+    # הפרדת הזמנות ענק בודדות שעוברות לבדן את משקל המקסימום למשאית ייעודית,
+    # כדי שלא יחסמו איחוד של תחנות רגילות באותו אזור (למשל במפרץ חיפה)
+    oversized_stops = [s for s in region_stops if s["weight"] > max_w + 1e-6]
+    normal_stops = [s for s in region_stops if s["weight"] <= max_w + 1e-6]
 
     trucks: list[dict[str, Any]] = []
-    curr = k
-    while curr > 0:
-        _, _, prev_i, ev = dp[curr]
-        if ev is None or prev_i < 0:
-            break
-        trucks.append(ev)
-        curr = prev_i
-    trucks.reverse()
+    for ov_stop in oversized_stops:
+        ov_sim = simulate_driver_shift([ov_stop], matrix, cfg)
+        ov_sim["split_note"] = "פוצל אוטומטית לעמידה במגבלות"
+        trucks.append(ov_sim)
 
-    total_parts = len(trucks)
-    for tr in trucks:
-        tr["regions"] = [region_name]
-        tr["region_label"] = region_name
-        tr["was_split"] = total_parts > 1
+    if not normal_stops:
+        return trucks
 
+    normal_single = simulate_driver_shift(normal_stops, matrix, cfg)
+    if normal_single["is_feasible"] or len(normal_stops) == 1:
+        normal_single["split_note"] = "פוצל אוטומטית לעמידה במגבלות"
+        trucks.append(normal_single)
+        return trucks
+
+    base_ordered = normal_single["ordered_stops"]
+    m = len(base_ordered)
+    dp: list[tuple[int, float]] = [(999999, float("inf"))] * (m + 1)
+    parent: list[int] = [-1] * (m + 1)
+    sim_cache: dict[tuple[int, int], dict[str, Any]] = {}
+    dp[0] = (0, 0.0)
+
+    for i in range(m):
+        if dp[i][0] == 999999:
+            continue
+        for j in range(i + 1, m + 1):
+            sub_stops = base_ordered[i:j]
+            sub_w = sum(s["weight"] for s in sub_stops)
+            if j > i + 1 and sub_w > max_w + 1e-6:
+                break
+            sim = simulate_driver_shift(sub_stops, matrix, cfg)
+            sim_cache[(i, j)] = sim
+            if j == i + 1 or sim["is_feasible"]:
+                cand = (dp[i][0] + 1, dp[i][1] + sim["total_shift_min"])
+                if cand < dp[j]:
+                    dp[j] = cand
+                    parent[j] = i
+
+    idx = m
+    normal_chunks: list[dict[str, Any]] = []
+    while idx > 0:
+        prev = parent[idx]
+        if prev == -1:
+            prev = idx - 1
+        sim = sim_cache.get(
+            (prev, idx)
+        ) or simulate_driver_shift(base_ordered[prev:idx], matrix, cfg)
+        sim["split_note"] = "פוצל אוטומטית לעמידה במגבלות"
+        normal_chunks.append(sim)
+        idx = prev
+    normal_chunks.reverse()
+    trucks.extend(normal_chunks)
     return trucks
 
 
-def try_consolidate_north_and_sharon_trucks(
-    trucks_by_region: dict[str, list[dict[str, Any]]],
-    drive_matrix: list[list[float]],
-    max_truck_weight: float = MAX_TRUCK_WEIGHT_KG,
-    max_shift_hours: float = MAX_DRIVER_SHIFT_HOURS,
-    main_load_minutes: float = MAIN_WAREHOUSE_LOAD_MINUTES,
-    cooling_load_minutes: float = COOLING_WAREHOUSE_LOAD_MINUTES,
-    hazmat_load_minutes: float = HAZMAT_WAREHOUSE_LOAD_MINUTES,
-    goldbond_load_minutes: float = GOLDBOND_WAREHOUSE_LOAD_MINUTES,
-    unload_minutes: float = UNLOAD_MINUTES,
-    enable_merge: bool = ENABLE_NORTH_SHARON_MERGE,
-) -> list[dict[str, Any]]:
-    max_shift_min = max_shift_hours * 60.0
-    sharon_trucks = trucks_by_region.get("אזור השרון", [])
-
-    if enable_merge and sharon_trucks:
-        best_merge: tuple[str, int, int, dict[str, Any], float] | None = None
-
-        for north_reg in ("צפון מזרח", "צפון מערב"):
-            n_trucks = trucks_by_region.get(north_reg, [])
-            for n_idx, n_tr in enumerate(n_trucks):
-                for s_idx, s_tr in enumerate(sharon_trucks):
-                    combined_weight = n_tr["total_weight"] + s_tr["total_weight"]
-                    if combined_weight > max_truck_weight + 1e-6:
-                        continue
-
-                    north_stops = list(n_tr["ordered_stops"])
-                    sharon_stops = list(s_tr["ordered_stops"])
-
-                    last_north_mat_idx = north_stops[-1]["matrix_idx"]
-                    sharon_mat_idxs = list(
-                        dict.fromkeys(s["matrix_idx"] for s in sharon_stops)
-                    )
-                    opt_sharon_mat = optimize_open_tsp_order(
-                        sharon_mat_idxs,
-                        start_node=last_north_mat_idx,
-                        end_node=NODE_HOME,
-                        drive_matrix=drive_matrix,
-                    )
-                    s_map: dict[int, list[dict[str, Any]]] = {}
-                    for s in sharon_stops:
-                        s_map.setdefault(s["matrix_idx"], []).append(s)
-                    opt_sharon_stops: list[dict[str, Any]] = []
-                    for m_idx in opt_sharon_mat:
-                        opt_sharon_stops.extend(s_map[m_idx])
-
-                    combined_stops = north_stops + opt_sharon_stops
-                    merged_eval = evaluate_truck_route(
-                        combined_stops,
-                        drive_matrix=drive_matrix,
-                        main_load_minutes=main_load_minutes,
-                        cooling_load_minutes=cooling_load_minutes,
-                        hazmat_load_minutes=hazmat_load_minutes,
-                        goldbond_load_minutes=goldbond_load_minutes,
-                        unload_minutes=unload_minutes,
-                    )
-
-                    if merged_eval["total_shift_min"] <= max_shift_min + 1e-6:
-                        saved_min = (
-                            n_tr["total_shift_min"] + s_tr["total_shift_min"]
-                        ) - merged_eval["total_shift_min"]
-                        if best_merge is None or saved_min > best_merge[4]:
-                            merged_eval["regions"] = [north_reg, "אזור השרון"]
-                            merged_eval["region_label"] = f"{north_reg} + אזור השרון"
-                            merged_eval["was_split"] = False
-                            merged_eval["is_merged_north_sharon"] = True
-                            best_merge = (
-                                north_reg,
-                                n_idx,
-                                s_idx,
-                                merged_eval,
-                                saved_min,
-                            )
-
-        if best_merge is not None:
-            north_reg, n_idx, s_idx, merged_eval, _ = best_merge
-            trucks_by_region[north_reg][n_idx] = merged_eval
-            del trucks_by_region["אזור השרון"][s_idx]
-
-    final_trucks: list[dict[str, Any]] = []
-    for reg in REGION_ORDER:
-        for tr in trucks_by_region.get(reg, []):
-            final_trucks.append(tr)
-
-    for d_idx, tr in enumerate(final_trucks, start=1):
-        tr["driver_num"] = d_idx
-        tr["driver_name"] = f"נהג {d_idx} ({tr['region_label']})"
-
-    return final_trucks
-
-
 # ==============================================================================
-# 6. מיון, תכנון זמני העמסה/הגעה וייצוא לקובץ אקסל מעוצב
+# 5. מיון, תכנון מסלולים וייצוא קובץ האקסל הממוין
 # ==============================================================================
 def sort_orders_excel(
     input_path: str | pathlib.Path,
     output_path: str | pathlib.Path,
-    use_external_api: bool = True,
-    prefer_site_name_city: bool = False,
-    max_truck_weight: float = MAX_TRUCK_WEIGHT_KG,
-    max_shift_hours: float = MAX_DRIVER_SHIFT_HOURS,
-    main_load_minutes: float = MAIN_WAREHOUSE_LOAD_MINUTES,
-    cooling_load_minutes: float = COOLING_WAREHOUSE_LOAD_MINUTES,
-    hazmat_load_minutes: float = HAZMAT_WAREHOUSE_LOAD_MINUTES,
-    goldbond_load_minutes: float = GOLDBOND_WAREHOUSE_LOAD_MINUTES,
-    unload_minutes: float = UNLOAD_MINUTES,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_catalogs(INPUT_FOLDER)
-
+    cfg: dict[str, Any],
+) -> list[dict[str, Any]]:
     wb_in = load_workbook_safe(input_path)
     ws_in = wb_in.active
 
@@ -1858,25 +1719,26 @@ def sort_orders_excel(
                     return idx
         return default_idx
 
-    idx_cust_id = find_col(["מס. לקוח", "מספר לקוח"], 0)
     idx_cust_name = find_col(["שם לקוח"], 1)
     idx_address = find_col(["כתובת"], 2)
     idx_dest = find_col(["יעד", "עיר"], 3)
     idx_site = find_col(["שם האתר", "אתר"], 4)
     idx_phone = find_col(["מספר טלפון", "טלפון"], 5)
     idx_order = find_col(["הזמנה"], 6)
-    idx_date = find_col(["תאריך אספקה", "תאריך"], 7)
     idx_line = find_col(["שורה"], 8)
     idx_sku = find_col(["מק'ט", 'מק"ט', "מקט"], 9)
     idx_qty = find_col(["כמות"], 11)
-    idx_note_cust = find_col(["הערה למוצר ללקוח", "הערה ללקוח"], 12)
-    idx_units = find_col(["יחידות", "יח'", "יחידה"], 13)
+    idx_cust_note = find_col(["הערה למוצר ללקוח", "הערה למוצר"], 12)
+    idx_unit = find_col(["יח'", "יחידות", "יח"], 13)
 
+    cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
     cache = load_cache()
     records: list[dict[str, Any]] = []
 
     for r in range(2, ws_in.max_row + 1):
-        row_vals = [ws_in.cell(r, c).value for c in range(1, ws_in.max_column + 1)]
+        row_vals = [
+            ws_in.cell(r, c).value for c in range(1, ws_in.max_column + 1)
+        ]
         if not any(v is not None and str(v).strip() != "" for v in row_vals):
             continue
 
@@ -1884,6 +1746,35 @@ def sort_orders_excel(
         addr_val = row_vals[idx_address] if idx_address < len(row_vals) else None
         site_val = row_vals[idx_site] if idx_site < len(row_vals) else None
         phone_val = row_vals[idx_phone] if idx_phone < len(row_vals) else None
+        sku_val = (
+            clean_sku_token(row_vals[idx_sku])
+            if idx_sku < len(row_vals)
+            else ""
+        )
+
+        is_cooling = sku_val in cooling_skus
+        is_hazmat = sku_val in hazmat_skus
+        is_goldbond = sku_val in goldbond_skus
+        is_main = not (is_cooling or is_hazmat or is_goldbond)
+
+        wh_tags: list[str] = []
+        if is_cooling:
+            wh_tags.append(
+                f"{cfg['COOLING_WAREHOUSE_NAME']} ({cfg['COOLING_WAREHOUSE_ADDRESS']})"
+            )
+        if is_hazmat:
+            wh_tags.append(
+                f"{cfg['HAZMAT_WAREHOUSE_NAME']} ({cfg['HAZMAT_WAREHOUSE_ADDRESS']})"
+            )
+        if is_goldbond:
+            wh_tags.append(
+                f"{cfg['GOLDBOND_WAREHOUSE_NAME']} ({cfg['GOLDBOND_WAREHOUSE_ADDRESS']})"
+            )
+        if not wh_tags:
+            wh_tags.append(
+                f"{cfg['MAIN_WAREHOUSE_NAME']} ({cfg['MAIN_WAREHOUSE_ADDRESS']})"
+            )
+        warehouse_label = " + ".join(wh_tags)
 
         region, lat, lon = resolve_region_and_coords(
             destination=dest_val,
@@ -1891,8 +1782,7 @@ def sort_orders_excel(
             site_name=site_val,
             phone=phone_val,
             cache=cache,
-            use_external_api=use_external_api,
-            prefer_site_name_city=prefer_site_name_city,
+            cfg=cfg,
         )
 
         effective_dest = str(dest_val or "").strip()
@@ -1906,24 +1796,8 @@ def sort_orders_excel(
             except (ValueError, TypeError):
                 qty_val = 0.0
 
-        sku_raw = row_vals[idx_sku] if idx_sku < len(row_vals) else ""
-        sku_clean = clean_sku_token(sku_raw)
-
-        if sku_clean in cooling_skus:
-            warehouse_type = "קירור"
-            warehouse_label = f"קירור ({COOLING_WAREHOUSE_ADDRESS})"
-        elif sku_clean in goldbond_skus:
-            warehouse_type = "גולד בונד"
-            warehouse_label = f"גולד בונד ({GOLDBOND_WAREHOUSE_ADDRESS})"
-        elif sku_clean in hazmat_skus:
-            warehouse_type = 'חומ"ס'
-            warehouse_label = f'חומ"ס ({HAZMAT_WAREHOUSE_ADDRESS})'
-        else:
-            warehouse_type = "אוברסיז"
-            warehouse_label = f"אוברסיז ({MAIN_WAREHOUSE_ADDRESS})"
-
         cust_name = str(row_vals[idx_cust_name] or "").strip()
-        stop_key = f"{effective_dest}||{cust_name}||{lat:.5f},{lon:.5f}"
+        stop_key = f"{region}||{effective_dest}||{cust_name}||{lat:.5f},{lon:.5f}"
 
         records.append(
             {
@@ -1935,8 +1809,11 @@ def sort_orders_excel(
                 "line_no": int(row_vals[idx_line] or 0)
                 if row_vals[idx_line] is not None
                 else 0,
-                "sku": sku_clean,
-                "warehouse_type": warehouse_type,
+                "sku": sku_val,
+                "is_main": is_main,
+                "is_cooling": is_cooling,
+                "is_hazmat": is_hazmat,
+                "is_goldbond": is_goldbond,
                 "warehouse_label": warehouse_label,
                 "qty": qty_val,
                 "lat": lat,
@@ -1946,747 +1823,542 @@ def sort_orders_excel(
             }
         )
 
-    all_coords: list[tuple[float, float]] = [
-        DRIVER_HOME_COORDS,
-        MAIN_WAREHOUSE_COORDS,
-        COOLING_WAREHOUSE_COORDS,
-        HAZMAT_WAREHOUSE_COORDS,
-        GOLDBOND_WAREHOUSE_COORDS,
+    fixed_points: list[tuple[float, float]] = [
+        cfg["DRIVER_HOME_COORDS"],
+        cfg["MAIN_WAREHOUSE_COORDS"],
+        cfg["COOLING_WAREHOUSE_COORDS"],
+        cfg["HAZMAT_WAREHOUSE_COORDS"],
+        cfg["GOLDBOND_WAREHOUSE_COORDS"],
     ]
-    coord_to_mat_idx: dict[tuple[float, float], int] = {
-        DRIVER_HOME_COORDS: NODE_HOME,
-        MAIN_WAREHOUSE_COORDS: NODE_MAIN_WH,
-        COOLING_WAREHOUSE_COORDS: NODE_COOLING_WH,
-        HAZMAT_WAREHOUSE_COORDS: NODE_HAZMAT_WH,
-        GOLDBOND_WAREHOUSE_COORDS: NODE_GOLDBOND_WH,
-    }
+    unique_stops_by_key: dict[str, dict[str, Any]] = {}
+    for rec in records:
+        s_key = rec["stop_key"]
+        if s_key not in unique_stops_by_key:
+            m_idx = len(fixed_points)
+            fixed_points.append((rec["lat"], rec["lon"]))
+            unique_stops_by_key[s_key] = {
+                "stop_key": s_key,
+                "region": rec["region"],
+                "effective_dest": rec["effective_dest"],
+                "cust_name": rec["cust_name"],
+                "coords": (rec["lat"], rec["lon"]),
+                "matrix_idx": m_idx,
+                "weight": 0.0,
+                "needs_main": False,
+                "needs_cooling": False,
+                "needs_hazmat": False,
+                "needs_goldbond": False,
+            }
+        st = unique_stops_by_key[s_key]
+        st["weight"] += rec["qty"]
+        st["needs_main"] = st["needs_main"] or rec["is_main"]
+        st["needs_cooling"] = st["needs_cooling"] or rec["is_cooling"]
+        st["needs_hazmat"] = st["needs_hazmat"] or rec["is_hazmat"]
+        st["needs_goldbond"] = st["needs_goldbond"] or rec["is_goldbond"]
 
-    stops_by_region: dict[str, list[dict[str, Any]]] = {}
-    for reg in REGION_ORDER:
-        reg_recs = [rec for rec in records if rec["region"] == reg]
-        reg_stops = build_region_stops(reg_recs, max_truck_weight=max_truck_weight)
-        for st in reg_stops:
-            pt = (round(st["lat"], 5), round(st["lon"], 5))
-            if pt not in coord_to_mat_idx:
-                coord_to_mat_idx[pt] = len(all_coords)
-                all_coords.append(pt)
-            st["matrix_idx"] = coord_to_mat_idx[pt]
-        stops_by_region[reg] = reg_stops
-
-    drive_matrix = fetch_real_road_minutes_matrix(
-        all_coords,
-        use_external_api=use_external_api,
-        truck_speed_factor=OSRM_TRUCK_SPEED_FACTOR,
-    )
+    travel_matrix = build_travel_minutes_matrix(fixed_points, cfg)
 
     trucks_by_region: dict[str, list[dict[str, Any]]] = {}
     for reg in REGION_ORDER:
-        trucks_by_region[reg] = split_region_into_trucks(
-            region_name=reg,
-            region_stops=stops_by_region[reg],
-            drive_matrix=drive_matrix,
-            max_truck_weight=max_truck_weight,
-            max_shift_hours=max_shift_hours,
-            main_load_minutes=main_load_minutes,
-            cooling_load_minutes=cooling_load_minutes,
-            hazmat_load_minutes=hazmat_load_minutes,
-            goldbond_load_minutes=goldbond_load_minutes,
-            unload_minutes=unload_minutes,
-        )
+        reg_stops = [
+            st for st in unique_stops_by_key.values() if st["region"] == reg
+        ]
+        if reg_stops:
+            trucks_by_region[reg] = split_region_into_trucks(
+                reg_stops, travel_matrix, cfg
+            )
+        else:
+            trucks_by_region[reg] = []
 
-    final_trucks = try_consolidate_north_and_sharon_trucks(
-        trucks_by_region=trucks_by_region,
-        drive_matrix=drive_matrix,
-        max_truck_weight=max_truck_weight,
-        max_shift_hours=max_shift_hours,
-        main_load_minutes=main_load_minutes,
-        cooling_load_minutes=cooling_load_minutes,
-        hazmat_load_minutes=hazmat_load_minutes,
-        goldbond_load_minutes=goldbond_load_minutes,
-        unload_minutes=unload_minutes,
-        enable_merge=ENABLE_NORTH_SHARON_MERGE,
+    if cfg.get("ENABLE_NORTH_SHARON_MERGE", True) and trucks_by_region.get(
+        "אזור השרון"
+    ):
+        best_merge: tuple[str, int, int, float, dict[str, Any]] | None = None
+        for north_reg in ("צפון מזרח", "צפון מערב"):
+            for n_idx, n_truck in enumerate(trucks_by_region.get(north_reg, [])):
+                for s_idx, s_truck in enumerate(trucks_by_region["אזור השרון"]):
+                    combined_stops = (
+                        n_truck["ordered_stops"] + s_truck["ordered_stops"]
+                    )
+                    merged_sim = simulate_driver_shift(
+                        combined_stops,
+                        travel_matrix,
+                        cfg,
+                        preserve_region_sequence=True,
+                    )
+                    if merged_sim["is_feasible"]:
+                        saved_min = (
+                            n_truck["total_shift_min"]
+                            + s_truck["total_shift_min"]
+                        ) - merged_sim["total_shift_min"]
+                        if best_merge is None or saved_min > best_merge[3]:
+                            best_merge = (
+                                north_reg,
+                                n_idx,
+                                s_idx,
+                                saved_min,
+                                merged_sim,
+                            )
+
+        if best_merge is not None:
+            north_reg, n_idx, s_idx, _saved, merged_sim = best_merge
+            merged_sim["merged_regions_label"] = f"{north_reg} + אזור השרון"
+            merged_sim["split_note"] = "אוחד נהג (צפון + השרון)"
+            trucks_by_region[north_reg][n_idx] = merged_sim
+            del trucks_by_region["אזור השרון"][s_idx]
+
+    final_drivers: list[dict[str, Any]] = []
+    driver_counter = 1
+    stop_assignment: dict[str, dict[str, Any]] = {}
+
+    for reg in REGION_ORDER:
+        reg_trucks = trucks_by_region.get(reg, [])
+        for t in reg_trucks:
+            reg_title = t.get("merged_regions_label", reg)
+            driver_label = f"נהג {driver_counter} ({reg_title})"
+            t["driver_id"] = driver_counter
+            t["driver_label"] = driver_label
+            t["region_title"] = reg_title
+            final_drivers.append(t)
+
+            for st_key, sched in t["schedule_by_stop"].items():
+                stop_assignment[st_key] = {
+                    "driver_id": driver_counter,
+                    "driver_label": driver_label,
+                    "route_stop_num": sched["route_stop_num"],
+                    "arrival_str": sched["arrival_str"],
+                    "departure_str": sched["departure_str"],
+                }
+            driver_counter += 1
+
+    for rec in records:
+        assign = stop_assignment[rec["stop_key"]]
+        rec["driver_id"] = assign["driver_id"]
+        rec["driver_label"] = assign["driver_label"]
+        rec["route_stop_num"] = assign["route_stop_num"]
+        rec["arrival_str"] = assign["arrival_str"]
+        rec["departure_str"] = assign["departure_str"]
+
+    records.sort(
+        key=lambda item: (
+            item["driver_id"],
+            item["route_stop_num"],
+            item["order_no"],
+            item["line_no"],
+        )
     )
 
-    sorted_records: list[dict[str, Any]] = []
-    for tr in final_trucks:
-        for sched in tr["stop_schedules"]:
-            st = sched["stop"]
-            st_recs = list(st["records"])
-            st_recs.sort(key=lambda item: (item["order_no"], item["line_no"]))
-            for rec in st_recs:
-                rec["driver_num"] = tr["driver_num"]
-                rec["driver_name"] = tr["driver_name"]
-                rec["route_stop_num"] = sched["route_stop_num"]
-                rec["arrival_str"] = sched["arrival_str"]
-                rec["departure_str"] = sched["departure_str"]
-                rec["warehouses_summary_str"] = tr["warehouses_summary_str"]
-                rec["return_home_str"] = tr["return_home_str"]
-                sorted_records.append(rec)
-
-    reordered_orig_cols: list[int] = []
-    for c_i in range(len(raw_headers)):
-        if c_i in (idx_qty, idx_units, idx_note_cust):
+    # בניית סדר העמודות: יחידות צמוד לכמות, ואחריהן הערה למוצר ללקוח
+    reordered_raw_indices: list[int] = []
+    for c_idx in range(len(raw_headers)):
+        if c_idx in (idx_qty, idx_unit, idx_cust_note):
             continue
-        reordered_orig_cols.append(c_i)
+        reordered_raw_indices.append(c_idx)
 
-    insert_pos = min(idx_qty, len(reordered_orig_cols))
-    reordered_orig_cols[insert_pos:insert_pos] = [idx_qty, idx_units, idx_note_cust]
+    insert_pos = len(reordered_raw_indices)
+    for pos, orig_i in enumerate(reordered_raw_indices):
+        if orig_i > idx_qty:
+            insert_pos = pos
+            break
 
-    prefix_headers = [
+    qty_group = [idx_qty]
+    if 0 <= idx_unit < len(raw_headers) and idx_unit != idx_qty:
+        qty_group.append(idx_unit)
+    if 0 <= idx_cust_note < len(raw_headers) and idx_cust_note not in qty_group:
+        qty_group.append(idx_cust_note)
+
+    reordered_raw_indices[insert_pos:insert_pos] = qty_group
+
+    out_headers: list[str] = [
         "אזור חלוקה",
         "נהג / משאית",
         "תחנה במסלול",
         "מחסן העמסה למוצר",
     ]
+    unload_col_title = f"שעת יציאה (+{int(cfg['UNLOAD_MINUTES'])} דק' פריקה)"
 
-    out_headers: list[str] = list(prefix_headers)
-    col_arrival_idx = -1
-    col_depart_idx = -1
-    orig_to_out_col: dict[int, int] = {}
-
-    for orig_idx in reordered_orig_cols:
-        out_headers.append(raw_headers[orig_idx])
-        orig_to_out_col[orig_idx] = len(out_headers)
-        if orig_idx == idx_dest:
+    for c_idx in reordered_raw_indices:
+        out_headers.append(raw_headers[c_idx])
+        if c_idx == idx_dest:
             out_headers.append("שעת הגעה ליעד")
-            col_arrival_idx = len(out_headers)
-            out_headers.append(f"שעת יציאה (+{int(unload_minutes)} דק' פריקה)")
-            col_depart_idx = len(out_headers)
-
-    total_cols = len(out_headers)
-    out_cust_id_col = orig_to_out_col.get(idx_cust_id, -1)
-    out_date_col = orig_to_out_col.get(idx_date, -1)
-    out_line_col = orig_to_out_col.get(idx_line, -1)
-    out_qty_col = orig_to_out_col.get(idx_qty, -1)
-
-    numeric_col_indices = {3, out_cust_id_col, out_line_col, out_qty_col}
-    center_col_indices = {col_arrival_idx, col_depart_idx}
+            out_headers.append(unload_col_title)
 
     wb_out = openpyxl.Workbook()
     ws_orders = wb_out.active
     ws_orders.title = "הזמנות ממוינות לפי אזור"
     ws_orders.sheet_view.rightToLeft = True
-    ws_orders.views.sheetView[0].showGridLines = True
-    ws_orders.page_setup.orientation = "landscape"
-    ws_orders.sheet_properties.pageSetUpPr.fitToPage = True
 
-    NAVY_HEADER = "1F4E78"
-    ZEBRA_FILL = "F9FAFC"
-    TOTAL_FILL = "EAEEF7"
-    BORDER_GRAY = "D9D9D9"
+    font_family = "Arial"
+    header_font = Font(name=font_family, size=11, bold=True, color="FFFFFF")
+    header_fill = PatternFill(
+        start_color="1F4E78", end_color="1F4E78", fill_type="solid"
+    )
+    data_font = Font(name=font_family, size=10, bold=False, color="000000")
+    bold_font = Font(name=font_family, size=10, bold=True, color="000000")
+    total_fill = PatternFill(
+        start_color="D9E1F2", end_color="D9E1F2", fill_type="solid"
+    )
+    wh_special_font = Font(name=font_family, size=10, bold=True, color="833C0C")
 
-    ARRIVAL_BG = "E8F5E9"
-    ARRIVAL_FONT = "1B5E20"
-    COOLING_BG = "E1F5FE"
-    COOLING_FONT = "01579B"
-    HAZMAT_BG = "FFF3E0"
-    HAZMAT_FONT = "E65100"
-    GOLDBOND_BG = "F3E5F5"
-    GOLDBOND_FONT = "4A148C"
-
-    REGION_COLORS: dict[str, str] = {
-        "צפון מזרח": "E2EFDA",
-        "צפון מערב": "D9E1F2",
-        "איזור ירושלים": "FFF2CC",
-        "אזור השרון": "EDEDED",
-        "איזור גוש דן": "FCE4D6",
-        "דרום הארץ": "F8CBAD",
+    region_Palette = {
+        "צפון מזרח": "E8F4F8",
+        "צפון מערב": "EBF5DF",
+        "איזור ירושלים": "FFF5E6",
+        "אזור השרון": "F3E8F8",
+        "איזור גוש דן": "E8EEF8",
+        "דרום הארץ": "F9EBE8",
     }
 
-    thin_border = Border(
-        left=Side(style="thin", color=BORDER_GRAY),
-        right=Side(style="thin", color=BORDER_GRAY),
-        top=Side(style="thin", color=BORDER_GRAY),
-        bottom=Side(style="thin", color=BORDER_GRAY),
+    thin_side = Side(style="thin", color="D9D9D9")
+    med_navy = Side(style="medium", color="1F4E78")
+    double_bottom = Side(style="double", color="1F4E78")
+
+    data_border = Border(
+        left=thin_side, right=thin_side, top=thin_side, bottom=thin_side
+    )
+    header_border = Border(
+        left=thin_side, right=thin_side, top=med_navy, bottom=med_navy
     )
     total_border = Border(
-        top=Side(style="thin", color=NAVY_HEADER),
-        bottom=Side(style="double", color=NAVY_HEADER),
-        left=Side(style="thin", color=BORDER_GRAY),
-        right=Side(style="thin", color=BORDER_GRAY),
+        top=thin_side, bottom=double_bottom, left=thin_side, right=thin_side
     )
-
-    header_fill = PatternFill(
-        start_color=NAVY_HEADER, end_color=NAVY_HEADER, fill_type="solid"
-    )
-    header_font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
 
     for col_idx, h_text in enumerate(out_headers, start=1):
-        cell = ws_orders.cell(row=1, column=col_idx, value=h_text)
-        cell.fill = header_fill
+        cell = ws_orders.cell(1, col_idx, h_text)
         cell.font = header_font
-        cell.border = thin_border
-        if col_idx in numeric_col_indices:
-            horiz = "right"
-        elif col_idx in center_col_indices:
-            horiz = "center"
-        else:
-            horiz = "left"
-        cell.alignment = Alignment(horizontal=horiz, vertical="center", wrap_text=True)
-
+        cell.fill = header_fill
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True
+        )
+        cell.border = header_border
     ws_orders.row_dimensions[1].height = 28
-    ws_orders.freeze_panes = "A2"
 
-    arrival_fill = PatternFill(
-        start_color=ARRIVAL_BG, end_color=ARRIVAL_BG, fill_type="solid"
-    )
-    arrival_font = Font(name="Arial", size=10, bold=True, color=ARRIVAL_FONT)
-    cooling_fill = PatternFill(
-        start_color=COOLING_BG, end_color=COOLING_BG, fill_type="solid"
-    )
-    cooling_font = Font(name="Arial", size=10, bold=True, color=COOLING_FONT)
-    hazmat_fill = PatternFill(
-        start_color=HAZMAT_BG, end_color=HAZMAT_BG, fill_type="solid"
-    )
-    hazmat_font = Font(name="Arial", size=10, bold=True, color=HAZMAT_FONT)
-    goldbond_fill = PatternFill(
-        start_color=GOLDBOND_BG, end_color=GOLDBOND_BG, fill_type="solid"
-    )
-    goldbond_font = Font(name="Arial", size=10, bold=True, color=GOLDBOND_FONT)
+    col_qty_out = 1
+    col_line_out = 1
 
-    start_data_row = 2
-    for offset, rec in enumerate(sorted_records):
-        r_idx = start_data_row + offset
-        raw = list(rec["raw_values"])
-        if not raw[idx_dest] and rec["effective_dest"]:
-            raw[idx_dest] = rec["effective_dest"]
-
-        reg_name = rec["region"]
+    for row_offset, rec in enumerate(records, start=2):
+        reg = rec["region"]
+        row_fill = PatternFill(
+            start_color=region_Palette.get(reg, "FFFFFF"),
+            end_color=region_Palette.get(reg, "FFFFFF"),
+            fill_type="solid",
+        )
+        raw_vals = rec["raw_values"]
         row_out: list[Any] = [
-            reg_name,
-            rec["driver_name"],
+            reg,
+            rec["driver_label"],
             rec["route_stop_num"],
             rec["warehouse_label"],
         ]
 
-        for orig_idx in reordered_orig_cols:
-            val = raw[orig_idx] if orig_idx < len(raw) else None
+        for c_idx in reordered_raw_indices:
+            val = raw_vals[c_idx] if c_idx < len(raw_vals) else None
             row_out.append(val)
-            if orig_idx == idx_dest:
+            if c_idx == idx_qty:
+                col_qty_out = len(row_out)
+            if c_idx == idx_line:
+                col_line_out = len(row_out)
+            if c_idx == idx_dest:
                 row_out.append(rec["arrival_str"])
                 row_out.append(rec["departure_str"])
 
-        reg_color = REGION_COLORS.get(reg_name, "FFFFFF")
-        reg_fill = PatternFill(
-            start_color=reg_color, end_color=reg_color, fill_type="solid"
-        )
-        zebra_fill = PatternFill(
-            start_color=ZEBRA_FILL if r_idx % 2 == 0 else "FFFFFF",
-            end_color=ZEBRA_FILL if r_idx % 2 == 0 else "FFFFFF",
-            fill_type="solid",
-        )
-
         for col_idx, val in enumerate(row_out, start=1):
-            if isinstance(val, str):
-                val = val.strip()
+            cell = ws_orders.cell(row_offset, col_idx, val)
+            cell.fill = row_fill
+            cell.border = data_border
+            cell.font = bold_font if col_idx in (1, 2, 3) else data_font
 
-            if col_idx == out_cust_id_col and val is not None and str(val).isdigit():
-                val = int(str(val))
-            elif col_idx == out_line_col and val is not None:
-                try:
-                    val = int(float(val))
-                except (ValueError, TypeError):
-                    pass
-            elif col_idx == out_qty_col and val is not None:
-                try:
-                    val = float(val)
-                except (ValueError, TypeError):
-                    pass
-            elif col_idx == out_date_col and isinstance(val, datetime.datetime):
-                val = val.strftime("%Y-%m-%d")
+            if col_idx == 4 and (
+                rec["is_cooling"] or rec["is_hazmat"] or rec["is_goldbond"]
+            ):
+                cell.font = wh_special_font
 
-            cell = ws_orders.cell(row=r_idx, column=col_idx, value=val)
-            cell.border = thin_border
-
-            if col_idx == 1:
-                cell.fill = reg_fill
-                cell.font = Font(name="Arial", size=10, bold=True)
-            elif col_idx == 4:
-                if rec["warehouse_type"] == "קירור":
-                    cell.fill = cooling_fill
-                    cell.font = cooling_font
-                elif rec["warehouse_type"] == 'חומ"ס':
-                    cell.fill = hazmat_fill
-                    cell.font = hazmat_font
-                elif rec["warehouse_type"] == "גולד בונד":
-                    cell.fill = goldbond_fill
-                    cell.font = goldbond_font
-                else:
-                    cell.fill = zebra_fill
-                    cell.font = Font(name="Arial", size=10)
-            elif col_idx == col_arrival_idx:
-                cell.fill = arrival_fill
-                cell.font = arrival_font
+            if col_idx == col_qty_out and isinstance(val, (int, float)):
+                cell.number_format = "#,##0.##"
+                cell.alignment = Alignment(
+                    horizontal="right", vertical="center"
+                )
+            elif col_idx in (3, 5) or h_text_is_time(out_headers[col_idx - 1]):
+                cell.alignment = Alignment(
+                    horizontal="center", vertical="center"
+                )
             else:
-                cell.fill = zebra_fill
-                cell.font = Font(name="Arial", size=10, bold=(col_idx == 2))
+                cell.alignment = Alignment(
+                    horizontal="right", vertical="center", wrap_text=False
+                )
+        ws_orders.row_dimensions[row_offset].height = 21
 
-            if col_idx in numeric_col_indices:
-                cell.alignment = Alignment(horizontal="right", vertical="center")
-                if col_idx in (3, out_cust_id_col):
-                    cell.number_format = "0"
-                else:
-                    cell.number_format = "#,##0"
-            elif col_idx in center_col_indices:
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-            else:
-                cell.alignment = Alignment(horizontal="left", vertical="center")
+    last_data_row = len(records) + 1
+    total_row_idx = last_data_row + 1
+    ws_orders.cell(total_row_idx, 1, 'סה"כ כללי').font = bold_font
 
-        ws_orders.row_dimensions[r_idx].height = 20
+    qty_col_letter = get_column_letter(col_qty_out)
+    line_col_letter = get_column_letter(col_line_out)
+    ws_orders.cell(
+        total_row_idx,
+        col_line_out,
+        f"=COUNT({line_col_letter}2:{line_col_letter}{last_data_row})",
+    )
+    ws_orders.cell(
+        total_row_idx,
+        col_qty_out,
+        f"=SUM({qty_col_letter}2:{qty_col_letter}{last_data_row})",
+    )
 
-    end_data_row = start_data_row + len(sorted_records) - 1
-    total_row_idx = end_data_row + 1
-    qty_col_letter = get_column_letter(out_qty_col)
+    for c in range(1, len(out_headers) + 1):
+        cell = ws_orders.cell(total_row_idx, c)
+        cell.font = bold_font
+        cell.fill = total_fill
+        cell.border = total_border
+        if c == col_qty_out:
+            cell.number_format = "#,##0.##"
+            cell.alignment = Alignment(horizontal="right", vertical="center")
+        elif c == col_line_out:
+            cell.number_format = "#,##0"
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws_orders.row_dimensions[total_row_idx].height = 24
+    ws_orders.freeze_panes = "A2"
 
-    ws_orders.cell(row=total_row_idx, column=1, value='סה"כ כללי')
-    if end_data_row >= start_data_row:
-        ws_orders.cell(
-            row=total_row_idx,
-            column=out_qty_col,
-            value=f"=SUM({qty_col_letter}{start_data_row}:{qty_col_letter}{end_data_row})",
-        )
-        ws_orders.cell(
-            row=total_row_idx,
-            column=out_line_col,
-            value=f"=COUNT({qty_col_letter}{start_data_row}:{qty_col_letter}{end_data_row})",
-        )
+    # גיליון 2: סיכום מסלולי נהגים ומשאיות (כל עמודות השעות צמודות, "בית", וללא גרף)
+    ws_sum = wb_out.create_sheet(title="סיכום מסלולי נהגים ומשאיות")
+    ws_sum.sheet_view.rightToLeft = True
 
-    for col_idx in range(1, total_cols + 1):
-        c = ws_orders.cell(row=total_row_idx, column=col_idx)
-        c.font = Font(name="Arial", size=10, bold=True, color="1F4E78")
-        c.fill = PatternFill(
-            start_color=TOTAL_FILL, end_color=TOTAL_FILL, fill_type="solid"
-        )
-        c.border = total_border
-        if col_idx in numeric_col_indices:
-            c.alignment = Alignment(horizontal="right", vertical="center")
-            c.number_format = "#,##0"
-        else:
-            c.alignment = Alignment(horizontal="left", vertical="center")
-    ws_orders.row_dimensions[total_row_idx].height = 23
-
-    for col_idx in range(1, total_cols + 1):
-        col_letter = get_column_letter(col_idx)
-        max_len = len(str(out_headers[col_idx - 1]))
-        for r_idx in range(start_data_row, end_data_row + 1):
-            val = ws_orders.cell(row=r_idx, column=col_idx).value
-            if val is not None:
-                val_str = str(val)
-                if not val_str.startswith("="):
-                    max_len = max(max_len, len(val_str))
-        ws_orders.column_dimensions[col_letter].width = min(max(max_len + 4, 12), 38)
-
-    # ==========================================================================
-    # גיליון 2: סיכום מסלולי נהגים ומשאיות
-    # ==========================================================================
-    ws_trucks = wb_out.create_sheet(title="סיכום מסלולי נהגים ומשאיות")
-    ws_trucks.sheet_view.rightToLeft = True
-    ws_trucks.views.sheetView[0].showGridLines = True
-    ws_trucks.page_setup.orientation = "landscape"
-    ws_trucks.sheet_properties.pageSetUpPr.fitToPage = True
-
-    truck_headers = [
+    home_name = str(cfg.get("DRIVER_HOME_NAME", "בית"))
+    sum_headers = [
         "נהג / משאית",
         "אזורי חלוקה במסלול",
-        "יציאה מהבית",
+        f"יציאה מה{home_name}",
         "שעות הגעה והעמסה במחסנים באשדוד",
-        "חזרה אל הבית",
-        "סה\"כ זמן משמרת (מתוך 12:00 שעות)",
+        f"חזרה אל ה{home_name}",
+        f'סה"כ זמן משמרת (מתוך {int(cfg["MAX_DRIVER_SHIFT_HOURS"])}:00 שעות)',
         "מספר עצירות",
         'סה"כ משקל במשאית (ק"ג)',
         "סטטוס מסלול",
         "פירוט מלא של מסלול הנסיעה ושעות ההגעה",
     ]
 
-    for col_idx, h_text in enumerate(truck_headers, start=1):
-        c = ws_trucks.cell(row=1, column=col_idx, value=h_text)
-        c.fill = header_fill
-        c.font = header_font
-        c.border = thin_border
-        if col_idx in (7, 8):
-            horiz = "right"
-        elif col_idx in (3, 5, 6):
-            horiz = "center"
-        else:
-            horiz = "left"
-        c.alignment = Alignment(horizontal=horiz, vertical="center", wrap_text=True)
-    ws_trucks.row_dimensions[1].height = 28
-    ws_trucks.freeze_panes = "A2"
-
-    ok_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
-    ok_font = Font(name="Arial", size=10, bold=True, color="274E13")
-
-    orders_sheet_ref = "'הזמנות ממוינות לפי אזור'"
-    driver_range_ref = f"{orders_sheet_ref}!$B${start_data_row}:$B${end_data_row}"
-    qty_range_ref = (
-        f"{orders_sheet_ref}!${qty_col_letter}${start_data_row}:"
-        f"${qty_col_letter}${end_data_row}"
-    )
-
-    t_start_row = 2
-    for idx, tr in enumerate(final_trucks):
-        r_idx = t_start_row + idx
-        stops_summary = " -> ".join(
-            f"{s['stop']['effective_dest']} ({s['arrival_str']})"
-            for s in tr["stop_schedules"]
+    for c_idx, h_val in enumerate(sum_headers, start=1):
+        cell = ws_sum.cell(1, c_idx, h_val)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True
         )
-        full_route_text = (
-            f"יציאה מהבית ({format_hhmm(DRIVER_START_MINUTES)}) -> "
-            f"{tr['warehouses_summary_str']} -> "
-            f"{stops_summary} -> חזרה אל הבית ({tr['return_home_str']})"
+        cell.border = header_border
+    ws_sum.row_dimensions[1].height = 28
+
+    for d_idx, drv in enumerate(final_drivers, start=2):
+        primary_reg = drv["ordered_stops"][0]["region"]
+        r_fill = PatternFill(
+            start_color=region_Palette.get(primary_reg, "FFFFFF"),
+            end_color=region_Palette.get(primary_reg, "FFFFFF"),
+            fill_type="solid",
+        )
+        weight_formula = (
+            f"=SUMIF('הזמנות ממוינות לפי אזור'!$B$2:$B${last_data_row}, "
+            f"A{d_idx}, 'הזמנות ממוינות לפי אזור'!${qty_col_letter}$2:${qty_col_letter}${last_data_row})"
         )
 
-        status_notes: list[str] = []
-        if tr.get("has_cooling"):
-            status_notes.append("כולל העמסת קירור")
-        if tr.get("has_hazmat"):
-            status_notes.append('כולל העמסת חומ"ס')
-        if tr.get("has_goldbond"):
-            status_notes.append("כולל העמסת גולד בונד")
-        if tr.get("is_merged_north_sharon"):
-            status_notes.append("אוחד נהג (צפון + השרון)")
-        elif tr.get("was_split"):
-            status_notes.append("פוצל אוטומטית לעמידה במגבלות")
-        else:
-            status_notes.append("תקין")
+        row_vals_sum = [
+            drv["driver_label"],
+            drv["region_title"],
+            cfg["DRIVER_DEPARTURE_TIME"],
+            drv["warehouses_summary"],
+            drv["return_home_str"],
+            drv["total_shift_hhmm"],
+            len(drv["ordered_stops"]),
+            weight_formula,
+            drv.get("split_note", "תקין"),
+            drv["Timeline_str"],
+        ]
 
-        ws_trucks.cell(row=r_idx, column=1, value=tr["driver_name"])
-        ws_trucks.cell(row=r_idx, column=2, value=tr["region_label"])
-        ws_trucks.cell(row=r_idx, column=3, value=format_hhmm(DRIVER_START_MINUTES))
-        ws_trucks.cell(row=r_idx, column=4, value=tr["warehouses_summary_str"])
-        ws_trucks.cell(row=r_idx, column=5, value=tr["return_home_str"])
-        ws_trucks.cell(
-            row=r_idx, column=6, value=format_duration_hhmm(tr["total_shift_min"])
-        )
-        ws_trucks.cell(row=r_idx, column=7, value=len(tr["stop_schedules"]))
-        ws_trucks.cell(
-            row=r_idx,
-            column=8,
-            value=f"=SUMIF({driver_range_ref}, A{r_idx}, {qty_range_ref})",
-        )
-        ws_trucks.cell(row=r_idx, column=9, value=" | ".join(status_notes))
-        ws_trucks.cell(row=r_idx, column=10, value=full_route_text)
-
-        for col_idx in range(1, 11):
-            c = ws_trucks.cell(row=r_idx, column=col_idx)
-            c.border = thin_border
-            c.font = Font(name="Arial", size=10, bold=(col_idx == 1))
-            if col_idx == 9:
-                c.fill = ok_fill
-                c.font = ok_font
-            if col_idx in (7, 8):
-                c.alignment = Alignment(horizontal="right", vertical="center")
-                c.number_format = "#,##0"
-            elif col_idx in (3, 5, 6):
+        for c_i, v in enumerate(row_vals_sum, start=1):
+            c = ws_sum.cell(d_idx, c_i, v)
+            c.fill = r_fill
+            c.border = data_border
+            c.font = bold_font if c_i in (1, 6, 8, 9) else data_font
+            if c_i in (3, 5, 6, 7, 9):
                 c.alignment = Alignment(horizontal="center", vertical="center")
+            elif c_i == 8:
+                c.number_format = "#,##0.##"
+                c.alignment = Alignment(horizontal="right", vertical="center")
             else:
-                c.alignment = Alignment(horizontal="left", vertical="center")
+                c.alignment = Alignment(horizontal="right", vertical="center")
+        ws_sum.row_dimensions[d_idx].height = 24
 
-        ws_trucks.row_dimensions[r_idx].height = 22
+    sum_total_row = len(final_drivers) + 2
+    ws_sum.cell(
+        sum_total_row, 1, f'סה"כ ({len(final_drivers)} נהגים)'
+    ).font = bold_font
+    ws_sum.cell(sum_total_row, 7, f"=SUM(G2:G{sum_total_row - 1})")
+    ws_sum.cell(sum_total_row, 8, f"=SUM(H2:H{sum_total_row - 1})")
 
-    t_end_row = t_start_row + len(final_trucks) - 1
-    t_total_row = t_end_row + 1
-    ws_trucks.cell(row=t_total_row, column=1, value=f'סה"כ ({len(final_trucks)} נהגים)')
-    if t_end_row >= t_start_row:
-        ws_trucks.cell(
-            row=t_total_row, column=7, value=f"=SUM(G{t_start_row}:G{t_end_row})"
-        )
-        ws_trucks.cell(
-            row=t_total_row, column=8, value=f"=SUM(H{t_start_row}:H{t_end_row})"
-        )
-
-    for col_idx in range(1, 11):
-        c = ws_trucks.cell(row=t_total_row, column=col_idx)
-        c.font = Font(name="Arial", size=10, bold=True, color="1F4E78")
-        c.fill = PatternFill(
-            start_color=TOTAL_FILL, end_color=TOTAL_FILL, fill_type="solid"
-        )
+    for c_i in range(1, len(sum_headers) + 1):
+        c = ws_sum.cell(sum_total_row, c_i)
+        c.font = bold_font
+        c.fill = total_fill
         c.border = total_border
-        if col_idx in (7, 8):
-            c.alignment = Alignment(horizontal="right", vertical="center")
+        if c_i == 7:
             c.number_format = "#,##0"
-        else:
-            c.alignment = Alignment(horizontal="left", vertical="center")
-    ws_trucks.row_dimensions[t_total_row].height = 24
+            c.alignment = Alignment(horizontal="center", vertical="center")
+        elif c_i == 8:
+            c.number_format = "#,##0.##"
+            c.alignment = Alignment(horizontal="right", vertical="center")
+    ws_sum.row_dimensions[sum_total_row].height = 25
 
-    for col_idx, width in enumerate([26, 22, 16, 54, 16, 26, 14, 22, 32, 70], start=1):
-        ws_trucks.column_dimensions[get_column_letter(col_idx)].width = width
+    for sheet in (ws_orders, ws_sum):
+        for col in sheet.columns:
+            col_letter = get_column_letter(col[0].column)
+            max_len = 0
+            for cell in col:
+                val_str = str(cell.value or "")
+                if val_str.startswith("="):
+                    val_str = "123,456"
+                max_len = max(max_len, len(val_str))
+            sheet.column_dimensions[col_letter].width = max(
+                min(max_len + 5, 58), 13
+            )
 
     output_path = pathlib.Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb_out.save(output_path)
-    return sorted_records, final_trucks
+    return final_drivers
+
+
+def h_text_is_time(header_name: str) -> bool:
+    return "שעת " in header_name or "תחנה" in header_name
 
 
 # ==============================================================================
-# 7. פתיחת חלון התיקייה ב-Windows ובחירת קובץ קלט
+# 6. פתיחת תיקיית הפלט והרצה ראשית
 # ==============================================================================
-def open_folder_in_windows_explorer(target_path: pathlib.Path | str) -> None:
-    p = pathlib.Path(target_path)
-    target_str = str(p)
-    if os.name == "nt":
-        if p.is_file() and p.exists():
-            try:
-                subprocess.run(
-                    f'explorer /select,"{target_str}"', shell=True, check=False
-                )
-                return
-            except Exception:
-                pass
-            target_str = str(p.parent)
-        elif p.is_dir() and p.exists():
-            target_str = str(p)
-        else:
-            target_str = str(p.parent)
-
-        try:
-            os.startfile(target_str)
-            return
-        except Exception:
-            pass
-        try:
-            subprocess.run(["explorer", target_str], check=False)
-        except Exception:
-            pass
-
-
-def prompt_gui_file_picker() -> str | None:
+def open_output_folder_in_explorer(
+    output_file_path: pathlib.Path,
+) -> None:
     try:
-        import tkinter as tk
-        from tkinter import filedialog
-
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        selected = filedialog.askopenfilename(
-            title="בחר קובץ הזמנות למיון (Excel)",
-            filetypes=[("Excel Files", "*.xlsx;*.xls"), ("All Files", "*.*")],
-        )
-        root.destroy()
-        return selected if selected else None
-    except Exception:
-        return None
+        resolved_file = output_file_path.resolve()
+        folder_path = resolved_file.parent
+        if sys.platform.startswith("win"):
+            subprocess.Popen(["explorer.exe", f"/select,{resolved_file}"])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(resolved_file)])
+        else:
+            subprocess.Popen(["xdg-open", str(folder_path)])
+    except Exception as e:
+        print(f"[!] לא ניתן היה לפתוח את חלון התיקייה אוטומטית: {e}")
 
 
-def resolve_input_file(cli_input: str | None) -> tuple[pathlib.Path | None, str | None]:
-    if cli_input:
-        p = pathlib.Path(cli_input.strip('"'))
-        if p.exists():
-            return p, p.name
-        candidate = pathlib.Path(INPUT_FOLDER) / cli_input.strip('"')
-        if candidate.exists():
-            return candidate, candidate.name
-
-    default_path = pathlib.Path(INPUT_FOLDER) / INPUT_FILE_NAME
-    if default_path.exists():
-        return default_path, INPUT_FILE_NAME
-
-    excluded_names = {
-        HAZMAT_FILE_NAME.lower(),
-        COOLING_FILE_NAME.lower(),
-        GOLDBOND_FILE_NAME.lower(),
+def is_excluded_support_file(
+    p: pathlib.Path, cfg: dict[str, Any]
+) -> bool:
+    name_low = p.name.lower()
+    excluded = {
+        cfg["COOLING_FILE_NAME"].lower(),
+        cfg["HAZMAT_FILE_NAME"].lower(),
+        cfg["GOLDBOND_FILE_NAME"].lower(),
         CONFIG_FILE_NAME.lower(),
         "dangerous_products.xlsx",
+        "cooling_products.pdf",
         "cooling_products.xlsx",
         "gold_bond.xlsx",
         "settings.xlsx",
-        "config.xlsx",
     }
+    return (
+        name_low in excluded
+        or name_low.endswith("_sorted.xlsx")
+        or name_low.startswith("~$")
+    )
 
-    in_dir = pathlib.Path(INPUT_FOLDER)
-    if in_dir.exists() and in_dir.is_dir():
+
+def resolve_input_file(
+    cli_input: str | None, cfg: dict[str, Any]
+) -> pathlib.Path:
+    if cli_input:
+        p = pathlib.Path(cli_input).expanduser()
+        if p.exists():
+            return p.resolve()
+
+    in_dir: pathlib.Path = cfg["INPUT_DIR_PATH"]
+    default_in = in_dir / cfg["INPUT_FILE_NAME"]
+    if default_in.exists() and not is_excluded_support_file(default_in, cfg):
+        return default_in.resolve()
+
+    if in_dir.exists():
         xlsx_files = sorted(
-            f
-            for f in in_dir.glob("*.xlsx")
-            if not f.name.startswith("~$")
-            and f.name.lower() not in excluded_names
-            and "dangerous" not in f.name.lower()
-            and "cooling" not in f.name.lower()
-            and "gold" not in f.name.lower()
+            [
+                f
+                for f in in_dir.glob("*.xlsx")
+                if not is_excluded_support_file(f, cfg)
+            ],
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
         )
         if xlsx_files:
-            return xlsx_files[0], xlsx_files[0].name
+            return xlsx_files[0].resolve()
 
-    gui_selected = prompt_gui_file_picker()
-    if gui_selected:
-        gp = pathlib.Path(gui_selected)
-        return gp, gp.name
-
-    return None, None
+    raise FileNotFoundError(
+        f"לא נמצא קובץ הזמנות בתיקייה: {cfg['INPUT_FOLDER']}"
+    )
 
 
 def main() -> None:
-    cfg_loaded = load_dynamic_config()
-
     parser = argparse.ArgumentParser(
-        description="מיון הזמנות לפי אזורי חלוקה, העמסה מ-4 מחסנים (אוברסיז/קירור/חומ\"ס/גולד בונד) וחישוב שעות הגעה"
+        description="מיון הזמנות ותכנון מסלולי נהגים - דורמקו"
     )
     parser.add_argument(
-        "input_excel",
-        nargs="?",
-        default=None,
-        help="נתיב לקובץ האקסל המקורי (או גרירת קובץ Drag & Drop)",
+        "input_pos", nargs="?", default=None, help="נתיב לקובץ אקסל בגרירה"
     )
+    parser.add_argument("-i", "--input", default=None, help="נתיב לקובץ קלט")
+    parser.add_argument("-o", "--output", default=None, help="נתיב לקובץ פלט")
     parser.add_argument(
-        "-o",
-        "--output",
-        default=None,
-        help="נתיב לקובץ האקסל הממוין שייווצר (ברירת מחדל: בתוך תיקיית output_files)",
-    )
-    parser.add_argument(
-        "-c",
-        "--config",
-        default=None,
-        help="נתיב לקובץ הגדרות מותאם אישית (ברירת מחדל: input_files\\config_parameters.txt)",
-    )
-    parser.add_argument(
-        "--main-load-minutes",
-        type=float,
-        default=None,
-        help="זמן העמסה בדקות במחסן אוברסיז במבוא הספנים 1 (ברירת מחדל: 60)",
-    )
-    parser.add_argument(
-        "--cooling-load-minutes",
-        type=float,
-        default=None,
-        help="זמן העמסה בדקות במחסן הקירור במבוא הספנים 6 (ברירת מחדל: 30)",
-    )
-    parser.add_argument(
-        "--hazmat-load-minutes",
-        type=float,
-        default=None,
-        help='זמן העמסה בדקות במחסן חומ"ס בפארק נמלי ישראל (ברירת מחדל: 30)',
-    )
-    parser.add_argument(
-        "--goldbond-load-minutes",
-        type=float,
-        default=None,
-        help="זמן העמסה בדקות במחסן גולד בונד בהקידמה 1 (ברירת מחדל: 30)",
-    )
-    parser.add_argument(
-        "-u",
-        "--unload-minutes",
-        type=float,
-        default=None,
-        help="זמן פריקה בדקות בכל עצירה אצל לקוח (ברירת מחדל: 30)",
-    )
-    parser.add_argument(
-        "--max-weight",
-        type=float,
-        default=None,
-        help='משקל מקסימלי למשאית בק"ג לפני פיצול ל-2 נהגים (ברירת מחדל: 7500)',
-    )
-    parser.add_argument(
-        "--max-hours",
-        type=float,
-        default=None,
-        help="זמן משמרת מקסימלי לנהג בשעות מיציאה מהבית ועד חזרה אל הבית (ברירת מחדל: 12)",
-    )
-    parser.add_argument(
-        "--offline",
-        action="store_true",
-        help="הרצה ללא פניות ל-API חיצוני",
-    )
-    parser.add_argument(
-        "--prefer-site-name",
-        action="store_true",
-        help="מתן עדיפות לעיר המופיעה בעמודת 'שם האתר' על פני עמודת 'יעד'",
+        "--config", default=None, help="נתיב לקובץ config_parameters.txt"
     )
     parser.add_argument(
         "--no-open",
         action="store_true",
-        help="ביטול פתיחה אוטומטית של תיקיית הפלט בסיום",
+        help="אל תפתח את תיקיית הפלט בסיום",
     )
     args = parser.parse_args()
 
-    if args.config:
-        cfg_loaded = load_dynamic_config(args.config)
+    cfg_path = pathlib.Path(args.config) if args.config else None
+    cfg = load_or_create_config(cfg_path)
 
-    eff_main_load = (
-        args.main_load_minutes
-        if args.main_load_minutes is not None
-        else MAIN_WAREHOUSE_LOAD_MINUTES
-    )
-    eff_cooling_load = (
-        args.cooling_load_minutes
-        if args.cooling_load_minutes is not None
-        else COOLING_WAREHOUSE_LOAD_MINUTES
-    )
-    eff_hazmat_load = (
-        args.hazmat_load_minutes
-        if args.hazmat_load_minutes is not None
-        else HAZMAT_WAREHOUSE_LOAD_MINUTES
-    )
-    eff_goldbond_load = (
-        args.goldbond_load_minutes
-        if args.goldbond_load_minutes is not None
-        else GOLDBOND_WAREHOUSE_LOAD_MINUTES
-    )
-    eff_unload_min = (
-        args.unload_minutes if args.unload_minutes is not None else UNLOAD_MINUTES
-    )
-    eff_max_weight = (
-        args.max_weight if args.max_weight is not None else MAX_TRUCK_WEIGHT_KG
-    )
-    eff_max_hours = (
-        args.max_hours if args.max_hours is not None else MAX_DRIVER_SHIFT_HOURS
-    )
-    eff_use_api = USE_EXTERNAL_ROUTING_API and (not args.offline)
-    eff_prefer_site = PREFER_SITE_NAME_CITY or args.prefer_site_name
+    input_arg = args.input or args.input_pos
+    input_path = resolve_input_file(input_arg, cfg)
 
-    input_path, input_file_name = resolve_input_file(args.input_excel)
-    if not input_path or not input_path.exists():
-        print("לא נבחר קובץ אקסל להזמנות או שהקובץ אינו קיים.")
-        print(f"אנא שים את קובץ ההזמנות בתיקייה:\n  {INPUT_FOLDER}")
-        return
-
-    if args.output:
-        out_path = pathlib.Path(args.output)
-    else:
-        file_prefix = (
-            input_file_name[:-5]
-            if input_file_name.lower().endswith(".xlsx")
-            else input_file_name
-        )
-        out_path = pathlib.Path(OUTPUT_FOLDER) / f"{file_prefix}_sorted.xlsx"
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    records, trucks = sort_orders_excel(
-        input_path=input_path,
-        output_path=out_path,
-        use_external_api=eff_use_api,
-        prefer_site_name_city=eff_prefer_site,
-        max_truck_weight=eff_max_weight,
-        max_shift_hours=eff_max_hours,
-        main_load_minutes=eff_main_load,
-        cooling_load_minutes=eff_cooling_load,
-        hazmat_load_minutes=eff_hazmat_load,
-        goldbond_load_minutes=eff_goldbond_load,
-        unload_minutes=eff_unload_min,
+    out_dir: pathlib.Path = cfg["OUTPUT_DIR_PATH"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = (
+        pathlib.Path(args.output)
+        if args.output
+        else (out_dir / f"{input_path.stem}_sorted.xlsx")
     )
 
-    print(f"\n=======================================================")
-    print(f"תכנון המסלולים, העמסת המחסנים וחישוב שעות ההגעה הושלמו בהצלחה!")
-    if cfg_loaded:
-        print(f"קובץ הגדרות פעיל: {cfg_loaded}")
+    print("=" * 75)
+    print(f"[*] קובץ הגדרות:  {cfg['CONFIG_PATH']}")
+    print(f"[*] תיקיית קלט:   {cfg['INPUT_FOLDER']}")
+    print(f"[*] תיקיית פלט:   {cfg['OUTPUT_FOLDER']}")
+    print(f"[*] קובץ הזמנות:  {input_path.name}")
+    print("=" * 75)
+
+    drivers = sort_orders_excel(
+        input_path=input_path, output_path=output_path, cfg=cfg
+    )
+
     print(
-        f"זמני העמסה: אוברסיז={int(eff_main_load)} דק' | קירור={int(eff_cooling_load)} דק' | "
-        f'חומ"ס={int(eff_hazmat_load)} דק\' | גולד בונד={int(eff_goldbond_load)} דק\' | '
-        f"פריקה אצל לקוח={int(eff_unload_min)} דק'"
+        f"\n[V] הסתיים בהצלחה! הקובץ נשמר בנתיב:\n    {output_path}"
     )
-    print(f"קובץ הפלט נשמר בנתיב:\n  {out_path}")
-    print(f"סה\"כ שורות הזמנה: {len(records)} | סה\"כ נהגים/משאיות: {len(trucks)}")
-    for tr in trucks:
+    print(f"    סה\"כ נהגים/משאיות ששובצו: {len(drivers)}\n")
+    for drv in drivers:
         print(
-            f"  * {tr['driver_name']}: העמסה [{tr['warehouses_summary_str']}] | "
-            f"{len(tr['stop_schedules'])} עצירות | {tr['total_weight']:,.0f} ק\"ג | "
-            f"חזרה אל הבית: {tr['return_home_str']} (משמרת: {format_duration_hhmm(tr['total_shift_min'])} שעות)"
+            f"  - {drv['driver_label']}: {len(drv['ordered_stops'])} עצירות | "
+            f"{drv['total_weight']:,.0f} ק\"ג | זמן משמרת: {drv['total_shift_hhmm']} | "
+            f"חזרה אל ה{cfg['DRIVER_HOME_NAME']}: {drv['return_home_str']}"
         )
-    print(f"=======================================================\n")
+        print(f"    מחסנים: {drv['warehouses_summary']}")
 
-    if AUTO_OPEN_OUTPUT_FOLDER and not args.no_open:
-        open_folder_in_windows_explorer(out_path)
+    if cfg.get("AUTO_OPEN_OUTPUT_FOLDER", True) and not args.no_open:
+        open_output_folder_in_explorer(output_path)
 
 
 if __name__ == "__main__":
