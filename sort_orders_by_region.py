@@ -10,6 +10,9 @@
   4. גולד בונד (הקידמה 1 אשדוד) - מק"טים מ-Gold_bond.xlsx (30 דקות כברירת מחדל)
 - תאריך אספקה מוצג תמיד בפורמט DD-MM-YYYY (למשל 02-11-2026).
 - גיליון "סיכום מסלולי נהגים ומשאיות" מותאם בדיוק לתצוגת מסך קומפקטית (5 עמודות: A עד E).
+- אחרי התכנון האוטומטי נפתח חלון עריכה (route_editor_gui.py) שבו אפשר לגרור עצירות
+  בין נהגים ולשנות סדר. הקובץ נכתב רק אחרי לחיצה על "אישור והמשך".
+  ניתן לכבות את החלון בקובץ ההגדרות: ENABLE_ROUTE_EDITOR = false
 """
 
 from __future__ import annotations
@@ -101,6 +104,8 @@ ENABLE_NORTH_SHARON_MERGE = true
 USE_EXTERNAL_ROUTING_API = true
 PREFER_SITE_NAME_CITY = false
 AUTO_OPEN_OUTPUT_FOLDER = true
+# true = פתיחת חלון לעריכה ידנית של המסלולים לפני יצירת האקסל
+ENABLE_ROUTE_EDITOR = true
 GOOGLE_MAPS_API_KEY = 
 
 # 6. רשימת מק"טים נוספים (אופציונלי - מופרדים בפסיק, בנוסף לקבצים שבתיקיית input_files)
@@ -287,6 +292,9 @@ def load_or_create_config(
         ),
         "AUTO_OPEN_OUTPUT_FOLDER": parse_bool(
             raw_kv.get("AUTO_OPEN_OUTPUT_FOLDER", "true"), True
+        ),
+        "ENABLE_ROUTE_EDITOR": parse_bool(
+            raw_kv.get("ENABLE_ROUTE_EDITOR", "true"), True
         ),
         "GOOGLE_MAPS_API_KEY": raw_kv.get("GOOGLE_MAPS_API_KEY", "").strip(),
         "EXTRA_COOLING_SKUS": raw_kv.get("EXTRA_COOLING_SKUS", ""),
@@ -1471,7 +1479,9 @@ def simulate_driver_shift(
     matrix: list[list[float]],
     cfg: dict[str, Any],
     preserve_region_sequence: bool = False,
+    keep_order: bool = False,
 ) -> dict[str, Any]:
+    """keep_order=True: שומר בדיוק על סדר העצירות שהתקבל (עריכה ידנית), בלי אופטימיזציה."""
     start_min = parse_hhmm_to_minutes(cfg["DRIVER_DEPARTURE_TIME"])
     unload_min = float(cfg["UNLOAD_MINUTES"])
     home_name = str(cfg.get("DRIVER_HOME_NAME", "בית"))
@@ -1538,7 +1548,9 @@ def simulate_driver_shift(
         curr_node = wh_node
 
     stop_map = {s["matrix_idx"]: s for s in stops}
-    if not preserve_region_sequence:
+    if keep_order:
+        ordered_idxs = [s["matrix_idx"] for s in stops]
+    elif not preserve_region_sequence:
         ordered_idxs = solve_open_or_closed_tsp(
             [s["matrix_idx"] for s in stops],
             start_idx=curr_node,
@@ -1689,6 +1701,64 @@ def split_region_into_trucks(
     normal_chunks.reverse()
     trucks.extend(normal_chunks)
     return trucks
+
+
+class RouteEditCancelled(Exception):
+    """המשתמש סגר/ביטל את חלון עריכת המסלולים."""
+
+
+def build_region_title(stops: list[dict[str, Any]]) -> str:
+    regs = {s["region"] for s in stops}
+    ordered = [r for r in REGION_ORDER if r in regs]
+    ordered += sorted(r for r in regs if r not in REGION_ORDER)
+    return " + ".join(ordered)
+
+
+def apply_manual_route_edits(
+    planned_trucks: list[dict[str, Any]],
+    stops_by_key: dict[str, dict[str, Any]],
+    matrix: list[list[float]],
+    cfg: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """פותח את חלון העריכה ומחזיר את המסלולים כפי שהמשתמש אישר אותם."""
+    try:
+        from route_editor_gui import run_route_editor
+    except ImportError as exc:
+        print(f"[!] לא ניתן לפתוח את חלון עריכת המסלולים ({exc}). ממשיך עם התכנון האוטומטי.")
+        return planned_trucks
+
+    def simulate(stop_keys: list[str], keep: bool) -> dict[str, Any]:
+        stops = [stops_by_key[k] for k in stop_keys]
+        return simulate_driver_shift(stops, matrix, cfg, keep_order=keep)
+
+    initial_routes = [
+        [s["stop_key"] for s in t["ordered_stops"]] for t in planned_trucks
+    ]
+    print("\n[*] נפתח חלון עריכת המסלולים - ממתין לאישור המשתמש...")
+    edited = run_route_editor(
+        initial_routes=initial_routes,
+        stops_by_key=stops_by_key,
+        simulate=simulate,
+        cfg=cfg,
+        region_order=REGION_ORDER,
+    )
+    if edited is None:
+        raise RouteEditCancelled()
+
+    edited_keys = [k for keys in edited for k in keys]
+    if sorted(edited_keys) != sorted(stops_by_key.keys()):
+        raise ValueError("שגיאה: לא כל העצירות שובצו לנהגים בחלון העריכה.")
+
+    result: list[dict[str, Any]] = []
+    for keys in edited:
+        if not keys:
+            continue
+        stops = [stops_by_key[k] for k in keys]
+        sim = simulate_driver_shift(stops, matrix, cfg, keep_order=True)
+        sim["region_title"] = build_region_title(stops)
+        result.append(sim)
+    print(f"[V] המסלולים אושרו ({len(result)} נהגים).")
+    return result
 
 
 # ==============================================================================
@@ -1907,29 +1977,36 @@ def sort_orders_excel(
             trucks_by_region[north_reg][n_idx] = merged_sim
             del trucks_by_region["אזור השרון"][s_idx]
 
+    planned_trucks: list[dict[str, Any]] = []
+    for reg in REGION_ORDER:
+        for t in trucks_by_region.get(reg, []):
+            t["region_title"] = t.get("merged_regions_label", reg)
+            planned_trucks.append(t)
+
+    # עריכה ידנית של המסלולים בחלון (גרירת עצירות בין נהגים / שינוי סדר)
+    if cfg.get("ENABLE_ROUTE_EDITOR", True):
+        planned_trucks = apply_manual_route_edits(
+            planned_trucks, unique_stops_by_key, travel_matrix, cfg
+        )
+
     final_drivers: list[dict[str, Any]] = []
-    driver_counter = 1
     stop_assignment: dict[str, dict[str, Any]] = {}
 
-    for reg in REGION_ORDER:
-        reg_trucks = trucks_by_region.get(reg, [])
-        for t in reg_trucks:
-            reg_title = t.get("merged_regions_label", reg)
-            driver_label = f"נהג {driver_counter} ({reg_title})"
-            t["driver_id"] = driver_counter
-            t["driver_label"] = driver_label
-            t["region_title"] = reg_title
-            final_drivers.append(t)
+    for driver_counter, t in enumerate(planned_trucks, start=1):
+        reg_title = t["region_title"]
+        driver_label = f"נהג {driver_counter} ({reg_title})"
+        t["driver_id"] = driver_counter
+        t["driver_label"] = driver_label
+        final_drivers.append(t)
 
-            for st_key, sched in t["schedule_by_stop"].items():
-                stop_assignment[st_key] = {
-                    "driver_id": driver_counter,
-                    "driver_label": driver_label,
-                    "route_stop_num": sched["route_stop_num"],
-                    "arrival_str": sched["arrival_str"],
-                    "departure_str": sched["departure_str"],
-                }
-            driver_counter += 1
+        for st_key, sched in t["schedule_by_stop"].items():
+            stop_assignment[st_key] = {
+                "driver_id": driver_counter,
+                "driver_label": driver_label,
+                "route_stop_num": sched["route_stop_num"],
+                "arrival_str": sched["arrival_str"],
+                "departure_str": sched["departure_str"],
+            }
 
     for rec in records:
         assign = stop_assignment[rec["stop_key"]]
@@ -2350,9 +2427,13 @@ def main() -> None:
     print(f"[*] קובץ הזמנות:  {input_path.name}")
     print("=" * 75)
 
-    drivers = sort_orders_excel(
-        input_path=input_path, output_path=output_path, cfg=cfg
-    )
+    try:
+        drivers = sort_orders_excel(
+            input_path=input_path, output_path=output_path, cfg=cfg
+        )
+    except RouteEditCancelled:
+        print("\n[X] עריכת המסלולים בוטלה על ידי המשתמש. לא נוצרו קבצים.")
+        sys.exit(2)
 
     print(
         f"\n[V] הסתיים בהצלחה! הקובץ נשמר בנתיב:\n    {output_path}"
