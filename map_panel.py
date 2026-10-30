@@ -103,20 +103,24 @@ class MapPanel(tk.Frame):
         bar = tk.Frame(self, bg="#F3F5F8")
         bar.pack(side="top", fill="x", pady=(0, 4))
         tk.Button(
-            bar, text="הצג את כל המסלולים", font=(FONT, 10),
+            bar, text="הצג הכל", font=(FONT, 10),
             command=on_show_all,
         ).pack(side="left", padx=4)
         tk.Label(
             bar,
-            text="לחיצה על עצירה ברשימה או במפה מסמנת את המסלול של הנהג",
+            text="לחיצה על עצירה מסמנת את המסלול",
             font=(FONT, 9), fg="#555555", bg="#F3F5F8", anchor="e",
         ).pack(side="right", padx=4)
 
         self.status = tk.Label(
             self, text="", font=(FONT, 9), fg="#8A5A00", bg="#F3F5F8",
-            anchor="e", justify="right", wraplength=500,
+            anchor="e", justify="right", wraplength=250,
         )
         self.status.pack(side="bottom", fill="x")
+        self.bind(
+            "<Configure>",
+            lambda e: self.status.configure(wraplength=max(e.width - 10, 100)),
+        )
 
         self.backend: _BaseBackend = _SchematicBackend(self, self._clicked)
         self.backend.widget.pack(side="top", fill="both", expand=True)

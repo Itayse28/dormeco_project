@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import messagebox
 from typing import Any, Callable
 
@@ -38,10 +39,10 @@ POOL = -1  # מזהה העמודה "ממתינות לשיבוץ"
 
 FONT = "Arial"
 F_TITLE = (FONT, 15, "bold")
-F_HEAD = (FONT, 12, "bold")
+F_HEAD = (FONT, 11, "bold")
 F_TEXT = (FONT, 10)
 F_SMALL = (FONT, 9)
-F_LIST = (FONT, 10)
+F_LIST = (FONT, 9)
 F_BTN = (FONT, 10)
 F_BTN_BIG = (FONT, 12, "bold")
 
@@ -69,7 +70,10 @@ DRIVER_COLORS = [
     "#F4511E", "#3949AB", "#7CB342", "#6D4C41", "#D81B60", "#00ACC1",
 ]
 
-LIST_WIDTH_CHARS = 40
+MIN_CARD_WIDTH = 255      # רוחב מינימלי רצוי לכרטיס נהג (פיקסלים ב-100% תצוגה)
+MIN_CARDS_PER_ROW = 4     # לפחות 4 נהגים בשורה (=> 8 נהגים במסך עם 2 שורות)
+CARD_ROWS_ON_SCREEN = 2   # כמה שורות של כרטיסי נהגים נכנסות במסך אחד
+MAP_WIDTH_RATIO = 0.22    # רוחב המפה כברירת מחדל (חלק מרוחב החלון)
 
 
 class RouteEditor:
@@ -125,13 +129,9 @@ class RouteEditor:
     def _problems(self, sim: dict[str, Any]) -> list[str]:
         out = []
         if sim["total_weight"] > self.max_weight + 1e-6:
-            out.append(
-                f'חריגה במשקל: {sim["total_weight"]:,.0f} מתוך {self.max_weight:,.0f} ק"ג'
-            )
+            out.append(f'חריגת משקל (מקס\' {self.max_weight:,.0f})')
         if sim["total_shift_min"] > self.max_shift_min + 1e-6:
-            out.append(
-                f"חריגה בשעות: {sim['total_shift_hhmm']} (מקסימום {self.max_shift_min / 60:g} שעות)"
-            )
+            out.append(f"חריגת שעות (מקס' {self.max_shift_min / 60:g})")
         return out
 
     def _region_title(self, keys: list[str]) -> str:
@@ -181,7 +181,7 @@ class RouteEditor:
             tags.append("גולד בונד")
         if tags:
             parts.append("/".join(tags))
-        return "  |  ".join(parts)
+        return " | ".join(parts)
 
     # ------------------------------------------------------------------
     # בניית החלון
@@ -270,55 +270,101 @@ class RouteEditor:
             )
         mid = tk.Frame(r, bg=BG_APP)
         paned.add(mid, minsize=400, stretch="always")
-        r.after(
-            50, lambda: paned.sash_place(0, int(max(r.winfo_width(), 1200) * 0.38), 0)
+        self._paned = paned
+        r.after(80, self._place_sash)
+
+        self.canvas = tk.Canvas(
+            mid, bg=BG_APP, highlightthickness=0, yscrollincrement=30
         )
-        self.canvas = tk.Canvas(mid, bg=BG_APP, highlightthickness=0)
-        hbar = tk.Scrollbar(mid, orient="horizontal", command=self.canvas.xview)
-        self.canvas.configure(xscrollcommand=hbar.set)
-        hbar.pack(side="bottom", fill="x")
-        self.canvas.pack(side="top", fill="both", expand=True)
+        vbar = tk.Scrollbar(mid, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=vbar.set)
+        vbar.pack(side="left", fill="y")
+        self.canvas.pack(side="right", fill="both", expand=True)
 
         self.board = tk.Frame(self.canvas, bg=BG_APP)
         self.board_win = self.canvas.create_window(0, 0, window=self.board, anchor="nw")
-        self.canvas.bind("<Configure>", lambda _e: self._sync_canvas())
-        r.bind_all("<Shift-MouseWheel>", self._on_shift_wheel)
+        self.canvas.bind("<Configure>", lambda _e: self._layout())
+        r.bind_all("<MouseWheel>", self._on_wheel)
 
         self.ghost: tk.Toplevel | None = None
+        self._cards: list[tuple[int, tk.Frame]] = []
+        self._scale = max(r.winfo_fpixels("1i") / 96.0, 1.0)
+        self._used_grid_cols = 0
+        self._list_lines = 8
 
-    def _sync_canvas(self) -> None:
+    def _place_sash(self) -> None:
+        w = self.root.winfo_width()
+        if w < 300:
+            self.root.after(100, self._place_sash)
+            return
+        self._paned.sash_place(0, int(w * MAP_WIDTH_RATIO), 0)
+
+    def _layout(self) -> None:
+        """מסדר את כרטיסי הנהגים ברשת (כמה שנכנס ברוחב, ואז שורה חדשה)."""
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw < 50 or ch < 50:
+            return
+        self.canvas.itemconfigure(self.board_win, width=cw)
+
+        per_row = max(MIN_CARDS_PER_ROW, int(cw // (MIN_CARD_WIDTH * self._scale)))
+        for i in range(max(per_row, self._used_grid_cols)):
+            if i < per_row:
+                self.board.grid_columnconfigure(i, weight=1, uniform="card")
+            else:
+                self.board.grid_columnconfigure(i, weight=0, uniform="")
+        self._used_grid_cols = per_row
+
+        for pos, (_col, frame) in enumerate(self._cards):
+            row, c = divmod(pos, per_row)
+            # מימין לשמאל: הנהג הראשון בפינה הימנית העליונה
+            frame.grid(row=row, column=per_row - 1 - c, sticky="nsew", padx=4, pady=4)
+
+        # גובה הרשימות כך ש-CARD_ROWS_ON_SCREEN שורות של כרטיסים ייכנסו במסך
+        if self._cards:
+            self.board.update_idletasks()
+            fixed = 0
+            for col, frame in self._cards:
+                lb = self._listboxes.get(col)
+                if lb is not None:
+                    fixed = max(fixed, frame.winfo_reqheight() - lb.winfo_reqheight())
+            line_px = tkfont.Font(root=self.root, font=F_LIST).metrics("linespace") + 1
+            card_h = ch / CARD_ROWS_ON_SCREEN - 10 * self._scale
+            lines = max(4, int((card_h - fixed) // line_px))
+            if lines != self._list_lines:
+                self._list_lines = lines
+                for lb in self._listboxes.values():
+                    lb.configure(height=lines)
+
         self.board.update_idletasks()
-        bw = self.board.winfo_reqwidth()
         bh = self.board.winfo_reqheight()
-        cw = max(self.canvas.winfo_width(), 1)
-        ch = max(self.canvas.winfo_height(), 1)
-        # כשהתוכן צר מהחלון - מצמידים אותו לימין (תצוגה מימין לשמאל)
-        x = max(cw - bw, 0)
-        self.canvas.coords(self.board_win, x, 0)
-        self.canvas.itemconfigure(self.board_win, height=max(bh, ch))
-        self.canvas.configure(scrollregion=(0, 0, max(bw, cw), max(bh, ch)))
+        self.canvas.configure(scrollregion=(0, 0, cw, max(bh, ch)))
 
-    def _on_shift_wheel(self, event: tk.Event) -> None:
-        step = -1 if event.delta > 0 else 1
-        self.canvas.xview_scroll(step * 3, "units")
+    def _on_wheel(self, event: tk.Event) -> None:
+        w = event.widget
+        if not str(w).startswith(str(self.canvas)):
+            return  # המפה מטפלת בגלגלת בעצמה (זום)
+        if isinstance(w, tk.Listbox) and w.yview() != (0.0, 1.0):
+            return  # גלילה בתוך רשימה ארוכה
+        if self.canvas.yview() == (0.0, 1.0):
+            return
+        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
 
     # ------------------------------------------------------------------
     # ציור הלוח
     # ------------------------------------------------------------------
     def render(self) -> None:
-        xview = self.canvas.xview()
+        yview = self.canvas.yview()
         for child in self.board.winfo_children():
             child.destroy()
         self._drop_map.clear()
         self._listboxes.clear()
         self._col_frames.clear()
+        self._cards = []
         if self._col_of_id(self.selected_id) is None:
             self.selected_id = None
 
-        n_lines = max(
-            [len(r) for r in self.routes] + [len(self.pool), 6]
-        )
-        list_height = min(max(n_lines + 1, 8), 26)
+        list_height = self._list_lines
 
         if self.pool:
             self._build_column(POOL, self.pool, list_height, None)
@@ -332,13 +378,13 @@ class RouteEditor:
                 self._build_column(col, keys, list_height, 0)
 
         self._update_info()
-        self._sync_canvas()
+        self._layout()
         self._draw_map(fit=self._first_render)
         if self._first_render:
-            self.canvas.xview_moveto(1.0)
+            self.canvas.yview_moveto(0.0)
             self._first_render = False
         else:
-            self.canvas.xview_moveto(xview[0])
+            self.canvas.yview_moveto(yview[0])
 
         if self._reselect is not None:
             col, idx = self._reselect
@@ -368,15 +414,15 @@ class RouteEditor:
             bg = BG_OK
 
         frame = tk.Frame(
-            self.board, bg=bg, bd=1, relief="solid", padx=8, pady=6,
+            self.board, bg=bg, bd=1, relief="solid", padx=5, pady=4,
             highlightthickness=3, highlightbackground=bg, highlightcolor=bg,
         )
-        frame.pack(side="right", fill="y", padx=5, pady=6)
+        self._cards.append((col, frame))
         self._register_drop(frame, col)
         self._col_frames[col] = frame
         self._style_frame(col)
-        stripe = tk.Frame(frame, bg=self._color(col), height=8)
-        stripe.pack(side="top", fill="x", pady=(0, 3))
+        stripe = tk.Frame(frame, bg=self._color(col), height=6)
+        stripe.pack(side="top", fill="x", pady=(0, 2))
         self._register_drop(stripe, col)
 
         # כותרת
@@ -390,7 +436,7 @@ class RouteEditor:
             title = f"נהג {drv_num}  ({self._region_title(keys)})"
             head_bg = self._region_color(keys)
         head = tk.Label(
-            frame, text=title, font=F_HEAD, bg=head_bg, anchor="e", padx=6, pady=4,
+            frame, text=title, font=F_HEAD, bg=head_bg, anchor="e", padx=4, pady=2,
             cursor="hand2",
         )
         head.pack(side="top", fill="x")
@@ -398,39 +444,34 @@ class RouteEditor:
         if not is_pool:
             head.bind("<Button-1>", lambda _e, c=col: self.select_route(c))
 
-        # שורות מידע
+        # שורות מידע (תמיד 3 שורות, כדי שכל הכרטיסים יהיו באותו גובה)
         info_lines: list[tuple[str, str]] = []
         if is_pool:
-            info_lines.append(
-                (f"{len(keys)} עצירות - גררו כל אחת לנהג כלשהו", FG_BAD)
-            )
+            info_lines = [
+                (f"{len(keys)} עצירות", FG_BAD),
+                ("גררו כל אחת לנהג כלשהו", FG_BAD),
+                ("", FG_MUTED),
+            ]
         elif not keys:
-            info_lines.append(("גררו לכאן עצירות", FG_MUTED))
+            info_lines = [("גררו לכאן עצירות", FG_MUTED), ("", FG_MUTED), ("", FG_MUTED)]
         else:
-            info_lines.append(
-                (
-                    f'{len(keys)} עצירות   |   {sim["total_weight"]:,.0f} ק"ג   |   '
-                    f'משמרת {sim["total_shift_hhmm"]}',
-                    "black",
-                )
-            )
-            info_lines.append(
-                (
-                    f"יציאה {self.cfg.get('DRIVER_DEPARTURE_TIME', '')}   |   "
-                    f"חזרה {sim['return_home_str']}",
-                    FG_MUTED,
-                )
-            )
             wh_names = [
                 part.split(" (")[0]
                 for part in str(sim.get("warehouses_summary", "")).split(" -> ")
                 if part
             ]
-            if wh_names:
-                info_lines.append(("העמסה: " + ", ".join(wh_names), FG_MUTED))
+            info_lines.append(
+                (
+                    f'{len(keys)} עצירות | {sim["total_weight"]:,.0f} ק"ג | '
+                    f'משמרת {sim["total_shift_hhmm"]}',
+                    "black",
+                )
+            )
+            info_lines.append(
+                (f"חזרה {sim['return_home_str']} | " + ", ".join(wh_names), FG_MUTED)
+            )
             if problems:
-                for p in problems:
-                    info_lines.append((p, FG_BAD))
+                info_lines.append((" | ".join(problems), FG_BAD))
             else:
                 info_lines.append(("תקין", FG_OK))
 
@@ -438,19 +479,18 @@ class RouteEditor:
             lbl = tk.Label(
                 frame, text=text, font=F_SMALL, bg=bg, fg=color,
                 anchor="e", justify="right",
-                wraplength=LIST_WIDTH_CHARS * 7,
             )
             lbl.pack(side="top", fill="x")
             self._register_drop(lbl, col)
 
         # רשימת העצירות
         list_frame = tk.Frame(frame, bg=bg)
-        list_frame.pack(side="top", fill="both", expand=True, pady=(6, 4))
+        list_frame.pack(side="top", fill="both", expand=True, pady=(3, 3))
         self._register_drop(list_frame, col)
         lb = tk.Listbox(
             list_frame,
             font=F_LIST,
-            width=LIST_WIDTH_CHARS,
+            width=10,
             height=list_height,
             justify="right",
             activestyle="none",
@@ -478,22 +518,22 @@ class RouteEditor:
         self._register_drop(btns, col)
         if not is_pool:
             tk.Button(
-                btns, text="בטל נהג", font=F_SMALL, fg=FG_BAD,
+                btns, text="בטל נהג", font=F_SMALL, fg=FG_BAD, padx=3, pady=0,
                 command=lambda c=col: self.remove_driver(c),
-            ).pack(side="left", padx=2)
+            ).pack(side="left", padx=1)
             if len(keys) > 1:
                 tk.Button(
-                    btns, text="סדר אוטומטי", font=F_SMALL,
+                    btns, text="סדר אוטומטי", font=F_SMALL, padx=3, pady=0,
                     command=lambda c=col: self.auto_order(c),
-                ).pack(side="left", padx=2)
+                ).pack(side="left", padx=1)
         tk.Button(
-            btns, text="▼", font=F_SMALL, width=3,
+            btns, text="▼", font=F_SMALL, width=2, padx=1, pady=0,
             command=lambda c=col: self.nudge(c, +1),
-        ).pack(side="right", padx=2)
+        ).pack(side="right", padx=1)
         tk.Button(
-            btns, text="▲", font=F_SMALL, width=3,
+            btns, text="▲", font=F_SMALL, width=2, padx=1, pady=0,
             command=lambda c=col: self.nudge(c, -1),
-        ).pack(side="right", padx=2)
+        ).pack(side="right", padx=1)
 
     def _update_info(self) -> None:
         active = [r for r in self.routes if r]
@@ -589,12 +629,12 @@ class RouteEditor:
                 pass
 
     def _autoscroll(self, event: tk.Event) -> None:
-        cx = self.canvas.winfo_rootx()
-        cw = self.canvas.winfo_width()
-        if event.x_root < cx + 50:
-            self.canvas.xview_scroll(-1, "units")
-        elif event.x_root > cx + cw - 50:
-            self.canvas.xview_scroll(1, "units")
+        cy = self.canvas.winfo_rooty()
+        ch = self.canvas.winfo_height()
+        if event.y_root < cy + 30:
+            self.canvas.yview_scroll(-1, "units")
+        elif event.y_root > cy + ch - 30:
+            self.canvas.yview_scroll(1, "units")
         d = self._drag
         lb = self._listboxes.get(d["hover"]) if d and d["hover"] is not None else None
         if lb is not None:
@@ -679,7 +719,7 @@ class RouteEditor:
         self.route_ids.append(self._next_id)
         self._next_id += 1
         self.render()
-        self.canvas.xview_moveto(0.0)
+        self.canvas.yview_moveto(1.0)
 
     def remove_driver(self, col: int) -> None:
         keys = self.routes[col]
@@ -798,14 +838,15 @@ class RouteEditor:
             return
         self.canvas.update_idletasks()
         region = self.canvas.cget("scrollregion").split()
-        total = float(region[2]) if len(region) == 4 else 0.0
-        view_w = self.canvas.winfo_width()
-        if total <= view_w:
+        total = float(region[3]) if len(region) == 4 else 0.0
+        view_h = self.canvas.winfo_height()
+        if total <= view_h:
             return
-        board_x = self.canvas.coords(self.board_win)[0]
-        fx = board_x + frame.winfo_x()
-        target = fx - (view_w - frame.winfo_width()) / 2
-        self.canvas.xview_moveto(max(0.0, min(target / total, 1.0)))
+        fy = frame.winfo_y()
+        top, bottom = self.canvas.yview()
+        if top * total <= fy and fy + frame.winfo_height() <= bottom * total:
+            return  # הכרטיס כבר גלוי
+        self.canvas.yview_moveto(max(0.0, min((fy - 8) / total, 1.0)))
 
     def show_all(self) -> None:
         self.selected_id = None
