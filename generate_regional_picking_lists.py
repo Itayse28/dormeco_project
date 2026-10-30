@@ -10,6 +10,11 @@
   4. גולד בונד:     <ListName>_Driver_<N>_<Region>_Gold_Bond.xlsx  -> שורה 1: "העמסות בגולד בונד לנהג X"
 - כל הטקסט בתוך כל המשבצות מיושר למרכז המשבצת (horizontal="center", vertical="center").
 - כל הקבצים נשמרים בתיקייה: output_files\רשימות ליקוט <ListName>\
+- אם בקובץ ההגדרות מוגדר SEND_PICKING_LIST_TO, נוצר בתיקייה גם הקובץ
+  "שליחת רשימות ליקוט במייל.bat" - לחיצה כפולה עליו שולחת את כל רשימות
+  הליקוט שבתיקייה דרך Outlook לכתובת שהוגדרה.
+- לפני יצירת הרשימות נמחקות רשימות ישנות של אותה רשימה מהרצה קודמת,
+  כדי שלא יישלחו במייל בטעות.
 """
 
 from __future__ import annotations
@@ -187,7 +192,114 @@ def load_picking_config(
         "EXTRA_COOLING_SKUS": raw_kv.get("EXTRA_COOLING_SKUS", ""),
         "EXTRA_HAZMAT_SKUS": raw_kv.get("EXTRA_HAZMAT_SKUS", ""),
         "EXTRA_GOLDBOND_SKUS": raw_kv.get("EXTRA_GOLDBOND_SKUS", ""),
+        "SEND_PICKING_LIST_TO": raw_kv.get("SEND_PICKING_LIST_TO", "").strip(),
     }
+
+
+# ==============================================================================
+# שליחת רשימות הליקוט במייל (Outlook) בלחיצה כפולה
+# ==============================================================================
+MAIL_LAUNCHER_NAME = "שליחת רשימות ליקוט במייל.bat"
+MAIL_ATTACH_EXTENSIONS = (".xlsx", ".xls", ".pdf")
+
+_MAIL_BAT_HEADER = r"""@echo off
+chcp 65001 > nul
+title שליחת רשימות ליקוט במייל
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$f='%~f0'; $s=[IO.File]::ReadAllText($f,[Text.Encoding]::UTF8); $i=$s.LastIndexOf('#PS-START'); Invoke-Expression $s.Substring($i)"
+echo.
+pause
+exit /b
+"""
+
+_MAIL_PS_BODY = r"""#PS-START
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+function Send-PickingLists {
+    $to = __TO__
+    $subject = __SUBJECT__
+    $exts = @(__EXTS__)
+    $folder = Split-Path -Parent $f
+    $files = @(Get-ChildItem -LiteralPath $folder -File |
+        Where-Object { $exts -contains $_.Extension.ToLower() } |
+        Sort-Object Name)
+
+    if ($files.Count -eq 0) {
+        Write-Host '[X] No picking list files were found in this folder.'
+        return
+    }
+    Write-Host ("[*] Sending {0} files to: {1}" -f $files.Count, $to)
+
+    try {
+        $outlook = New-Object -ComObject Outlook.Application
+    } catch {
+        Write-Host '[X] Could not open Outlook.'
+        Write-Host '    Classic (desktop) Outlook must be installed and signed in.'
+        Write-Host '    The "new Outlook" app does not support automatic sending.'
+        return
+    }
+
+    try {
+        $mail = $outlook.CreateItem(0)
+        $mail.To = $to
+        $mail.Subject = $subject
+        $items = ($files | ForEach-Object {
+            '<li>' + [System.Net.WebUtility]::HtmlEncode($_.Name) + '</li>'
+        }) -join ''
+        $mail.HTMLBody = '<div dir="rtl" style="font-family:Arial;font-size:11pt">' +
+            'שלום,<br><br>' +
+            ('מצורפות רשימות הליקוט ({0} קבצים):' -f $files.Count) +
+            '<ul>' + $items + '</ul>' +
+            'נשלח אוטומטית ממערכת מיון ההזמנות.</div>'
+        foreach ($file in $files) {
+            [void]$mail.Attachments.Add($file.FullName)
+        }
+        $mail.Send()
+        try { $outlook.Session.SendAndReceive($false) } catch {}
+        Start-Sleep -Seconds 3
+        Write-Host ('[V] Email sent successfully to: ' + $to)
+    } catch {
+        Write-Host ('[X] Sending failed: ' + $_.Exception.Message)
+    }
+}
+Send-PickingLists
+"""
+
+
+def _ps_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def create_send_mail_launcher(
+    picking_dir: pathlib.Path, list_name: str, recipients_raw: str
+) -> pathlib.Path | None:
+    """יוצר בתיקיית הליקוט קובץ bat ששולח את כל הרשימות במייל דרך Outlook."""
+    recipients = [
+        a.strip() for a in re.split(r"[;,]", recipients_raw or "") if a.strip()
+    ]
+    if not recipients:
+        return None
+    ps_body = (
+        _MAIL_PS_BODY.replace("__TO__", _ps_quote("; ".join(recipients)))
+        .replace("__SUBJECT__", _ps_quote(f"רשימות ליקוט - {list_name}"))
+        .replace("__EXTS__", ",".join(_ps_quote(e) for e in MAIL_ATTACH_EXTENSIONS))
+    )
+    content = (_MAIL_BAT_HEADER + ps_body).replace("\r\n", "\n").replace("\n", "\r\n")
+    out = picking_dir / MAIL_LAUNCHER_NAME
+    out.write_bytes(content.encode("utf-8"))  # UTF-8 בלי BOM - חובה לקובצי bat
+    return out
+
+
+def remove_old_picking_lists(picking_dir: pathlib.Path, list_name: str) -> int:
+    """מוחק רשימות ליקוט מהרצה קודמת של אותה רשימה (כדי שלא יישלחו בטעות)."""
+    removed = 0
+    if not picking_dir.exists():
+        return 0
+    for old in picking_dir.glob(f"{list_name}_Driver_*.xlsx"):
+        try:
+            old.unlink()
+            removed += 1
+        except OSError as exc:
+            print(f"[!] לא ניתן למחוק קובץ ישן (אולי פתוח באקסל): {old.name} ({exc})")
+    return removed
 
 
 def load_workbook_safe(excel_path: str | pathlib.Path) -> openpyxl.Workbook:
@@ -777,6 +889,10 @@ def main() -> None:
     print(f"[*] תיקיית רשימות ליקוט: {picking_dir}")
     print("=" * 75)
 
+    removed = remove_old_picking_lists(picking_dir, list_name)
+    if removed:
+        print(f"[*] נמחקו {removed} רשימות ליקוט ישנות מהרצה קודמת.")
+
     created = generate_picking_lists_from_sorted_excel(
         sorted_excel_path=sorted_excel_path,
         picking_dir=picking_dir,
@@ -788,6 +904,21 @@ def main() -> None:
     for label, f_path, count, weight in created:
         print(
             f"  - {label}: {f_path.name} ({count} שורות, {weight:,.0f} ק\"ג)"
+        )
+
+    mail_launcher = create_send_mail_launcher(
+        picking_dir, list_name, cfg.get("SEND_PICKING_LIST_TO", "")
+    )
+    if mail_launcher:
+        print(
+            f"\n[V] נוצר קובץ שליחה במייל: {mail_launcher.name}\n"
+            f"    לחיצה כפולה עליו תשלח את כל רשימות הליקוט אל: "
+            f"{cfg['SEND_PICKING_LIST_TO']}"
+        )
+    else:
+        print(
+            "\n[*] לא הוגדרה כתובת SEND_PICKING_LIST_TO בקובץ ההגדרות - "
+            "קובץ השליחה במייל לא נוצר."
         )
 
     if cfg.get("AUTO_OPEN_OUTPUT_FOLDER", True) and not args.no_open:

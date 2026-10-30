@@ -107,9 +107,7 @@ class MapPanel(tk.Frame):
             command=on_show_all,
         ).pack(side="left", padx=4)
         tk.Label(
-            bar,
-            text="לחיצה על עצירה מסמנת את המסלול",
-            font=(FONT, 9), fg="#555555", bg="#F3F5F8", anchor="e",
+            bar, text="מפת מסלולים", font=(FONT, 10, "bold"), bg="#F3F5F8", anchor="e",
         ).pack(side="right", padx=4)
 
         self.status = tk.Label(

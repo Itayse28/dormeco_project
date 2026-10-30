@@ -106,6 +106,10 @@ PREFER_SITE_NAME_CITY = false
 AUTO_OPEN_OUTPUT_FOLDER = true
 # true = פתיחת חלון לעריכה ידנית של המסלולים לפני יצירת האקסל
 ENABLE_ROUTE_EDITOR = true
+# כמה נהגים יוצגו במסך אחד בחלון העריכה (בלי לגלול)
+AMOUNT_OF_DRIVERS_ON_SCREEN = 10
+# כתובת מייל לשליחת רשימות הליקוט (כמה כתובות - מפרידים בפסיק)
+SEND_PICKING_LIST_TO = 
 GOOGLE_MAPS_API_KEY = 
 
 # 6. רשימת מק"טים נוספים (אופציונלי - מופרדים בפסיק, בנוסף לקבצים שבתיקיית input_files)
@@ -122,6 +126,13 @@ def parse_bool(val: str, default: bool = True) -> bool:
     if v in ("false", "0", "no", "n", "לא", "שקר"):
         return False
     return default
+
+
+def parse_int(val: str, default: int) -> int:
+    try:
+        return max(1, int(float(str(val).strip())))
+    except (TypeError, ValueError):
+        return default
 
 
 def load_or_create_config(
@@ -292,6 +303,9 @@ def load_or_create_config(
         ),
         "AUTO_OPEN_OUTPUT_FOLDER": parse_bool(
             raw_kv.get("AUTO_OPEN_OUTPUT_FOLDER", "true"), True
+        ),
+        "AMOUNT_OF_DRIVERS_ON_SCREEN": parse_int(
+            raw_kv.get("AMOUNT_OF_DRIVERS_ON_SCREEN", "10"), 10
         ),
         "ENABLE_ROUTE_EDITOR": parse_bool(
             raw_kv.get("ENABLE_ROUTE_EDITOR", "true"), True

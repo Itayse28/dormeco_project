@@ -70,10 +70,17 @@ DRIVER_COLORS = [
     "#F4511E", "#3949AB", "#7CB342", "#6D4C41", "#D81B60", "#00ACC1",
 ]
 
-MIN_CARD_WIDTH = 255      # רוחב מינימלי רצוי לכרטיס נהג (פיקסלים ב-100% תצוגה)
-MIN_CARDS_PER_ROW = 4     # לפחות 4 נהגים בשורה (=> 8 נהגים במסך עם 2 שורות)
-CARD_ROWS_ON_SCREEN = 2   # כמה שורות של כרטיסי נהגים נכנסות במסך אחד
-MAP_WIDTH_RATIO = 0.22    # רוחב המפה כברירת מחדל (חלק מרוחב החלון)
+DEFAULT_DRIVERS_ON_SCREEN = 10  # ברירת מחדל ל-AMOUNT_OF_DRIVERS_ON_SCREEN
+MAP_WIDTH_RATIO = 0.15          # רוחב המפה כברירת מחדל (חלק מרוחב החלון)
+MAP_MIN_WIDTH = 150
+
+
+def screen_grid(drivers_on_screen: int) -> tuple[int, int]:
+    """כמה נהגים בשורה וכמה שורות, לפי מספר הנהגים שצריך להיכנס במסך."""
+    n = max(1, int(drivers_on_screen))
+    rows = 1 if n <= 4 else (2 if n <= 12 else 3)
+    per_row = -(-n // rows)  # עיגול למעלה
+    return per_row, rows
 
 
 class RouteEditor:
@@ -105,6 +112,13 @@ class RouteEditor:
         self.home = tuple(cfg.get("DRIVER_HOME_COORDS", (32.3215, 34.8532)))
         self.map_panel = None
         self._col_frames: dict[int, tk.Frame] = {}
+        try:
+            on_screen = int(cfg.get("AMOUNT_OF_DRIVERS_ON_SCREEN", DEFAULT_DRIVERS_ON_SCREEN))
+        except (TypeError, ValueError):
+            on_screen = DEFAULT_DRIVERS_ON_SCREEN
+        self.base_per_row, self.rows_on_screen = screen_grid(on_screen)
+        self._map_visible = True
+        self._card_w_ref: float | None = None
         self.result: list[list[str]] | None = None
 
         self._sim_cache: dict[tuple[str, ...], dict[str, Any]] = {}
@@ -245,6 +259,11 @@ class RouteEditor:
             bottom, text="ביטול", font=F_BTN, padx=12, pady=6,
             command=self.on_cancel,
         ).pack(side="left", padx=6)
+        self.map_btn = tk.Button(
+            bottom, text="הסתר מפה", font=F_BTN, padx=12, pady=6,
+            command=self.toggle_map,
+        )
+        self.map_btn.pack(side="left", padx=6)
 
         paned = tk.PanedWindow(
             r, orient="horizontal", sashwidth=8, sashrelief="raised", bg="#C9CED6"
@@ -254,21 +273,21 @@ class RouteEditor:
             self.map_panel = MapPanel(
                 paned, on_stop_click=self.on_map_stop_click, on_show_all=self.show_all
             )
-            paned.add(self.map_panel, minsize=250, stretch="always")
+            paned.add(self.map_panel, minsize=MAP_MIN_WIDTH, stretch="always")
+            self._map_widget = self.map_panel
         else:
             msg = (
                 "המפה לא נטענה.\n\nודאו שהקובץ map_panel.py נמצא באותה תיקייה "
                 f"כמו route_editor_gui.py.\n\nפרטי השגיאה:\n{MAP_PANEL_ERROR}"
             )
             print(f"[מפה] {msg}")
-            paned.add(
-                tk.Label(
-                    paned, text=msg, font=F_TEXT, fg=FG_BAD, bg=BG_APP,
-                    justify="right", wraplength=380,
-                ),
-                minsize=250, stretch="always",
+            self._map_widget = tk.Label(
+                paned, text=msg, font=F_TEXT, fg=FG_BAD, bg=BG_APP,
+                justify="right", wraplength=200,
             )
+            paned.add(self._map_widget, minsize=MAP_MIN_WIDTH, stretch="always")
         mid = tk.Frame(r, bg=BG_APP)
+        self._mid = mid
         paned.add(mid, minsize=400, stretch="always")
         self._paned = paned
         r.after(80, self._place_sash)
@@ -307,7 +326,13 @@ class RouteEditor:
             return
         self.canvas.itemconfigure(self.board_win, width=cw)
 
-        per_row = max(MIN_CARDS_PER_ROW, int(cw // (MIN_CARD_WIDTH * self._scale)))
+        if self._map_visible or self._card_w_ref is None:
+            per_row = self.base_per_row
+            if self._map_visible:
+                self._card_w_ref = cw / self.base_per_row
+        else:
+            # בלי מפה יש יותר רוחב => נכנסים יותר נהגים בשורה באותו רוחב כרטיס
+            per_row = max(self.base_per_row, int(round(cw / self._card_w_ref)))
         for i in range(max(per_row, self._used_grid_cols)):
             if i < per_row:
                 self.board.grid_columnconfigure(i, weight=1, uniform="card")
@@ -320,7 +345,7 @@ class RouteEditor:
             # מימין לשמאל: הנהג הראשון בפינה הימנית העליונה
             frame.grid(row=row, column=per_row - 1 - c, sticky="nsew", padx=4, pady=4)
 
-        # גובה הרשימות כך ש-CARD_ROWS_ON_SCREEN שורות של כרטיסים ייכנסו במסך
+        # גובה הרשימות כך שכל שורות הכרטיסים שנקבעו ייכנסו במסך
         if self._cards:
             self.board.update_idletasks()
             fixed = 0
@@ -329,7 +354,7 @@ class RouteEditor:
                 if lb is not None:
                     fixed = max(fixed, frame.winfo_reqheight() - lb.winfo_reqheight())
             line_px = tkfont.Font(root=self.root, font=F_LIST).metrics("linespace") + 1
-            card_h = ch / CARD_ROWS_ON_SCREEN - 10 * self._scale
+            card_h = ch / self.rows_on_screen - 10 * self._scale
             lines = max(4, int((card_h - fixed) // line_px))
             if lines != self._list_lines:
                 self._list_lines = lines
@@ -339,6 +364,21 @@ class RouteEditor:
         self.board.update_idletasks()
         bh = self.board.winfo_reqheight()
         self.canvas.configure(scrollregion=(0, 0, cw, max(bh, ch)))
+
+    def toggle_map(self) -> None:
+        """הסתרה/הצגה של המפה - כשהמפה מוסתרת נכנסים יותר נהגים בשורה."""
+        if self._map_visible:
+            self._paned.forget(self._map_widget)
+            self._map_visible = False
+            self.map_btn.configure(text="הצג מפה")
+        else:
+            self._paned.add(
+                self._map_widget, before=self._mid, minsize=MAP_MIN_WIDTH, stretch="always"
+            )
+            self._map_visible = True
+            self.map_btn.configure(text="הסתר מפה")
+            self.root.after(30, self._place_sash)
+        self.root.after(60, self._layout)
 
     def _on_wheel(self, event: tk.Event) -> None:
         w = event.widget
