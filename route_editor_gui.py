@@ -14,7 +14,11 @@
 - נהג שחורג ממשקל המשאית או משעות המשמרת מסומן באדום (מותר לאשר בכל זאת).
 - "אישור והמשך" - הסקריפט ממשיך ומייצר את קובץ האקסל לפי המסלולים שבחלון.
 - "ביטול" / סגירת החלון - ההרצה נעצרת ולא נוצרים קבצים.
-- מפה בצד שמאל של החלון: כל נהג בצבע משלו (אותו צבע כמו הפס בראש העמודה שלו).
+- בחירת נהג לכל מסלול מתוך input_files/drivers.xlsx: המסלול מחושב מחדש
+  מכתובת הבית של הנהג (יציאה וחזרה), והשם מופיע בכל הדוחות.
+- אפשר לשבץ את אותו נהג לכמה מסלולים: הם הופכים לסבבים ברצף
+  (בית -> סבב 1 -> חזרה למחסן והעמסה -> סבב 2 -> בית), לפי סדר הכרטיסים.
+- מפה (מוסתרת כברירת מחדל, כפתור "הצג מפה"): כל נהג בצבע משלו (אותו צבע כמו הפס בראש העמודה שלו).
   לחיצה על עצירה ברשימה או במפה מסמנת את המסלול של אותו נהג. (map_panel.py)
 
 המודול לא מכיר את פרטי החישוב: הוא מקבל פונקציית simulate מהסקריפט הראשי.
@@ -25,7 +29,7 @@ from __future__ import annotations
 import copy
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 from typing import Any, Callable
 
 MAP_PANEL_ERROR: str | None = None
@@ -89,11 +93,19 @@ class RouteEditor:
         root: tk.Tk,
         initial_routes: list[list[str]],
         stops_by_key: dict[str, dict[str, Any]],
-        simulate: Callable[[list[str], bool], dict[str, Any]],
+        simulate: Callable[
+            [list[list[str]], list[bool], str | None], list[dict[str, Any]]
+        ],
         cfg: dict[str, Any],
         region_order: list[str],
+        drivers: list[dict[str, Any]] | None = None,
     ) -> None:
         self.root = root
+        # רשימת הנהגים מהקובץ: [{"name", "address", "coords", "approx"}]
+        self.drivers = list(drivers or [])
+        self.drivers_by_name = {d["name"]: d for d in self.drivers}
+        # route_id -> שם הנהג שנבחר למסלול (None = ללא נהג)
+        self.route_driver: dict[int, str | None] = {}
         self.stops = stops_by_key
         self.simulate = simulate
         self.cfg = cfg
@@ -118,10 +130,9 @@ class RouteEditor:
             on_screen = DEFAULT_DRIVERS_ON_SCREEN
         self.base_per_row, self.rows_on_screen = screen_grid(on_screen)
         self._map_visible = True
-        self._card_w_ref: float | None = None
-        self.result: list[list[str]] | None = None
+        self.result: list[tuple[list[str], str | None]] | None = None
 
-        self._sim_cache: dict[tuple[str, ...], dict[str, Any]] = {}
+        self._sim_cache: dict[tuple, list[dict[str, Any]]] = {}
         self._drop_map: dict[str, int] = {}  # שם widget -> מזהה עמודה
         self._listboxes: dict[int, tk.Listbox] = {}
         self._drag: dict[str, Any] | None = None
@@ -129,16 +140,44 @@ class RouteEditor:
         self._first_render = True
 
         self._build_window()
+        # המפה מוסתרת כברירת מחדל - מוצגת בלחיצה על "הצג מפה"
+        self._paned.forget(self._map_widget)
+        self._map_visible = False
+        self.map_btn.configure(text="הצג מפה")
         self.render()
 
     # ------------------------------------------------------------------
     # חישובים
     # ------------------------------------------------------------------
-    def _sim(self, keys: list[str]) -> dict[str, Any]:
-        t = tuple(keys)
-        if t not in self._sim_cache:
-            self._sim_cache[t] = self.simulate(list(keys), True)
-        return self._sim_cache[t]
+    def _driver_of(self, col: int) -> str | None:
+        if col == POOL:
+            return None
+        return self.route_driver.get(self.route_ids[col])
+
+    def _chain_cols(self, col: int) -> list[int]:
+        """כל המסלולים (עם עצירות) של הנהג של העמודה, לפי סדר הכרטיסים = סדר הסבבים."""
+        driver = self._driver_of(col)
+        if not driver:
+            return [col]
+        return [
+            c for c in range(len(self.routes))
+            if self.routes[c] and self._driver_of(c) == driver
+        ] or [col]
+
+    def _round_info(self, col: int) -> tuple[int, int]:
+        """(מספר הסבב של העמודה, כמה סבבים יש לנהג)."""
+        chain = self._chain_cols(col)
+        return (chain.index(col) + 1 if col in chain else 1), len(chain)
+
+    def _sim_col(self, col: int) -> dict[str, Any]:
+        chain = self._chain_cols(col)
+        driver = self._driver_of(col)
+        key = (tuple(tuple(self.routes[c]) for c in chain), driver)
+        if key not in self._sim_cache:
+            self._sim_cache[key] = self.simulate(
+                [list(self.routes[c]) for c in chain], [True] * len(chain), driver
+            )
+        return self._sim_cache[key][chain.index(col)]
 
     def _problems(self, sim: dict[str, Any]) -> list[str]:
         out = []
@@ -174,28 +213,11 @@ class RouteEditor:
                 return REGION_COLORS[idx]
         return "#E6E6E6"
 
-    def _stop_text(self, key: str, pos: int, sim: dict[str, Any] | None) -> str:
+    def _stop_text(self, key: str) -> str:
+        """שורת עצירה ברשימה: עיר/יישוב ומשקל בלבד."""
         st = self.stops[key]
-        parts = [f"{pos}."]
-        if sim is not None:
-            sched = sim["schedule_by_stop"].get(key)
-            if sched:
-                parts.append(sched["arrival_str"])
-        parts.append(st.get("effective_dest") or "-")
-        cust = st.get("cust_name") or ""
-        if cust:
-            parts.append(cust)
-        parts.append(f'{st.get("weight", 0):,.0f} ק"ג')
-        tags = []
-        if st.get("needs_cooling"):
-            tags.append("קירור")
-        if st.get("needs_hazmat"):
-            tags.append('חומ"ס')
-        if st.get("needs_goldbond"):
-            tags.append("גולד בונד")
-        if tags:
-            parts.append("/".join(tags))
-        return " | ".join(parts)
+        city = str(st.get("effective_dest") or st.get("address") or "-").strip()
+        return f'{city}  |  {st.get("weight", 0):,.0f} ק"ג'
 
     # ------------------------------------------------------------------
     # בניית החלון
@@ -312,6 +334,8 @@ class RouteEditor:
         self._list_lines = 8
 
     def _place_sash(self) -> None:
+        if not self._map_visible:
+            return
         w = self.root.winfo_width()
         if w < 300:
             self.root.after(100, self._place_sash)
@@ -326,13 +350,7 @@ class RouteEditor:
             return
         self.canvas.itemconfigure(self.board_win, width=cw)
 
-        if self._map_visible or self._card_w_ref is None:
-            per_row = self.base_per_row
-            if self._map_visible:
-                self._card_w_ref = cw / self.base_per_row
-        else:
-            # בלי מפה יש יותר רוחב => נכנסים יותר נהגים בשורה באותו רוחב כרטיס
-            per_row = max(self.base_per_row, int(round(cw / self._card_w_ref)))
+        per_row = self.base_per_row
         for i in range(max(per_row, self._used_grid_cols)):
             if i < per_row:
                 self.board.grid_columnconfigure(i, weight=1, uniform="card")
@@ -366,7 +384,7 @@ class RouteEditor:
         self.canvas.configure(scrollregion=(0, 0, cw, max(bh, ch)))
 
     def toggle_map(self) -> None:
-        """הסתרה/הצגה של המפה - כשהמפה מוסתרת נכנסים יותר נהגים בשורה."""
+        """הסתרה/הצגה של המפה (כברירת מחדל המפה מוסתרת)."""
         if self._map_visible:
             self._paned.forget(self._map_widget)
             self._map_visible = False
@@ -378,6 +396,7 @@ class RouteEditor:
             self._map_visible = True
             self.map_btn.configure(text="הסתר מפה")
             self.root.after(30, self._place_sash)
+            self.root.after(250, lambda: self._draw_map(fit=True))
         self.root.after(60, self._layout)
 
     def _on_wheel(self, event: tk.Event) -> None:
@@ -441,8 +460,9 @@ class RouteEditor:
         self, col: int, keys: list[str], list_height: int, drv_num: int | None
     ) -> None:
         is_pool = col == POOL
-        sim = self._sim(keys) if (keys and not is_pool) else None
+        sim = self._sim_col(col) if (keys and not is_pool) else None
         problems = self._problems(sim) if sim else []
+        driver = self._driver_of(col)
 
         if is_pool:
             bg = BG_POOL
@@ -470,10 +490,14 @@ class RouteEditor:
             title = "ממתינות לשיבוץ"
             head_bg = "#F6C26B"
         elif not keys:
-            title = "נהג נוסף (ריק)"
+            title = f"נהג {driver} (ריק)" if driver else "נהג נוסף (ריק)"
             head_bg = "#E6E6E6"
         else:
-            title = f"נהג {drv_num}  ({self._region_title(keys)})"
+            who = driver if driver else str(drv_num)
+            rnd, n_rounds = self._round_info(col)
+            if driver and n_rounds > 1:
+                who += f" - סבב {rnd}"
+            title = f"נהג {who}  ({self._region_title(keys)})"
             head_bg = self._region_color(keys)
         head = tk.Label(
             frame, text=title, font=F_HEAD, bg=head_bg, anchor="e", padx=4, pady=2,
@@ -483,6 +507,8 @@ class RouteEditor:
         self._register_drop(head, col)
         if not is_pool:
             head.bind("<Button-1>", lambda _e, c=col: self.select_route(c))
+            if self.drivers:
+                self._build_driver_picker(frame, col, bg, driver)
 
         # שורות מידע (תמיד 3 שורות, כדי שכל הכרטיסים יהיו באותו גובה)
         info_lines: list[tuple[str, str]] = []
@@ -508,7 +534,15 @@ class RouteEditor:
                 )
             )
             info_lines.append(
-                (f"חזרה {sim['return_home_str']} | " + ", ".join(wh_names), FG_MUTED)
+                (
+                    (
+                        f"חזרה {sim['return_home_str']}"
+                        if sim.get("ends_at_home", True)
+                        else f"סיום סבב {sim['return_home_str']}"
+                    )
+                    + " | " + ", ".join(wh_names),
+                    FG_MUTED,
+                )
             )
             if problems:
                 info_lines.append((" | ".join(problems), FG_BAD))
@@ -543,8 +577,8 @@ class RouteEditor:
         lb.configure(yscrollcommand=sb.set)
         sb.pack(side="left", fill="y")
         lb.pack(side="right", fill="both", expand=True)
-        for i, key in enumerate(keys, start=1):
-            lb.insert("end", self._stop_text(key, i, sim))
+        for key in keys:
+            lb.insert("end", self._stop_text(key))
         self._listboxes[col] = lb
         self._register_drop(lb, col)
 
@@ -575,9 +609,80 @@ class RouteEditor:
             command=lambda c=col: self.nudge(c, -1),
         ).pack(side="right", padx=1)
 
+    NO_DRIVER = "ללא נהג"
+
+    def _build_driver_picker(
+        self, frame: tk.Frame, col: int, bg: str, driver: str | None
+    ) -> None:
+        row = tk.Frame(frame, bg=bg)
+        row.pack(side="top", fill="x", pady=(2, 1))
+        self._register_drop(row, col)
+        tk.Label(row, text="נהג:", font=F_SMALL, bg=bg).pack(side="right")
+
+        assigned = {
+            self._driver_of(c) for c in range(len(self.routes))
+            if c != col and self._driver_of(c)
+        }
+        display_to_name: dict[str, str | None] = {self.NO_DRIVER: None}
+        for d in self.drivers:
+            label = d["name"]
+            if d["name"] in assigned:
+                label += " (משובץ גם במסלול אחר)"
+            elif d.get("not_found"):
+                label += " (כתובת לא אותרה)"
+            elif d.get("approx"):
+                label += " (מיקום משוער)"
+            display_to_name[label] = d["name"]
+
+        cb = ttk.Combobox(
+            row, values=list(display_to_name.keys()), state="readonly",
+            font=F_SMALL, justify="right",
+        )
+        current = next(
+            (k for k, v in display_to_name.items() if v == driver), self.NO_DRIVER
+        )
+        cb.set(current)
+        rnd, n_rounds = self._round_info(col)
+        if driver and n_rounds > 1 and self.routes[col]:
+            tk.Button(
+                row, text="החלף סדר סבבים", font=F_SMALL, padx=2, pady=0,
+                command=lambda c=col: self.swap_rounds(c),
+            ).pack(side="left", padx=(2, 0))
+        cb.pack(side="right", fill="x", expand=True, padx=(0, 4))
+        cb.bind(
+            "<<ComboboxSelected>>",
+            lambda _e, c=col, w=cb, m=display_to_name: self.assign_driver(c, m.get(w.get())),
+        )
+        # גלגלת העכבר מעל הבחירה גוללת את המסך ולא מחליפה נהג בטעות
+        cb.bind("<MouseWheel>", lambda e: (self._on_wheel(e), "break")[1])
+
+    def assign_driver(self, col: int, name: str | None) -> None:
+        """
+        שיבוץ נהג למסלול. נהג שכבר משובץ במסלול אחר מקבל את המסלול הזה כסבב נוסף
+        (הסבבים ברצף לפי סדר הכרטיסים בחלון).
+        """
+        rid = self.route_ids[col]
+        self.route_driver[rid] = name
+        self.selected_id = rid
+        self.render()
+
+    def swap_rounds(self, col: int) -> None:
+        """מחליף בין הסבב הזה לסבב שלפניו (או אחריו, אם זה הסבב הראשון)."""
+        chain = self._chain_cols(col)
+        if len(chain) < 2 or col not in chain:
+            return
+        i = chain.index(col)
+        other = chain[i - 1] if i > 0 else chain[1]
+        r, ids = self.routes, self.route_ids
+        r[col], r[other] = r[other], r[col]
+        ids[col], ids[other] = ids[other], ids[col]
+        self.selected_id = ids[other]
+        self.render()
+
     def _update_info(self) -> None:
-        active = [r for r in self.routes if r]
-        bad = sum(1 for r in active if self._problems(self._sim(r)))
+        active_cols = [c for c, r in enumerate(self.routes) if r]
+        active = [self.routes[c] for c in active_cols]
+        bad = sum(1 for c in active_cols if self._problems(self._sim_col(c)))
         total_stops = sum(len(r) for r in active)
         parts = [f"{len(active)} נהגים", f"{total_stops} עצירות"]
         color = FG_OK
@@ -750,7 +855,13 @@ class RouteEditor:
         keys = self.routes[col]
         if len(keys) < 2:
             return
-        sim = self.simulate(list(keys), False)
+        chain = self._chain_cols(col)
+        sims = self.simulate(
+            [list(self.routes[c]) for c in chain],
+            [c != col for c in chain],  # רק הסבב הזה מסודר מחדש
+            self._driver_of(col),
+        )
+        sim = sims[chain.index(col)]
         self.routes[col] = [s["stop_key"] for s in sim["ordered_stops"]]
         self.render()
 
@@ -774,6 +885,7 @@ class RouteEditor:
             if not ok:
                 return
             self.pool.extend(keys)
+        self.route_driver.pop(self.route_ids[col], None)
         del self.routes[col]
         del self.route_ids[col]
         self.render()
@@ -789,6 +901,7 @@ class RouteEditor:
         self.routes = copy.deepcopy(self.initial)
         self.route_ids = list(range(len(self.routes)))
         self._next_id = len(self.routes)
+        self.route_driver = {}
         self.selected_id = None
         self.pool = []
         self._first_render = True
@@ -803,7 +916,7 @@ class RouteEditor:
             return
         keys = self._col_list(col)
         is_sel = col != POOL and self.selected_id == self.route_ids[col]
-        bad = bool(keys) and col != POOL and bool(self._problems(self._sim(keys)))
+        bad = bool(keys) and col != POOL and bool(self._problems(self._sim_col(col)))
         if is_sel:
             color = self._color(col)
         elif bad:
@@ -819,9 +932,11 @@ class RouteEditor:
         for col, keys in enumerate(self.routes):
             if not keys:
                 continue
+            drv = self.drivers_by_name.get(self._driver_of(col) or "")
             routes_data.append(
                 {
                     "id": self.route_ids[col],
+                    "home": (*drv["coords"], drv["name"]) if drv else None,
                     "color": self._color(col),
                     "stops": [
                         (*self.stops[k]["coords"], i, k)
@@ -903,13 +1018,20 @@ class RouteEditor:
                 parent=self.root,
             )
             return
-        active = [r for r in self.routes if r]
-        if not active:
+        active_cols = [c for c, r in enumerate(self.routes) if r]
+        if not active_cols:
             messagebox.showerror("אין מסלולים", "לא נשארו נהגים עם עצירות.", parent=self.root)
             return
-        bad = [i for i, r in enumerate(active, start=1) if self._problems(self._sim(r))]
+        labels = {}
+        for i, c in enumerate(active_cols, start=1):
+            rnd, n_rounds = self._round_info(c)
+            name = self._driver_of(c)
+            labels[c] = (
+                f"{name} - סבב {rnd}" if name and n_rounds > 1 else (name or str(i))
+            )
+        bad = [c for c in active_cols if self._problems(self._sim_col(c))]
         if bad:
-            names = ", ".join(f"נהג {i}" for i in bad)
+            names = ", ".join(f"נהג {labels[c]}" for c in bad)
             ok = messagebox.askyesno(
                 "יש חריגות",
                 f"הנהגים הבאים חורגים ממשקל המשאית או משעות המשמרת:\n{names}\n\n"
@@ -919,7 +1041,20 @@ class RouteEditor:
             )
             if not ok:
                 return
-        self.result = [list(r) for r in active]
+        if self.drivers:
+            no_driver = [c for c in active_cols if not self._driver_of(c)]
+            if no_driver:
+                ok = messagebox.askyesno(
+                    "מסלולים ללא נהג",
+                    f"ל-{len(no_driver)} מסלולים לא נבחר נהג.\n"
+                    "הם יחושבו מנקודת היציאה הכללית שבקובץ ההגדרות.\n\n"
+                    "להמשיך בכל זאת?",
+                    icon="warning",
+                    parent=self.root,
+                )
+                if not ok:
+                    return
+        self.result = [(list(self.routes[c]), self._driver_of(c)) for c in active_cols]
         self.root.destroy()
 
     def on_cancel(self) -> None:
@@ -946,17 +1081,20 @@ def _enable_windows_dpi_awareness() -> None:
 def run_route_editor(
     initial_routes: list[list[str]],
     stops_by_key: dict[str, dict[str, Any]],
-    simulate: Callable[[list[str], bool], dict[str, Any]],
+    simulate: Callable[[list[str], bool, str | None], dict[str, Any]],
     cfg: dict[str, Any],
     region_order: list[str],
-) -> list[list[str]] | None:
+    drivers: list[dict[str, Any]] | None = None,
+) -> list[tuple[list[str], str | None]] | None:
     """
     פותח את חלון העריכה וממתין עד שהמשתמש יאשר או יבטל.
-    מחזיר רשימת מסלולים (כל מסלול = רשימת stop_key לפי הסדר), או None אם בוטל.
+    מחזיר רשימת (מסלול, שם נהג או None), או None אם בוטל.
     """
     _enable_windows_dpi_awareness()
     root = tk.Tk()
-    editor = RouteEditor(root, initial_routes, stops_by_key, simulate, cfg, region_order)
+    editor = RouteEditor(
+        root, initial_routes, stops_by_key, simulate, cfg, region_order, drivers
+    )
     root.lift()
     try:
         root.attributes("-topmost", True)

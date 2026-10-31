@@ -314,15 +314,22 @@ def load_warehouse_sku_sets(
     return cooling_skus, hazmat_skus, goldbond_skus
 
 
-def extract_driver_number(driver_label: str) -> int:
-    m = re.search(r"נהג\s*(\d+)", str(driver_label or ""))
-    if m:
-        return int(m.group(1))
-    return 1
+def extract_driver_number(driver_label: str) -> str:
+    """
+    מחזיר את שם הנהג מתוך התווית:
+    "נהג אברהם כץ (אזור השרון)" -> "אברהם כץ" ,  "נהג 3 (איזור גוש דן)" -> "3"
+    """
+    drv_str = str(driver_label or "").strip()
+    m = re.match(r"^\s*נהג\s+(.+?)\s*(\(|$)", drv_str)
+    return m.group(1).strip() if m else (drv_str or "1")
+
+
+def safe_file_part(text: str) -> str:
+    return re.sub(r'[\\/:*?"<>|]+', " ", str(text)).strip() or "1"
 
 
 def create_single_driver_report(
-    driver_num: int,
+    driver_num: str,
     driver_label: str,
     driver_rows: list[dict[str, Any]],
     output_file: pathlib.Path,
@@ -330,7 +337,7 @@ def create_single_driver_report(
 ) -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = f"נהג {driver_num}"
+    ws.title = re.sub(r"[\[\]:*?/\\]", " ", f"נהג {driver_num}")[:31]
     ws.sheet_view.rightToLeft = True
 
     font_family = "Arial"
@@ -752,7 +759,7 @@ def generate_driver_reports_from_sorted_excel(
 
     cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
 
-    drivers_map: dict[int, tuple[str, list[dict[str, Any]]]] = {}
+    drivers_map: dict[str, tuple[str, list[dict[str, Any]]]] = {}
 
     for r in range(2, ws.max_row + 1):
         row_vals = [ws.cell(r, c).value for c in range(1, ws.max_column + 1)]
@@ -868,10 +875,11 @@ def generate_driver_reports_from_sorted_excel(
     reports_dir.mkdir(parents=True, exist_ok=True)
     created_files: list[pathlib.Path] = []
 
-    for drv_num in sorted(drivers_map.keys()):
+    # לפי סדר הנהגים בקובץ הממוין
+    for drv_num in drivers_map.keys():
         drv_label, drv_rows = drivers_map[drv_num]
         drv_rows.sort(key=lambda x: (x["stop_num"], x["order_no"]))
-        out_file = reports_dir / f"הובלות ע״י נהג {drv_num}.xlsx"
+        out_file = reports_dir / f"הובלות ע״י נהג {safe_file_part(drv_num)}.xlsx"
         create_single_driver_report(
             driver_num=drv_num,
             driver_label=drv_label,
@@ -904,6 +912,7 @@ def is_excluded_support_file(p: pathlib.Path, cfg: dict[str, Any]) -> bool:
         cfg["HAZMAT_FILE_NAME"].lower(),
         cfg["GOLDBOND_FILE_NAME"].lower(),
         CONFIG_FILE_NAME.lower(),
+        "drivers.xlsx",
         "dangerous_products.xlsx",
         "cooling_products.pdf",
         "cooling_products.xlsx",
@@ -1006,6 +1015,13 @@ def main() -> None:
 
     out_dir: pathlib.Path = cfg["OUTPUT_DIR_PATH"]
     reports_dir = out_dir / f"דוחות הובלה {list_name}"
+    # מחיקת דוחות ישנים מהרצה קודמת (שמות/מספר הנהגים יכולים להשתנות בין הרצות)
+    if reports_dir.exists():
+        for old in reports_dir.glob("הובלות ע״י נהג *.xlsx"):
+            try:
+                old.unlink()
+            except OSError as exc:
+                print(f"[!] לא ניתן למחוק דוח ישן (אולי פתוח באקסל): {old.name} ({exc})")
 
     print("=" * 75)
     print(f"[*] קובץ ממוין שנקרא:  {sorted_excel_path}")

@@ -192,7 +192,7 @@ def load_picking_config(
         "EXTRA_COOLING_SKUS": raw_kv.get("EXTRA_COOLING_SKUS", ""),
         "EXTRA_HAZMAT_SKUS": raw_kv.get("EXTRA_HAZMAT_SKUS", ""),
         "EXTRA_GOLDBOND_SKUS": raw_kv.get("EXTRA_GOLDBOND_SKUS", ""),
-        "SEND_PICKING_LIST_TO": raw_kv.get("SEND_PICKING_LIST_TO", "").strip(),
+        "SEND_PICKING_LIST_TO": parse_email_list(raw_kv.get("SEND_PICKING_LIST_TO", "")),
     }
 
 
@@ -264,17 +264,37 @@ Send-PickingLists
 """
 
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def parse_email_list(raw: str) -> list[str]:
+    """
+    הופך את SEND_PICKING_LIST_TO לרשימת כתובות.
+    מפרידים: פסיק, נקודה-פסיק או רווח. סוגריים ומירכאות מתעלמים מהם.
+    כתובת לא תקינה מדולגת עם אזהרה; כפילויות נמחקות.
+    """
+    cleaned = re.sub(r"[\[\]\(\)\"'<>]", " ", str(raw or ""))
+    emails: list[str] = []
+    for token in re.split(r"[;,\s]+", cleaned):
+        token = token.strip()
+        if not token:
+            continue
+        if not _EMAIL_RE.match(token):
+            print(f"[!] כתובת מייל לא תקינה ב-SEND_PICKING_LIST_TO דולגה: {token}")
+            continue
+        if token.lower() not in (e.lower() for e in emails):
+            emails.append(token)
+    return emails
+
+
 def _ps_quote(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
 def create_send_mail_launcher(
-    picking_dir: pathlib.Path, list_name: str, recipients_raw: str
+    picking_dir: pathlib.Path, list_name: str, recipients: list[str]
 ) -> pathlib.Path | None:
-    """יוצר בתיקיית הליקוט קובץ bat ששולח את כל הרשימות במייל דרך Outlook."""
-    recipients = [
-        a.strip() for a in re.split(r"[;,]", recipients_raw or "") if a.strip()
-    ]
+    """יוצר בתיקיית הליקוט קובץ bat ששולח את כל הרשימות במייל אחד לכל הנמענים."""
     if not recipients:
         return None
     ps_body = (
@@ -440,7 +460,7 @@ def create_single_picking_excel(
     output_file: pathlib.Path,
     sheet_title: str,
     warehouse_hebrew_name: str,
-    driver_num: int,
+    driver_num: str,
     tint_hex: str,
 ) -> None:
     """
@@ -571,12 +591,25 @@ def create_single_picking_excel(
     wb.save(output_file)
 
 
+def extract_driver_name(driver_label: str) -> str:
+    """
+    "נהג אברהם כץ (אזור השרון)" -> "אברהם כץ"
+    "נהג 3 (איזור גוש דן)"      -> "3"
+    """
+    drv_str = str(driver_label or "").strip()
+    m = re.match(r"^\s*נהג\s+(.+?)\s*(\(|$)", drv_str)
+    return m.group(1).strip() if m else (drv_str or "1")
+
+
+def safe_file_part(text: str) -> str:
+    return re.sub(r'[\\/:*?"<>|\s]+', "_", str(text)).strip("_") or "Driver"
+
+
 def extract_driver_number_and_regions(
     driver_label: str, fallback_reg: str
-) -> tuple[int, str, str]:
+) -> tuple[str, str, str]:
     drv_str = str(driver_label or "").strip()
-    m_num = re.search(r"נהג\s*(\d+)", drv_str)
-    drv_num = int(m_num.group(1)) if m_num else 1
+    drv_num = extract_driver_name(drv_str)
 
     matched_heb: list[str] = []
     for heb, _eng, _col in REGION_CONFIG:
@@ -629,8 +662,8 @@ def generate_picking_lists_from_sorted_excel(
 
     cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
 
-    drivers_meta: dict[int, tuple[str, str, str]] = {}
-    grouped_rows: dict[tuple[int, str], list[list[Any]]] = {}
+    drivers_meta: dict[str, tuple[str, str, str]] = {}
+    grouped_rows: dict[tuple[str, str], list[list[Any]]] = {}
 
     for r in range(2, ws.max_row + 1):
         row_vals = [ws.cell(r, c).value for c in range(1, ws.max_column + 1)]
@@ -653,7 +686,7 @@ def generate_picking_lists_from_sorted_excel(
         drv_num, eng_reg_tag, color_hex = extract_driver_number_and_regions(
             drv_val, reg_val
         )
-        drivers_meta[drv_num] = (drv_val, eng_reg_tag, color_hex)
+        drivers_meta.setdefault(drv_num, (drv_val, eng_reg_tag, color_hex))
 
         sku_val = (
             clean_sku_token(row_vals[idx_sku])
@@ -728,7 +761,8 @@ def generate_picking_lists_from_sorted_excel(
         ("goldbond", "_Gold_Bond", cfg["GOLDBOND_WAREHOUSE_NAME"], "FFF2CC"),
     ]
 
-    for drv_num in sorted(drivers_meta.keys()):
+    # לפי סדר הנהגים בקובץ הממוין
+    for drv_num in drivers_meta.keys():
         drv_label, eng_reg, base_tint = drivers_meta[drv_num]
         for wh_key, file_suffix, wh_heb_name, special_tint in warehouse_specs:
             rows = grouped_rows.get((drv_num, wh_key), [])
@@ -736,10 +770,10 @@ def generate_picking_lists_from_sorted_excel(
                 continue
 
             out_filename = (
-                f"{list_name}_Driver_{drv_num}_{eng_reg}{file_suffix}.xlsx"
+                f"{list_name}_Driver_{safe_file_part(drv_num)}_{eng_reg}{file_suffix}.xlsx"
             )
             out_file = picking_dir / out_filename
-            sheet_title = f"נהג {drv_num} - {wh_heb_name}"
+            sheet_title = re.sub(r"[\[\]:*?/\\]", " ", f"נהג {drv_num} - {wh_heb_name}")
             tint_to_use = special_tint if special_tint else base_tint
 
             create_single_picking_excel(
@@ -781,6 +815,7 @@ def is_excluded_support_file(p: pathlib.Path, cfg: dict[str, Any]) -> bool:
         cfg["HAZMAT_FILE_NAME"].lower(),
         cfg["GOLDBOND_FILE_NAME"].lower(),
         CONFIG_FILE_NAME.lower(),
+        "drivers.xlsx",
         "dangerous_products.xlsx",
         "cooling_products.pdf",
         "cooling_products.xlsx",
@@ -907,14 +942,13 @@ def main() -> None:
         )
 
     mail_launcher = create_send_mail_launcher(
-        picking_dir, list_name, cfg.get("SEND_PICKING_LIST_TO", "")
+        picking_dir, list_name, cfg.get("SEND_PICKING_LIST_TO", [])
     )
     if mail_launcher:
-        print(
-            f"\n[V] נוצר קובץ שליחה במייל: {mail_launcher.name}\n"
-            f"    לחיצה כפולה עליו תשלח את כל רשימות הליקוט אל: "
-            f"{cfg['SEND_PICKING_LIST_TO']}"
-        )
+        print(f"\n[V] נוצר קובץ שליחה במייל: {mail_launcher.name}")
+        print("    לחיצה כפולה עליו תשלח את כל רשימות הליקוט אל:")
+        for addr in cfg["SEND_PICKING_LIST_TO"]:
+            print(f"      - {addr}")
     else:
         print(
             "\n[*] לא הוגדרה כתובת SEND_PICKING_LIST_TO בקובץ ההגדרות - "

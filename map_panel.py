@@ -202,6 +202,9 @@ class MapPanel(tk.Frame):
         if highlight_id is None:
             pts += [(s[0], s[1]) for s in pool]
         pts.append(depot)
+        for r in routes:
+            if r.get("home") and (highlight_id is None or r["id"] == highlight_id):
+                pts.append((r["home"][0], r["home"][1]))
         self.backend.fit(pts)
 
     def focus(self, lat: float, lon: float) -> None:
@@ -284,6 +287,14 @@ class _OsmBackend(_BaseBackend):
                 marker_color_circle="white", marker_color_outside="#F6A623",
                 command=lambda mk: self.on_click(mk.data), data=key,
             )
+        for r in routes:
+            if r.get("home"):
+                lat, lon, name = r["home"]
+                m.set_marker(
+                    lat, lon, text=f"בית - {name}", text_color="#000000",
+                    font=(FONT, 9, "bold"),
+                    marker_color_circle="#FFFFFF", marker_color_outside=r["color"],
+                )
         m.set_marker(
             depot[0], depot[1], text="מחסנים", text_color="#000000",
             font=(FONT, 10, "bold"),
@@ -327,10 +338,10 @@ class _SchematicBackend(_BaseBackend):
 
     def draw(self, routes, pool, depot, home, highlight_id) -> None:  # noqa: ANN001
         self._args = (routes, pool, depot, home, highlight_id)
-        if self._bounds is None:
-            pts = [(s[0], s[1]) for r in routes for s in r["stops"]]
-            pts += [(s[0], s[1]) for s in pool] + [depot]
-            self._set_bounds(pts)
+        pts = [(s[0], s[1]) for r in routes for s in r["stops"]]
+        pts += [(s[0], s[1]) for s in pool] + [depot]
+        pts += [(r["home"][0], r["home"][1]) for r in routes if r.get("home")]
+        self._set_bounds(pts)
         self._redraw()
 
     def _set_bounds(self, pts: list[tuple[float, float]]) -> None:
@@ -397,6 +408,12 @@ class _SchematicBackend(_BaseBackend):
                 dot(lat, lon, str(num), fill, "white", key)
         for lat, lon, _n, key in pool:
             dot(lat, lon, "?", "#F6A623", "black", key)
+        for r in routes:
+            if r.get("home"):
+                lat, lon, name = r["home"]
+                dot(lat, lon, "ב", "white", r["color"], None, 9)
+                hx, hy = self._proj(lat, lon)
+                c.create_text(hx, hy - 16, text=name, font=(FONT, 8, "bold"), fill=r["color"])
         dot(depot[0], depot[1], "מ", "#222222", "white", None, 12)
         x, y = self._proj(*depot)
         c.create_text(x, y + 20, text="מחסנים אשדוד", font=(FONT, 9, "bold"))

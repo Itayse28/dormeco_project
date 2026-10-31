@@ -59,6 +59,8 @@ INPUT_FILE_NAME = list.xlsx
 COOLING_FILE_NAME = Cooling_products.pdf
 HAZMAT_FILE_NAME = dangerous_products.xlsx
 GOLDBOND_FILE_NAME = Gold_bond.xlsx
+# קובץ רשימת הנהגים (עמודות: שם נהג, כתובת) - לבחירת נהג לכל מסלול בחלון העריכה
+DRIVERS_FILE_NAME = drivers.xlsx
 
 # 2. זמני העמסה במחסנים באשדוד וזמן פריקה אצל לקוח (בדקות)
 MAIN_WAREHOUSE_LOAD_MINUTES = 60
@@ -108,7 +110,7 @@ AUTO_OPEN_OUTPUT_FOLDER = true
 ENABLE_ROUTE_EDITOR = true
 # כמה נהגים יוצגו במסך אחד בחלון העריכה (בלי לגלול)
 AMOUNT_OF_DRIVERS_ON_SCREEN = 10
-# כתובת מייל לשליחת רשימות הליקוט (כמה כתובות - מפרידים בפסיק)
+# רשימת כתובות מייל לשליחת רשימות הליקוט, מופרדות בפסיק
 SEND_PICKING_LIST_TO = 
 GOOGLE_MAPS_API_KEY = 
 
@@ -231,6 +233,8 @@ def load_or_create_config(
         "GOLDBOND_FILE_NAME": raw_kv.get(
             "GOLDBOND_FILE_NAME", "Gold_bond.xlsx"
         ),
+        "DRIVERS_FILE_NAME": raw_kv.get("DRIVERS_FILE_NAME", "drivers.xlsx").strip()
+        or "drivers.xlsx",
         "MAIN_WAREHOUSE_LOAD_MINUTES": main_load,
         "COOLING_WAREHOUSE_LOAD_MINUTES": cooling_load,
         "HAZMAT_WAREHOUSE_LOAD_MINUTES": hazmat_load,
@@ -1488,18 +1492,10 @@ def solve_open_or_closed_tsp(
     return tour
 
 
-def simulate_driver_shift(
-    stops: list[dict[str, Any]],
-    matrix: list[list[float]],
-    cfg: dict[str, Any],
-    preserve_region_sequence: bool = False,
-    keep_order: bool = False,
-) -> dict[str, Any]:
-    """keep_order=True: שומר בדיוק על סדר העצירות שהתקבל (עריכה ידנית), בלי אופטימיזציה."""
-    start_min = parse_hhmm_to_minutes(cfg["DRIVER_DEPARTURE_TIME"])
-    unload_min = float(cfg["UNLOAD_MINUTES"])
-    home_name = str(cfg.get("DRIVER_HOME_NAME", "בית"))
-
+def active_warehouses(
+    stops: list[dict[str, Any]], cfg: dict[str, Any]
+) -> list[tuple[int, str, str, float]]:
+    """המחסנים שהמסלול צריך להעמיס בהם, לפי הסדר: (אינדקס במטריצה, שם, כתובת, דקות העמסה)."""
     wh_configs = [
         (
             1,
@@ -1549,8 +1545,41 @@ def simulate_driver_shift(
             )
         )
 
-    curr_time = start_min
-    curr_node = 0
+    return active_whs
+
+
+def simulate_driver_shift(
+    stops: list[dict[str, Any]],
+    matrix: list[list[float]],
+    cfg: dict[str, Any],
+    preserve_region_sequence: bool = False,
+    keep_order: bool = False,
+    home_idx: int = 0,
+    home_name: str | None = None,
+    start_node: int | None = None,
+    start_time_min: float | None = None,
+    end_node: int | None = None,
+    day_start_min: float | None = None,
+) -> dict[str, Any]:
+    """
+    keep_order=True: שומר בדיוק על סדר העצירות שהתקבל (עריכה ידנית), בלי אופטימיזציה.
+    home_idx/home_name: נקודת היציאה והחזרה של הנהג (ברירת מחדל: הבית הכללי מההגדרות).
+    start_node/start_time_min: נקודה ושעה שמהן הסבב מתחיל (לסבב שני של אותו נהג).
+    end_node: לאן הנהג נוסע בסוף הסבב (ברירת מחדל: הביתה; בסבב לא אחרון: למחסן).
+    day_start_min: תחילת יום העבודה, לחישוב אורך המשמרת המצטבר.
+    """
+    start_min = parse_hhmm_to_minutes(cfg["DRIVER_DEPARTURE_TIME"])
+    unload_min = float(cfg["UNLOAD_MINUTES"])
+    if home_name is None:
+        home_name = str(cfg.get("DRIVER_HOME_NAME", "בית"))
+
+    active_whs = active_warehouses(stops, cfg)
+
+    first_round = start_node is None
+    curr_time = start_min if start_time_min is None else float(start_time_min)
+    curr_node = home_idx if start_node is None else start_node
+    finish_node = home_idx if end_node is None else end_node
+    ends_at_home = finish_node == home_idx
     wh_logs: list[str] = []
 
     for wh_node, wh_name, _wh_addr, wh_load_min in active_whs:
@@ -1568,7 +1597,7 @@ def simulate_driver_shift(
         ordered_idxs = solve_open_or_closed_tsp(
             [s["matrix_idx"] for s in stops],
             start_idx=curr_node,
-            end_idx=0,
+            end_idx=finish_node,
             matrix=matrix,
         )
     else:
@@ -1581,7 +1610,7 @@ def simulate_driver_shift(
                 grouped_regs[-1][1].append(s["matrix_idx"])
         temp_start = curr_node
         for g_idx, (_r_name, idxs) in enumerate(grouped_regs):
-            end_target = 0 if g_idx == len(grouped_regs) - 1 else None
+            end_target = finish_node if g_idx == len(grouped_regs) - 1 else None
             sub_order = solve_open_or_closed_tsp(
                 idxs, start_idx=temp_start, end_idx=end_target, matrix=matrix
             )
@@ -1590,7 +1619,12 @@ def simulate_driver_shift(
 
     ordered_stops: list[dict[str, Any]] = []
     schedule_details: list[dict[str, Any]] = []
-    timeline_parts = [f"יציאה מה{home_name} ({cfg['DRIVER_DEPARTURE_TIME']})"]
+    if first_round:
+        timeline_parts = [f"יציאה מה{home_name} ({cfg['DRIVER_DEPARTURE_TIME']})"]
+    else:
+        timeline_parts = [
+            f"המשך מהסבב הקודם ({format_minutes_to_hhmm(start_time_min or start_min)})"
+        ]
     timeline_parts.extend(wh_logs)
 
     for route_pos, m_idx in enumerate(ordered_idxs, start=1):
@@ -1617,11 +1651,16 @@ def simulate_driver_shift(
             }
         )
 
-    return_leg_min = matrix[curr_node][0]
+    return_leg_min = matrix[curr_node][finish_node]
     return_home_min = curr_time + return_leg_min
     return_home_str = format_minutes_to_hhmm(return_home_min)
-    total_shift_min = return_home_min - start_min
-    timeline_parts.append(f"חזרה אל ה{home_name} ({return_home_str})")
+    total_shift_min = return_home_min - (
+        start_min if day_start_min is None else day_start_min
+    )
+    if ends_at_home:
+        timeline_parts.append(f"חזרה אל ה{home_name} ({return_home_str})")
+    else:
+        timeline_parts.append(f"חזרה למחסן להעמסת הסבב הבא ({return_home_str})")
 
     total_weight = sum(s["weight"] for s in stops)
     max_shift_min = float(cfg["MAX_DRIVER_SHIFT_HOURS"]) * 60.0
@@ -1632,6 +1671,9 @@ def simulate_driver_shift(
         "schedule_by_stop": {d["stop_key"]: d for d in schedule_details},
         "warehouses_summary": " -> ".join(wh_logs),
         "return_home_str": return_home_str,
+        "home_name": home_name,
+        "end_time_min": return_home_min,
+        "ends_at_home": ends_at_home,
         "total_shift_min": round(total_shift_min, 1),
         "total_shift_hhmm": format_duration_hhmm(total_shift_min),
         "total_weight": round(total_weight, 2),
@@ -1639,6 +1681,40 @@ def simulate_driver_shift(
         "is_feasible": (total_weight <= max_weight + 1e-6)
         and (total_shift_min <= max_shift_min + 1e-6),
     }
+
+
+def simulate_driver_day(
+    rounds: list[list[dict[str, Any]]],
+    matrix: list[list[float]],
+    cfg: dict[str, Any],
+    keeps: list[bool],
+    home_idx: int = 0,
+    home_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    יום עבודה של נהג עם כמה סבבים ברצף:
+    בית -> סבב 1 -> חזרה למחסן והעמסה -> סבב 2 -> ... -> חזרה הביתה.
+    """
+    day_start = parse_hhmm_to_minutes(cfg["DRIVER_DEPARTURE_TIME"])
+    sims: list[dict[str, Any]] = []
+    node: int | None = None
+    t: float | None = None
+    for i, stops in enumerate(rounds):
+        last = i == len(rounds) - 1
+        end = None if last else active_warehouses(rounds[i + 1], cfg)[0][0]
+        sim = simulate_driver_shift(
+            stops, matrix, cfg,
+            keep_order=keeps[i],
+            home_idx=home_idx,
+            home_name=home_name,
+            start_node=node,
+            start_time_min=t,
+            end_node=end,
+            day_start_min=day_start,
+        )
+        sims.append(sim)
+        node, t = end, sim["end_time_min"]
+    return sims
 
 
 def split_region_into_trucks(
@@ -1717,6 +1793,89 @@ def split_region_into_trucks(
     return trucks
 
 
+def geocode_driver_home(
+    address: str, cfg: dict[str, Any], cache: dict[str, Any]
+) -> tuple[float, float, bool] | None:
+    """
+    מאתר את כתובת הבית של נהג. מחזיר (lat, lon, approx).
+    approx=True => נמצאה רק העיר (מרכז העיר), לא הרחוב.
+    """
+    cache_key = f"DRIVER_HOME::{address}"
+    cached = cache.get(cache_key)
+    if isinstance(cached, list) and len(cached) == 3:
+        return float(cached[0]), float(cached[1]), bool(cached[2])
+
+    result: tuple[float, float, bool] | None = None
+    if cfg.get("USE_EXTERNAL_ROUTING_API", True):
+        ext = query_external_geocoding_coords(
+            address, api_key=cfg.get("GOOGLE_MAPS_API_KEY", "")
+        )
+        if ext:
+            result = (float(ext[1]), float(ext[2]), False)
+    if result is None:
+        city = match_in_known_localities(address, is_address_field=True)
+        if city:
+            result = (float(city[1]), float(city[2]), True)
+    if result is not None and not result[2]:
+        # שומרים רק מיקום מדויק; מיקום משוער ינוסה שוב בהרצה הבאה
+        cache[cache_key] = list(result)
+        save_cache(cache)
+    return result
+
+
+def load_drivers(cfg: dict[str, Any], cache: dict[str, Any]) -> list[dict[str, Any]]:
+    """קורא את קובץ הנהגים (שם נהג + כתובת) ומאתר לכל נהג את מיקום הבית."""
+    in_dir: pathlib.Path = cfg["INPUT_DIR_PATH"]
+    path = in_dir / cfg.get("DRIVERS_FILE_NAME", "drivers.xlsx")
+    if not path.exists():
+        print(f"[*] קובץ נהגים לא נמצא ({path.name}) - בחירת נהגים לא תהיה זמינה.")
+        return []
+    try:
+        ws = load_workbook_safe(path).active
+    except Exception as exc:  # noqa: BLE001
+        print(f"[!] לא ניתן לקרוא את קובץ הנהגים {path.name}: {exc}")
+        return []
+
+    headers = [str(ws.cell(1, c).value or "").strip() for c in range(1, ws.max_column + 1)]
+    idx_name = next((i for i, h in enumerate(headers) if "שם" in h), 0)
+    idx_addr = next((i for i, h in enumerate(headers) if "כתובת" in h), 1)
+
+    drivers: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    print(f"\n[*] טוען נהגים מ-{path.name}:")
+    for r in range(2, ws.max_row + 1):
+        vals = [ws.cell(r, c).value for c in range(1, ws.max_column + 1)]
+        name = str(vals[idx_name] or "").strip() if idx_name < len(vals) else ""
+        addr = str(vals[idx_addr] or "").strip() if idx_addr < len(vals) else ""
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        loc = geocode_driver_home(addr, cfg, cache) if addr else None
+        not_found = loc is None
+        if not_found:
+            # הנהג עדיין זמין לבחירה, אבל יוצא מנקודת הבית הכללית שבהגדרות
+            lat, lon = cfg["DRIVER_HOME_COORDS"]
+            approx = True
+            print(
+                f"    [!] {name}: הכתובת \"{addr}\" לא אותרה - "
+                "יחושב מנקודת הבית הכללית שבקובץ ההגדרות."
+            )
+        else:
+            lat, lon, approx = loc
+            note = " (מיקום משוער - מרכז העיר)" if approx else ""
+            print(f"    [V] {name}: {addr}{note}")
+        drivers.append(
+            {
+                "name": name,
+                "address": addr,
+                "coords": (lat, lon),
+                "approx": approx,
+                "not_found": not_found,
+            }
+        )
+    return drivers
+
+
 class RouteEditCancelled(Exception):
     """המשתמש סגר/ביטל את חלון עריכת המסלולים."""
 
@@ -1733,17 +1892,29 @@ def apply_manual_route_edits(
     stops_by_key: dict[str, dict[str, Any]],
     matrix: list[list[float]],
     cfg: dict[str, Any],
+    drivers: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """פותח את חלון העריכה ומחזיר את המסלולים כפי שהמשתמש אישר אותם."""
+    """פותח את חלון העריכה ומחזיר את המסלולים (והנהגים) כפי שהמשתמש אישר אותם."""
     try:
         from route_editor_gui import run_route_editor
     except ImportError as exc:
         print(f"[!] לא ניתן לפתוח את חלון עריכת המסלולים ({exc}). ממשיך עם התכנון האוטומטי.")
         return planned_trucks
 
-    def simulate(stop_keys: list[str], keep: bool) -> dict[str, Any]:
-        stops = [stops_by_key[k] for k in stop_keys]
-        return simulate_driver_shift(stops, matrix, cfg, keep_order=keep)
+    drivers_by_name = {d["name"]: d for d in (drivers or [])}
+
+    def simulate_rounds(
+        rounds_keys: list[list[str]], keeps: list[bool], driver_name: str | None
+    ) -> list[dict[str, Any]]:
+        """מחשב את כל הסבבים של נהג אחד ברצף (נהג בלי שם = סבב יחיד מהבית הכללי)."""
+        rounds = [[stops_by_key[k] for k in keys] for keys in rounds_keys]
+        drv = drivers_by_name.get(driver_name or "")
+        if drv:
+            return simulate_driver_day(
+                rounds, matrix, cfg, keeps,
+                home_idx=drv["matrix_idx"], home_name=f"בית ({drv['address']})",
+            )
+        return simulate_driver_day(rounds, matrix, cfg, keeps)
 
     initial_routes = [
         [s["stop_key"] for s in t["ordered_stops"]] for t in planned_trucks
@@ -1752,24 +1923,42 @@ def apply_manual_route_edits(
     edited = run_route_editor(
         initial_routes=initial_routes,
         stops_by_key=stops_by_key,
-        simulate=simulate,
+        simulate=simulate_rounds,
         cfg=cfg,
         region_order=REGION_ORDER,
+        drivers=drivers,
     )
     if edited is None:
         raise RouteEditCancelled()
 
-    edited_keys = [k for keys in edited for k in keys]
+    edited = [(keys, drv) for keys, drv in edited if keys]
+    edited_keys = [k for keys, _drv in edited for k in keys]
     if sorted(edited_keys) != sorted(stops_by_key.keys()):
         raise ValueError("שגיאה: לא כל העצירות שובצו לנהגים בחלון העריכה.")
 
+    # נהג עם כמה מסלולים => סבבים ברצף לפי סדר הכרטיסים בחלון
+    rounds_of: dict[str, list[int]] = {}
+    for pos, (_keys, drv_name) in enumerate(edited):
+        if drv_name:
+            rounds_of.setdefault(drv_name, []).append(pos)
+
+    sims_by_pos: dict[int, dict[str, Any]] = {}
+    for pos, (keys, drv_name) in enumerate(edited):
+        if not drv_name:
+            sims_by_pos[pos] = simulate_rounds([keys], [True], None)[0]
+    for drv_name, positions in rounds_of.items():
+        sims = simulate_rounds(
+            [edited[p][0] for p in positions], [True] * len(positions), drv_name
+        )
+        for k, (p, sim) in enumerate(zip(positions, sims), start=1):
+            sim["round_label"] = f" - סבב {k}" if len(positions) > 1 else ""
+            sims_by_pos[p] = sim
+
     result: list[dict[str, Any]] = []
-    for keys in edited:
-        if not keys:
-            continue
-        stops = [stops_by_key[k] for k in keys]
-        sim = simulate_driver_shift(stops, matrix, cfg, keep_order=True)
-        sim["region_title"] = build_region_title(stops)
+    for pos, (keys, drv_name) in enumerate(edited):
+        sim = sims_by_pos[pos]
+        sim["region_title"] = build_region_title([stops_by_key[k] for k in keys])
+        sim["driver_name"] = drv_name
         result.append(sim)
     print(f"[V] המסלולים אושרו ({len(result)} נהגים).")
     return result
@@ -1888,6 +2077,7 @@ def sort_orders_excel(
                 "region": region,
                 "region_rank": REGION_RANK.get(region, 99),
                 "effective_dest": effective_dest,
+                "address": str(addr_val or "").strip(),
                 "cust_name": cust_name,
                 "order_no": str(row_vals[idx_order] or "").strip(),
                 "line_no": int(row_vals[idx_line] or 0)
@@ -1924,6 +2114,7 @@ def sort_orders_excel(
                 "stop_key": s_key,
                 "region": rec["region"],
                 "effective_dest": rec["effective_dest"],
+                "address": rec["address"],
                 "cust_name": rec["cust_name"],
                 "coords": (rec["lat"], rec["lon"]),
                 "matrix_idx": m_idx,
@@ -1939,6 +2130,12 @@ def sort_orders_excel(
         st["needs_cooling"] = st["needs_cooling"] or rec["is_cooling"]
         st["needs_hazmat"] = st["needs_hazmat"] or rec["is_hazmat"]
         st["needs_goldbond"] = st["needs_goldbond"] or rec["is_goldbond"]
+
+    # כתובות הבית של הנהגים מתווספות למטריצת זמני הנסיעה (אחרי העצירות)
+    drivers = load_drivers(cfg, cache) if cfg.get("ENABLE_ROUTE_EDITOR", True) else []
+    for drv in drivers:
+        drv["matrix_idx"] = len(fixed_points)
+        fixed_points.append(drv["coords"])
 
     travel_matrix = build_travel_minutes_matrix(fixed_points, cfg)
 
@@ -2000,7 +2197,7 @@ def sort_orders_excel(
     # עריכה ידנית של המסלולים בחלון (גרירת עצירות בין נהגים / שינוי סדר)
     if cfg.get("ENABLE_ROUTE_EDITOR", True):
         planned_trucks = apply_manual_route_edits(
-            planned_trucks, unique_stops_by_key, travel_matrix, cfg
+            planned_trucks, unique_stops_by_key, travel_matrix, cfg, drivers
         )
 
     final_drivers: list[dict[str, Any]] = []
@@ -2008,7 +2205,13 @@ def sort_orders_excel(
 
     for driver_counter, t in enumerate(planned_trucks, start=1):
         reg_title = t["region_title"]
-        driver_label = f"נהג {driver_counter} ({reg_title})"
+        # "נהג <שם הנהג> (אזור)" אם נבחר נהג, אחרת "נהג <מספר> (אזור)"
+        who = (
+            f"{t['driver_name']}{t.get('round_label', '')}"
+            if t.get("driver_name")
+            else str(driver_counter)
+        )
+        driver_label = f"נהג {who} ({reg_title})"
         t["driver_id"] = driver_counter
         t["driver_label"] = driver_label
         final_drivers.append(t)
@@ -2357,6 +2560,8 @@ def is_excluded_support_file(
         cfg["HAZMAT_FILE_NAME"].lower(),
         cfg["GOLDBOND_FILE_NAME"].lower(),
         CONFIG_FILE_NAME.lower(),
+        str(cfg.get("DRIVERS_FILE_NAME", "drivers.xlsx")).lower(),
+        "drivers.xlsx",
         "dangerous_products.xlsx",
         "cooling_products.pdf",
         "cooling_products.xlsx",
@@ -2457,7 +2662,12 @@ def main() -> None:
         print(
             f"  - {drv['driver_label']}: {len(drv['ordered_stops'])} עצירות | "
             f'{drv["total_weight"]:,.0f} ק"ג | זמן משמרת: {drv["total_shift_hhmm"]} | '
-            f"חזרה אל ה{cfg['DRIVER_HOME_NAME']}: {drv['return_home_str']}"
+            + (
+                f"חזרה אל ה{drv.get('home_name', cfg['DRIVER_HOME_NAME'])}: "
+                if drv.get("ends_at_home", True)
+                else "סיום סבב וחזרה למחסן: "
+            )
+            + f"{drv['return_home_str']}"
         )
 
     if cfg.get("AUTO_OPEN_OUTPUT_FOLDER", True) and not args.no_open:
