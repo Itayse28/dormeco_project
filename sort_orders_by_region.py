@@ -26,6 +26,7 @@ import math
 import os
 import pathlib
 import re
+from urllib.parse import quote
 import subprocess
 import sys
 import zipfile
@@ -34,6 +35,75 @@ from typing import Any
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+
+
+# ==============================================================================
+# קישורים לפריוריטי (מספר הזמנה / לקוח נפתחים בפריוריטי בלחיצה)
+# ==============================================================================
+PRIORITY_DEFAULT_SERVER = "https://pri.dormeco.co.il"
+# כותרות אפשריות לעמודת מספר הלקוח בדוח (נדרשת לקישור ללקוח)
+CUST_NO_HEADERS = [
+    "מס' לקוח", 'מס" לקוח', "מספר לקוח", "מס. לקוח", "מס לקוח", "קוד לקוח", "מספר הלקוח",
+]
+
+
+def priority_cfg_values(raw_kv: dict[str, str]) -> dict[str, str]:
+    return {
+        "PRI_DOR_CODE": str(raw_kv.get("PRI_DOR_CODE", "") or "").strip(),
+        "PRIORITY_SERVER_URL": str(
+            raw_kv.get("PRIORITY_SERVER_URL", "") or PRIORITY_DEFAULT_SERVER
+        ).strip(),
+        "PRIORITY_ORDER_FORM": str(raw_kv.get("PRIORITY_ORDER_FORM", "") or "ORDERS").strip(),
+        "PRIORITY_CUSTOMER_FORM": str(
+            raw_kv.get("PRIORITY_CUSTOMER_FORM", "") or "CUSTOMERS"
+        ).strip(),
+    }
+
+
+def find_cust_no_col(headers: list[str]) -> int:
+    for name in CUST_NO_HEADERS:
+        for idx, h in enumerate(headers):
+            if name in str(h or ""):
+                return idx
+    return -1
+
+
+def _key_text(key: Any) -> str:
+    if isinstance(key, float) and key.is_integer():
+        key = int(key)
+    return str(key or "").strip()
+
+
+def priority_link(cfg: dict[str, Any], form: str, key: Any) -> str | None:
+    """קישור לפתיחת רשומה בפריוריטי, או None אם חסר קוד חברה / מפתח."""
+    code = str(cfg.get("PRI_DOR_CODE", "") or "").strip()
+    key_txt = _key_text(key)
+    if not code or not key_txt:
+        return None
+    server = str(cfg.get("PRIORITY_SERVER_URL") or PRIORITY_DEFAULT_SERVER).strip().rstrip("/")
+    return (
+        f"{server}/priority/openmail.htm?priority:priform@{form}:"
+        f"{quote(key_txt, safe='')}:{code}:tabula.ini:1"
+    )
+
+
+def order_link(cfg: dict[str, Any], order_no: Any) -> str | None:
+    return priority_link(cfg, cfg.get("PRIORITY_ORDER_FORM") or "ORDERS", order_no)
+
+
+def customer_link(cfg: dict[str, Any], cust_no: Any) -> str | None:
+    return priority_link(cfg, cfg.get("PRIORITY_CUSTOMER_FORM") or "CUSTOMERS", cust_no)
+
+
+def set_link(cell: Any, url: str | None) -> None:
+    """הופך משבצת להיפרלינק (כחול עם קו תחתון), תוך שמירה על גודל/הדגשה."""
+    if not url:
+        return
+    cell.hyperlink = url
+    f = cell.font
+    cell.font = Font(
+        name=f.name, size=f.size, bold=f.bold, color="0563C1", underline="single"
+    )
 import requests
 
 try:
@@ -61,6 +131,8 @@ HAZMAT_FILE_NAME = dangerous_products.xlsx
 GOLDBOND_FILE_NAME = Gold_bond.xlsx
 # קובץ רשימת הנהגים (עמודות: שם נהג, כתובת) - לבחירת נהג לכל מסלול בחלון העריכה
 DRIVERS_FILE_NAME = drivers.xlsx
+# קובץ לקוחות עם דגשים מיוחדים (עמודה א: שם לקוח, עמודה ב: הדגש)
+CLIENT_MARKS_FILE_NAME = clients_marks.xlsx
 
 # 2. זמני העמסה במחסנים באשדוד וזמן פריקה אצל לקוח (בדקות)
 MAIN_WAREHOUSE_LOAD_MINUTES = 60
@@ -108,6 +180,9 @@ PREFER_SITE_NAME_CITY = false
 AUTO_OPEN_OUTPUT_FOLDER = true
 # true = פתיחת חלון לעריכה ידנית של המסלולים לפני יצירת האקסל
 ENABLE_ROUTE_EDITOR = true
+# קוד החברה בפריוריטי - מספרי הזמנה ושמות לקוחות בדוחות יהיו קישורים לפריוריטי
+PRI_DOR_CODE = 
+PRIORITY_SERVER_URL = https://pri.dormeco.co.il
 # כמה נהגים יוצגו במסך אחד בחלון העריכה (בלי לגלול)
 AMOUNT_OF_DRIVERS_ON_SCREEN = 10
 # רשימת כתובות מייל לשליחת רשימות הליקוט, מופרדות בפסיק
@@ -233,6 +308,10 @@ def load_or_create_config(
         "GOLDBOND_FILE_NAME": raw_kv.get(
             "GOLDBOND_FILE_NAME", "Gold_bond.xlsx"
         ),
+        "CLIENT_MARKS_FILE_NAME": raw_kv.get(
+            "CLIENT_MARKS_FILE_NAME", "clients_marks.xlsx"
+        ).strip()
+        or "clients_marks.xlsx",
         "DRIVERS_FILE_NAME": raw_kv.get("DRIVERS_FILE_NAME", "drivers.xlsx").strip()
         or "drivers.xlsx",
         "MAIN_WAREHOUSE_LOAD_MINUTES": main_load,
@@ -308,6 +387,7 @@ def load_or_create_config(
         "AUTO_OPEN_OUTPUT_FOLDER": parse_bool(
             raw_kv.get("AUTO_OPEN_OUTPUT_FOLDER", "true"), True
         ),
+        **priority_cfg_values(raw_kv),
         "AMOUNT_OF_DRIVERS_ON_SCREEN": parse_int(
             raw_kv.get("AMOUNT_OF_DRIVERS_ON_SCREEN", "10"), 10
         ),
@@ -1876,6 +1956,62 @@ def load_drivers(cfg: dict[str, Any], cache: dict[str, Any]) -> list[dict[str, A
     return drivers
 
 
+# ==============================================================================
+# לקוחות עם דגשים מיוחדים (input_files/clients_marks.xlsx)
+# ==============================================================================
+CLIENT_MARK_HEADER = "דגש מיוחד ללקוח"
+
+
+def normalize_client_name(name: Any) -> str:
+    """נרמול שם לקוח להשוואה: בלי מירכאות/גרשיים, סימני פיסוק ורווחים כפולים."""
+    s = str(name or "")
+    s = re.sub(r"[\"'`״׳]", "", s)
+    s = re.sub(r"[-–.,()/]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def load_client_marks(cfg: dict[str, Any]) -> list[tuple[str, str]]:
+    """קורא את רשימת הלקוחות עם הדגשים: [(שם מנורמל, דגש)]."""
+    path = cfg["INPUT_DIR_PATH"] / cfg.get("CLIENT_MARKS_FILE_NAME", "clients_marks.xlsx")
+    if not path.exists():
+        print(f"[*] קובץ דגשי לקוחות לא נמצא ({path.name}) - לא יתווספו דגשים לדוחות.")
+        return []
+    try:
+        ws = load_workbook_safe(path).active
+    except Exception as exc:  # noqa: BLE001
+        print(f"[!] לא ניתן לקרוא את קובץ דגשי הלקוחות {path.name}: {exc}")
+        return []
+    marks: list[tuple[str, str]] = []
+    for row in ws.iter_rows(values_only=True):
+        if len(row) < 2:
+            continue
+        name, mark = normalize_client_name(row[0]), str(row[1] or "").strip()
+        if name and mark:
+            marks.append((name, mark))
+    print(f"[*] נטענו {len(marks)} לקוחות עם דגשים מיוחדים מ-{path.name}")
+    return marks
+
+
+def find_client_mark(cust_name: Any, marks: list[tuple[str, str]]) -> str:
+    """
+    מחזיר את הדגש של הלקוח, או "" אם אין.
+    התאמה מדויקת אחרי נרמול, ואם אין - התאמת תחילית (שמות קטועים בפריוריטי),
+    בתנאי שהחלק המשותף ארוך מספיק.
+    """
+    n = normalize_client_name(cust_name)
+    if not n or not marks:
+        return ""
+    for key, mark in marks:
+        if key == n:
+            return mark
+    best = ("", "")
+    for key, mark in marks:
+        if min(len(key), len(n)) >= 8 and (n.startswith(key) or key.startswith(n)):
+            if len(key) > len(best[0]):
+                best = (key, mark)
+    return best[1]
+
+
 class RouteEditCancelled(Exception):
     """המשתמש סגר/ביטל את חלון עריכת המסלולים."""
 
@@ -2087,6 +2223,15 @@ def sort_orders_excel(
     idx_qty = find_col(["כמות"], 11)
     idx_cust_note = find_col(["הערה למוצר ללקוח", "הערה למוצר"], 12)
     idx_unit = find_col(["יח'", "יחידות", "יח"], 13)
+    idx_cust_no = find_cust_no_col(raw_headers)
+    client_marks = load_client_marks(cfg)
+    if not cfg.get("PRI_DOR_CODE"):
+        print("[*] PRI_DOR_CODE לא מוגדר בקובץ ההגדרות - לא ייווצרו קישורים לפריוריטי.")
+    elif idx_cust_no < 0:
+        print(
+            "[!] לא נמצאה עמודת מספר לקוח בדוח - שמות הלקוחות לא יהיו קישורים לפריוריטי "
+            "(מספרי ההזמנה כן)."
+        )
 
     cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
     cache = load_cache()
@@ -2292,6 +2437,8 @@ def sort_orders_excel(
         rec["route_stop_num"] = assign["route_stop_num"]
         rec["arrival_str"] = assign["arrival_str"]
         rec["departure_str"] = assign["departure_str"]
+        rec["route_date"] = assign["route_date"]
+        rec["client_mark"] = find_client_mark(rec["cust_name"], client_marks)
         # הזמנה שהועברה ליום אחר מקבלת את תאריך המסלול
         if assign["route_date"] and 0 <= idx_date < len(rec["raw_values"]):
             rec["raw_values"][idx_date] = assign["route_date"]
@@ -2338,6 +2485,10 @@ def sort_orders_excel(
         if c_idx == idx_dest:
             out_headers.append("שעת הגעה ליעד")
             out_headers.append(unload_col_title)
+    out_headers.append(CLIENT_MARK_HEADER)
+    col_mark_out = len(out_headers)
+    mark_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    mark_font = Font(name="Arial", size=10, bold=True, color="9C0006")
 
     wb_out = openpyxl.Workbook()
     ws_orders = wb_out.active
@@ -2392,13 +2543,26 @@ def sort_orders_excel(
     col_qty_out = 1
     col_line_out = 1
     col_date_out = -1
+    col_order_out = -1
+    col_cust_out = -1
+
+    # צבע שורה לפי תאריך המסלול (אותם צבעים כמו בגיליון סיכום הנהגים)
+    order_date_palette = [
+        "DDEBF7", "E2EFDA", "FFF2CC", "FCE4D6", "EDE2F6", "D9F2F2", "F2F2F2",
+    ]
+    order_route_dates = sorted(
+        {drv.get("route_date", "") for drv in final_drivers}, key=date_sort_key
+    )
+    order_date_color = {
+        d: order_date_palette[i % len(order_date_palette)]
+        for i, d in enumerate(order_route_dates)
+    }
 
     for row_offset, rec in enumerate(records, start=2):
         reg = rec["region"]
+        row_color = order_date_color.get(rec.get("route_date", ""), "FFFFFF")
         row_fill = PatternFill(
-            start_color=region_Palette.get(reg, "FFFFFF"),
-            end_color=region_Palette.get(reg, "FFFFFF"),
-            fill_type="solid",
+            start_color=row_color, end_color=row_color, fill_type="solid"
         )
         raw_vals = rec["raw_values"]
         row_out: list[Any] = [
@@ -2417,10 +2581,15 @@ def sort_orders_excel(
                 col_line_out = len(row_out)
             if c_idx == idx_date:
                 col_date_out = len(row_out)
+            if c_idx == idx_order:
+                col_order_out = len(row_out)
+            if c_idx == idx_cust_name:
+                col_cust_out = len(row_out)
             if c_idx == idx_dest:
                 row_out.append(rec["arrival_str"])
                 row_out.append(rec["departure_str"])
 
+        row_out.append(rec.get("client_mark") or None)
         for col_idx, val in enumerate(row_out, start=1):
             cell = ws_orders.cell(row_offset, col_idx, val)
             cell.fill = row_fill
@@ -2450,6 +2619,19 @@ def sort_orders_excel(
                 cell.alignment = Alignment(
                     horizontal="right", vertical="center", wrap_text=False
                 )
+        if rec.get("client_mark"):
+            mc = ws_orders.cell(row_offset, col_mark_out)
+            mc.fill = mark_fill
+            mc.font = mark_font
+            mc.alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
+        # קישורים לפריוריטי: מספר הזמנה ושם לקוח
+        if col_order_out > 0:
+            set_link(ws_orders.cell(row_offset, col_order_out), order_link(cfg, rec["order_no"]))
+        if col_cust_out > 0 and 0 <= idx_cust_no < len(raw_vals):
+            set_link(
+                ws_orders.cell(row_offset, col_cust_out),
+                customer_link(cfg, raw_vals[idx_cust_no]),
+            )
         ws_orders.row_dimensions[row_offset].height = 21
 
     last_data_row = len(records) + 1
@@ -2633,7 +2815,9 @@ def is_excluded_support_file(
         cfg["GOLDBOND_FILE_NAME"].lower(),
         CONFIG_FILE_NAME.lower(),
         str(cfg.get("DRIVERS_FILE_NAME", "drivers.xlsx")).lower(),
+        str(cfg.get("CLIENT_MARKS_FILE_NAME", "clients_marks.xlsx")).lower(),
         "drivers.xlsx",
+        "clients_marks.xlsx",
         "dangerous_products.xlsx",
         "cooling_products.pdf",
         "cooling_products.xlsx",

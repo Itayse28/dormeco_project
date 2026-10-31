@@ -15,6 +15,7 @@ import argparse
 import io
 import pathlib
 import re
+from urllib.parse import quote
 import subprocess
 import sys
 import zipfile
@@ -24,6 +25,75 @@ import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.page import PageMargins
+
+
+# ==============================================================================
+# קישורים לפריוריטי (מספר הזמנה / לקוח נפתחים בפריוריטי בלחיצה)
+# ==============================================================================
+PRIORITY_DEFAULT_SERVER = "https://pri.dormeco.co.il"
+# כותרות אפשריות לעמודת מספר הלקוח בדוח (נדרשת לקישור ללקוח)
+CUST_NO_HEADERS = [
+    "מס' לקוח", 'מס" לקוח', "מספר לקוח", "מס. לקוח", "מס לקוח", "קוד לקוח", "מספר הלקוח",
+]
+
+
+def priority_cfg_values(raw_kv: dict[str, str]) -> dict[str, str]:
+    return {
+        "PRI_DOR_CODE": str(raw_kv.get("PRI_DOR_CODE", "") or "").strip(),
+        "PRIORITY_SERVER_URL": str(
+            raw_kv.get("PRIORITY_SERVER_URL", "") or PRIORITY_DEFAULT_SERVER
+        ).strip(),
+        "PRIORITY_ORDER_FORM": str(raw_kv.get("PRIORITY_ORDER_FORM", "") or "ORDERS").strip(),
+        "PRIORITY_CUSTOMER_FORM": str(
+            raw_kv.get("PRIORITY_CUSTOMER_FORM", "") or "CUSTOMERS"
+        ).strip(),
+    }
+
+
+def find_cust_no_col(headers: list[str]) -> int:
+    for name in CUST_NO_HEADERS:
+        for idx, h in enumerate(headers):
+            if name in str(h or ""):
+                return idx
+    return -1
+
+
+def _key_text(key: Any) -> str:
+    if isinstance(key, float) and key.is_integer():
+        key = int(key)
+    return str(key or "").strip()
+
+
+def priority_link(cfg: dict[str, Any], form: str, key: Any) -> str | None:
+    """קישור לפתיחת רשומה בפריוריטי, או None אם חסר קוד חברה / מפתח."""
+    code = str(cfg.get("PRI_DOR_CODE", "") or "").strip()
+    key_txt = _key_text(key)
+    if not code or not key_txt:
+        return None
+    server = str(cfg.get("PRIORITY_SERVER_URL") or PRIORITY_DEFAULT_SERVER).strip().rstrip("/")
+    return (
+        f"{server}/priority/openmail.htm?priority:priform@{form}:"
+        f"{quote(key_txt, safe='')}:{code}:tabula.ini:1"
+    )
+
+
+def order_link(cfg: dict[str, Any], order_no: Any) -> str | None:
+    return priority_link(cfg, cfg.get("PRIORITY_ORDER_FORM") or "ORDERS", order_no)
+
+
+def customer_link(cfg: dict[str, Any], cust_no: Any) -> str | None:
+    return priority_link(cfg, cfg.get("PRIORITY_CUSTOMER_FORM") or "CUSTOMERS", cust_no)
+
+
+def set_link(cell: Any, url: str | None) -> None:
+    """הופך משבצת להיפרלינק (כחול עם קו תחתון), תוך שמירה על גודל/הדגשה."""
+    if not url:
+        return
+    cell.hyperlink = url
+    f = cell.font
+    cell.font = Font(
+        name=f.name, size=f.size, bold=f.bold, color="0563C1", underline="single"
+    )
 
 try:
     import pypdf
@@ -178,6 +248,7 @@ def load_config(custom_config_path: pathlib.Path | None = None) -> dict[str, Any
         "EXTRA_COOLING_SKUS": raw_kv.get("EXTRA_COOLING_SKUS", ""),
         "EXTRA_HAZMAT_SKUS": raw_kv.get("EXTRA_HAZMAT_SKUS", ""),
         "EXTRA_GOLDBOND_SKUS": raw_kv.get("EXTRA_GOLDBOND_SKUS", ""),
+        **priority_cfg_values(raw_kv),
     }
 
 
@@ -394,7 +465,15 @@ def create_single_driver_report(
         left=med_red, right=med_red, top=thin_side, bottom=thin_side
     )
 
-    num_cols = 7
+    num_cols = 8
+    mark_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    mark_font = Font(name=font_family, size=9, bold=True, color="9C0006")
+
+    def style_mark(cell: Any) -> None:
+        if cell.value:
+            cell.fill = mark_fill
+            cell.font = mark_font
+            cell.alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
 
     # 1. שורה ראשונה: כותרת הדוח "הובלות על ידי נהג X"
     ws.merge_cells(
@@ -465,8 +544,10 @@ def create_single_driver_report(
         "תיאור החומר",
         "כמות",
         "יח'",
+        "דגש מיוחד ללקוח",
     ]
 
+    wh_total_rows: list[int] = []
     for wh_key, wh_name, wh_addr, wh_fill in warehouses_order:
         wh_items = [r for r in driver_rows if r.get(f"is_{wh_key}", False)]
         if not wh_items:
@@ -511,6 +592,7 @@ def create_single_driver_report(
                 item["prod_desc"],
                 item["qty"],
                 item["unit"],
+                item.get("client_mark") or None,
             ]
             for c_i, v in enumerate(vals, start=1):
                 c = ws.cell(curr_row, c_i, v)
@@ -529,10 +611,44 @@ def create_single_driver_report(
                     c.alignment = Alignment(
                         horizontal="right", vertical="center", wrap_text=True
                     )
+            style_mark(ws.cell(curr_row, 8))
+            set_link(ws.cell(curr_row, 1), order_link(cfg, item["order_no"]))
+            set_link(ws.cell(curr_row, 2), customer_link(cfg, item.get("cust_no")))
             ws.row_dimensions[curr_row].height = 20
             curr_row += 1
 
-        curr_row += 1
+        # סיכום משקל להעמסה במחסן הזה
+        first_item_row = curr_row - len(wh_items)
+        wh_total_rows.append(curr_row)
+        ws.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=5)
+        tl = ws.cell(curr_row, 1, f'סה"כ משקל להעמסה ב{wh_name} (ק"ג)')
+        tl.alignment = Alignment(horizontal="left", vertical="center")
+        tv = ws.cell(curr_row, 6, f"=SUM(F{first_item_row}:F{curr_row - 1})")
+        tv.number_format = "#,##0.##"
+        tv.alignment = Alignment(horizontal="center", vertical="center")
+        for c in range(1, num_cols + 1):
+            cc = ws.cell(curr_row, c)
+            cc.font = bold_font
+            cc.fill = tbl_header_fill
+            cc.border = grid_border
+        ws.row_dimensions[curr_row].height = 20
+        curr_row += 2
+
+    # סיכום משקל כולל לכל ההעמסות
+    if wh_total_rows:
+        ws.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=5)
+        gl = ws.cell(curr_row, 1, 'סה"כ משקל להעמסה בכל המחסנים (ק"ג)')
+        gl.alignment = Alignment(horizontal="left", vertical="center")
+        gv = ws.cell(curr_row, 6, "=" + "+".join(f"F{r}" for r in wh_total_rows))
+        gv.number_format = "#,##0.##"
+        gv.alignment = Alignment(horizontal="center", vertical="center")
+        for c in range(1, num_cols + 1):
+            cc = ws.cell(curr_row, c)
+            cc.font = Font(name=font_family, size=10, bold=True, color="FFFFFF")
+            cc.fill = title_fill
+            cc.border = box_border
+        ws.row_dimensions[curr_row].height = 22
+        curr_row += 2
 
     # ==========================================================================
     # 3. חלק ב': פירוט פריקת החומרים לפי סדר היעדים במסלול
@@ -571,6 +687,7 @@ def create_single_driver_report(
         "יח'",
         "מחסן העמסה",
         "הערות למוצר / הערות לאספקה",
+        "דגש מיוחד ללקוח",
     ]
 
     for (stop_num, dest, cust_name), stop_items in stops_grouped:
@@ -605,12 +722,14 @@ def create_single_driver_report(
         )
         sb_cell = ws.cell(curr_row, 1, stop_banner_text)
         sb_cell.font = stop_banner_font
+        cust_url = customer_link(cfg, first_it.get("cust_no"))
         sb_cell.alignment = Alignment(
             horizontal="right", vertical="center", wrap_text=True
         )
         for c in range(1, num_cols + 1):
             ws.cell(curr_row, c).fill = stop_banner_fill
             ws.cell(curr_row, c).border = grid_border
+        set_link(sb_cell, cust_url)  # לחיצה על שורת התחנה פותחת את הלקוח
         ws.row_dimensions[curr_row].height = 24
         curr_row += 1
 
@@ -634,10 +753,14 @@ def create_single_driver_report(
                 item["unit"],
                 item["wh_short"],
                 item["combined_notes"],
+                item.get("client_mark") or None,
             ]
             for c_i, v in enumerate(vals, start=1):
                 c = ws.cell(curr_row, c_i, v)
                 c.font = bold_font if c_i in (2, 4, 7) else data_font
+                if c_i == 1:
+                    c.border = grid_border
+                    set_link(c, order_link(cfg, v))
                 c.border = grid_border
                 if c_i == 4 and isinstance(v, (int, float)):
                     c.number_format = "#,##0.##"
@@ -652,6 +775,7 @@ def create_single_driver_report(
                     c.alignment = Alignment(
                         horizontal="right", vertical="center", wrap_text=True
                     )
+            style_mark(ws.cell(curr_row, 8))
             ws.row_dimensions[curr_row].height = 22
             curr_row += 1
 
@@ -701,6 +825,7 @@ def create_single_driver_report(
         5: 20.0,
         6: 13.0,
         7: 26.0,
+        8: 24.0,
     }
     for col_i, w in col_widths.items():
         ws.column_dimensions[get_column_letter(col_i)].width = w
@@ -757,6 +882,8 @@ def generate_driver_reports_from_sorted_excel(
     idx_unit = find_col(["יח'", "יחידות", "יח"], 18)
     idx_cust_note = find_col(["הערה למוצר ללקוח", "הערה למוצר"], 19)
     idx_internal_note = find_col(["הערה פנימית להזמנה", "הערה פנימית"], 20)
+    idx_cust_no = find_cust_no_col(headers)
+    idx_mark = find_col(["דגש מיוחד ללקוח"], -1)
 
     cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
 
@@ -840,6 +967,10 @@ def generate_driver_reports_from_sorted_excel(
 
         rec_dict = {
             "stop_num": stop_num,
+            "cust_no": row_vals[idx_cust_no] if 0 <= idx_cust_no < len(row_vals) else None,
+            "client_mark": str(row_vals[idx_mark] or "").strip()
+            if 0 <= idx_mark < len(row_vals)
+            else "",
             "order_no": str(row_vals[idx_order] or "").strip()
             if idx_order < len(row_vals)
             else "",
@@ -934,6 +1065,7 @@ def is_excluded_support_file(p: pathlib.Path, cfg: dict[str, Any]) -> bool:
         cfg["GOLDBOND_FILE_NAME"].lower(),
         CONFIG_FILE_NAME.lower(),
         "drivers.xlsx",
+        "clients_marks.xlsx",
         "dangerous_products.xlsx",
         "cooling_products.pdf",
         "cooling_products.xlsx",

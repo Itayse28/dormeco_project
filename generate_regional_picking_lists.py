@@ -25,6 +25,7 @@ import argparse
 import io
 import pathlib
 import re
+from urllib.parse import quote
 import subprocess
 import sys
 import zipfile
@@ -34,6 +35,75 @@ import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.page import PageMargins
+
+
+# ==============================================================================
+# קישורים לפריוריטי (מספר הזמנה / לקוח נפתחים בפריוריטי בלחיצה)
+# ==============================================================================
+PRIORITY_DEFAULT_SERVER = "https://pri.dormeco.co.il"
+# כותרות אפשריות לעמודת מספר הלקוח בדוח (נדרשת לקישור ללקוח)
+CUST_NO_HEADERS = [
+    "מס' לקוח", 'מס" לקוח', "מספר לקוח", "מס. לקוח", "מס לקוח", "קוד לקוח", "מספר הלקוח",
+]
+
+
+def priority_cfg_values(raw_kv: dict[str, str]) -> dict[str, str]:
+    return {
+        "PRI_DOR_CODE": str(raw_kv.get("PRI_DOR_CODE", "") or "").strip(),
+        "PRIORITY_SERVER_URL": str(
+            raw_kv.get("PRIORITY_SERVER_URL", "") or PRIORITY_DEFAULT_SERVER
+        ).strip(),
+        "PRIORITY_ORDER_FORM": str(raw_kv.get("PRIORITY_ORDER_FORM", "") or "ORDERS").strip(),
+        "PRIORITY_CUSTOMER_FORM": str(
+            raw_kv.get("PRIORITY_CUSTOMER_FORM", "") or "CUSTOMERS"
+        ).strip(),
+    }
+
+
+def find_cust_no_col(headers: list[str]) -> int:
+    for name in CUST_NO_HEADERS:
+        for idx, h in enumerate(headers):
+            if name in str(h or ""):
+                return idx
+    return -1
+
+
+def _key_text(key: Any) -> str:
+    if isinstance(key, float) and key.is_integer():
+        key = int(key)
+    return str(key or "").strip()
+
+
+def priority_link(cfg: dict[str, Any], form: str, key: Any) -> str | None:
+    """קישור לפתיחת רשומה בפריוריטי, או None אם חסר קוד חברה / מפתח."""
+    code = str(cfg.get("PRI_DOR_CODE", "") or "").strip()
+    key_txt = _key_text(key)
+    if not code or not key_txt:
+        return None
+    server = str(cfg.get("PRIORITY_SERVER_URL") or PRIORITY_DEFAULT_SERVER).strip().rstrip("/")
+    return (
+        f"{server}/priority/openmail.htm?priority:priform@{form}:"
+        f"{quote(key_txt, safe='')}:{code}:tabula.ini:1"
+    )
+
+
+def order_link(cfg: dict[str, Any], order_no: Any) -> str | None:
+    return priority_link(cfg, cfg.get("PRIORITY_ORDER_FORM") or "ORDERS", order_no)
+
+
+def customer_link(cfg: dict[str, Any], cust_no: Any) -> str | None:
+    return priority_link(cfg, cfg.get("PRIORITY_CUSTOMER_FORM") or "CUSTOMERS", cust_no)
+
+
+def set_link(cell: Any, url: str | None) -> None:
+    """הופך משבצת להיפרלינק (כחול עם קו תחתון), תוך שמירה על גודל/הדגשה."""
+    if not url:
+        return
+    cell.hyperlink = url
+    f = cell.font
+    cell.font = Font(
+        name=f.name, size=f.size, bold=f.bold, color="0563C1", underline="single"
+    )
 
 try:
     import pypdf
@@ -65,6 +135,7 @@ PICKING_HEADERS: list[str] = [
     "כמות",
     "אריזות",
     "הערות",
+    "דגש מיוחד ללקוח",
 ]
 
 DEFAULT_COOLING_SKUS: set[str] = {
@@ -194,6 +265,7 @@ def load_picking_config(
         "EXTRA_COOLING_SKUS": raw_kv.get("EXTRA_COOLING_SKUS", ""),
         "EXTRA_HAZMAT_SKUS": raw_kv.get("EXTRA_HAZMAT_SKUS", ""),
         "EXTRA_GOLDBOND_SKUS": raw_kv.get("EXTRA_GOLDBOND_SKUS", ""),
+        **priority_cfg_values(raw_kv),
         "SEND_PICKING_LIST_TO": parse_email_list(raw_kv.get("SEND_PICKING_LIST_TO", "")),
     }
 
@@ -495,6 +567,8 @@ def create_single_picking_excel(
     warehouse_hebrew_name: str,
     driver_num: str,
     tint_hex: str,
+    cfg: dict[str, Any] | None = None,
+    cust_no_by_order: dict[str, Any] | None = None,
 ) -> None:
     """
     מייצר קובץ ליקוט מעוצב:
@@ -578,6 +652,21 @@ def create_single_picking_excel(
             cell.alignment = center_align
             if col_idx == 5 and isinstance(val, (int, float)):
                 cell.number_format = "#,##0.##"
+            if col_idx == 8 and val:
+                # דגש מיוחד ללקוח - ממורקר באדום חלש
+                cell.fill = PatternFill(
+                    start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"
+                )
+                cell.font = Font(name=data_font.name, size=data_font.size, bold=True, color="9C0006")
+                cell.alignment = Alignment(
+                    horizontal="center", vertical="center", wrap_text=True
+                )
+        # קישורים לפריוריטי: עמודה 1 = הזמנה, עמודה 2 = שם לקוח
+        if cfg:
+            order_no = r_vals[0] if r_vals else None
+            set_link(ws.cell(row_idx, 1), order_link(cfg, order_no))
+            cust_no = (cust_no_by_order or {}).get(_key_text(order_no))
+            set_link(ws.cell(row_idx, 2), customer_link(cfg, cust_no))
         ws.row_dimensions[row_idx].height = 22
 
     # שורת סיכום תחתונה (ממורכזת)
@@ -693,6 +782,9 @@ def generate_picking_lists_from_sorted_excel(
     idx_unit = find_col(["יח'", "יחידות", "יח"], 18)
     idx_cust_note = find_col(["הערה למוצר ללקוח", "הערה למוצר"], 19)
     idx_internal_note = find_col(["הערה פנימית להזמנה", "הערה פנימית"], 20)
+    idx_cust_no = find_cust_no_col(headers)
+    idx_mark = find_col(["דגש מיוחד ללקוח"], -1)
+    cust_no_by_order: dict[str, Any] = {}
 
     cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
 
@@ -771,6 +863,11 @@ def generate_picking_lists_from_sorted_excel(
         )
         combined_notes = " | ".join(p for p in (note1, note2) if p)
 
+        if 0 <= idx_cust_no < len(row_vals) and idx_order < len(row_vals):
+            cust_no_by_order.setdefault(
+                _key_text(row_vals[idx_order]), row_vals[idx_cust_no]
+            )
+
         picking_row = [
             row_vals[idx_order] if idx_order < len(row_vals) else None,
             row_vals[idx_cust_name] if idx_cust_name < len(row_vals) else None,
@@ -779,6 +876,11 @@ def generate_picking_lists_from_sorted_excel(
             qty_val,
             row_vals[idx_unit] if idx_unit < len(row_vals) else None,
             combined_notes if combined_notes else None,
+            (
+                str(row_vals[idx_mark] or "").strip() or None
+                if 0 <= idx_mark < len(row_vals)
+                else None
+            ),
         ]
 
         if is_main:
@@ -829,6 +931,8 @@ def generate_picking_lists_from_sorted_excel(
                 warehouse_hebrew_name=wh_heb_name,
                 driver_num=f"{drv_num} - {when}" if when else drv_num,
                 tint_hex=tint_to_use,
+                cfg=cfg,
+                cust_no_by_order=cust_no_by_order,
             )
 
             total_w = sum(
@@ -862,6 +966,7 @@ def is_excluded_support_file(p: pathlib.Path, cfg: dict[str, Any]) -> bool:
         cfg["GOLDBOND_FILE_NAME"].lower(),
         CONFIG_FILE_NAME.lower(),
         "drivers.xlsx",
+        "clients_marks.xlsx",
         "dangerous_products.xlsx",
         "cooling_products.pdf",
         "cooling_products.xlsx",
