@@ -18,6 +18,11 @@
   מכתובת הבית של הנהג (יציאה וחזרה), והשם מופיע בכל הדוחות.
 - אפשר לשבץ את אותו נהג לכמה מסלולים: הם הופכים לסבבים ברצף
   (בית -> סבב 1 -> חזרה למחסן והעמסה -> סבב 2 -> בית), לפי סדר הכרטיסים.
+- דוח שבועי (כמה תאריכים): עמודה לכל יום עם המסלולים של אותו יום אחד מתחת לשני.
+  "הצג יום" מציג רק את אותו יום (גם במפה), "הצג את כל הימים" חוזר לתצוגה השבועית.
+  גרירת עצירה ליום אחר משנה את תאריך האספקה שלה.
+- "מצא סידור יעיל": סידור כל העצירות בלי התחשבות בתאריך. כל מסלול מקבל את
+  התאריך המוקדם ביותר מבין ההזמנות שבו. "חזור לסידור לפי תאריך" מחזיר.
 - מפה (מוסתרת כברירת מחדל, כפתור "הצג מפה"): כל נהג בצבע משלו (אותו צבע כמו הפס בראש העמודה שלו).
   לחיצה על עצירה ברשימה או במפה מסמנת את המסלול של אותו נהג. (map_panel.py)
 
@@ -27,6 +32,8 @@
 from __future__ import annotations
 
 import copy
+import datetime
+import re
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import messagebox, ttk
@@ -79,6 +86,35 @@ MAP_WIDTH_RATIO = 0.15          # רוחב המפה כברירת מחדל (חל�
 MAP_MIN_WIDTH = 150
 
 
+HEB_WEEKDAYS = {6: "א'", 0: "ב'", 1: "ג'", 2: "ד'", 3: "ה'", 4: "ו'", 5: "ש'"}
+
+
+def parse_date(d: str | None) -> datetime.date | None:
+    m = re.match(r"^\s*(\d{1,2})[-./](\d{1,2})[-./](\d{2,4})", str(d or ""))
+    if not m:
+        return None
+    day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if year < 100:
+        year += 2000
+    try:
+        return datetime.date(year, month, day)
+    except ValueError:
+        return None
+
+
+def date_sort_key(d: str | None) -> tuple:
+    dt = parse_date(d)
+    return (0, dt.toordinal(), "") if dt else (1, 0, str(d or ""))
+
+
+def short_date(d: str | None) -> str:
+    """'02-11-2026' -> \"יום ב' 02.11\"."""
+    dt = parse_date(d)
+    if not dt:
+        return str(d) if d else "ללא תאריך"
+    return f"יום {HEB_WEEKDAYS[dt.weekday()]} {dt.day:02d}.{dt.month:02d}"
+
+
 def screen_grid(drivers_on_screen: int) -> tuple[int, int]:
     """כמה נהגים בשורה וכמה שורות, לפי מספר הנהגים שצריך להיכנס במסך."""
     n = max(1, int(drivers_on_screen))
@@ -99,8 +135,25 @@ class RouteEditor:
         cfg: dict[str, Any],
         region_order: list[str],
         drivers: list[dict[str, Any]] | None = None,
+        initial_days: list[str | None] | None = None,
+        compute_efficient: Callable[[], list[list[str]]] | None = None,
     ) -> None:
         self.root = root
+        # ימים (תאריכי אספקה) - בדוח יומי יש יום אחד בלבד
+        if initial_days is None:
+            initial_days = [None] * len(initial_routes)
+        self.days: list[str | None] = sorted(
+            {d for d in initial_days} or {None}, key=date_sort_key
+        )
+        self.multi_day = len(self.days) > 1
+        self.compute_efficient = compute_efficient
+        self.mode = "days"            # "days" = לפי תאריך, "efficient" = סידור יעיל
+        self.day_filter: str | None = None
+        self._show_all_days = True
+        self.route_day: dict[int, str | None] = {}
+        self._initial_days = list(initial_days)
+        self._saved_states: dict[str, dict[str, Any]] = {}
+        self._efficient_initial: list[list[str]] | None = None
         # רשימת הנהגים מהקובץ: [{"name", "address", "coords", "approx"}]
         self.drivers = list(drivers or [])
         self.drivers_by_name = {d["name"]: d for d in self.drivers}
@@ -118,6 +171,7 @@ class RouteEditor:
         # מזהה קבוע לכל נהג - כדי שהצבע שלו לא ישתנה כשמוסיפים/מבטלים נהגים
         self.route_ids: list[int] = list(range(len(self.routes)))
         self._next_id = len(self.routes)
+        self.route_day = {rid: self._initial_days[rid] for rid in self.route_ids}
         self.selected_id: int | None = None
         self.pool: list[str] = []
         self.depot = tuple(cfg.get("MAIN_WAREHOUSE_COORDS", (31.8315, 34.6465)))
@@ -159,10 +213,43 @@ class RouteEditor:
         driver = self._driver_of(col)
         if not driver:
             return [col]
+        day = self._route_date(col)
         return [
             c for c in range(len(self.routes))
             if self.routes[c] and self._driver_of(c) == driver
+            and self._route_date(c) == day
         ] or [col]
+
+    def _route_date(self, col: int) -> str | None:
+        """תאריך המסלול: היום של העמודה, או (בסידור יעיל) התאריך המוקדם בהזמנות."""
+        if col == POOL:
+            return None
+        if self.mode == "days":
+            return self.route_day.get(self.route_ids[col])
+        dates = [self.stops[k].get("date") for k in self.routes[col]]
+        return min(dates, key=date_sort_key) if dates else None
+
+    def _visible_cols(self) -> list[int]:
+        if self.mode == "days" and self.day_filter is not None:
+            return [
+                c for c in range(len(self.routes))
+                if self.route_day.get(self.route_ids[c]) == self.day_filter
+            ]
+        return list(range(len(self.routes)))
+
+    def _week_view(self) -> bool:
+        return self.mode == "days" and self.multi_day and self.day_filter is None
+
+    def _day_number(self, col: int) -> int:
+        """מספר הנהג בתוך אותו יום (לנהגים בלי שם)."""
+        day = self._route_date(col)
+        n = 0
+        for c in range(len(self.routes)):
+            if self.routes[c] and self._route_date(c) == day:
+                n += 1
+            if c == col:
+                break
+        return max(n, 1)
 
     def _round_info(self, col: int) -> tuple[int, int]:
         """(מספר הסבב של העמודה, כמה סבבים יש לנהג)."""
@@ -286,6 +373,12 @@ class RouteEditor:
             command=self.toggle_map,
         )
         self.map_btn.pack(side="left", padx=6)
+        self.eff_btn = tk.Button(
+            bottom, text="מצא סידור יעיל", font=F_BTN, padx=12, pady=6,
+            command=self.toggle_efficient,
+        )
+        if self.multi_day and self.compute_efficient is not None:
+            self.eff_btn.pack(side="left", padx=6)
 
         paned = tk.PanedWindow(
             r, orient="horizontal", sashwidth=8, sashrelief="raised", bg="#C9CED6"
@@ -314,12 +407,14 @@ class RouteEditor:
         self._paned = paned
         r.after(80, self._place_sash)
 
+        self.day_bar = tk.Frame(mid, bg=BG_APP, pady=3)
         self.canvas = tk.Canvas(
             mid, bg=BG_APP, highlightthickness=0, yscrollincrement=30
         )
         vbar = tk.Scrollbar(mid, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=vbar.set)
         vbar.pack(side="left", fill="y")
+        self._vbar = vbar
         self.canvas.pack(side="right", fill="both", expand=True)
 
         self.board = tk.Frame(self.canvas, bg=BG_APP)
@@ -350,7 +445,10 @@ class RouteEditor:
             return
         self.canvas.itemconfigure(self.board_win, width=cw)
 
-        per_row = self.base_per_row
+        if self._week_view():
+            per_row = len(self._day_frames)
+        else:
+            per_row = self.base_per_row
         for i in range(max(per_row, self._used_grid_cols)):
             if i < per_row:
                 self.board.grid_columnconfigure(i, weight=1, uniform="card")
@@ -358,10 +456,15 @@ class RouteEditor:
                 self.board.grid_columnconfigure(i, weight=0, uniform="")
         self._used_grid_cols = per_row
 
-        for pos, (_col, frame) in enumerate(self._cards):
-            row, c = divmod(pos, per_row)
-            # מימין לשמאל: הנהג הראשון בפינה הימנית העליונה
-            frame.grid(row=row, column=per_row - 1 - c, sticky="nsew", padx=4, pady=4)
+        if self._week_view():
+            # עמודות ימים מימין לשמאל: היום הראשון בצד ימין
+            for i, df in enumerate(self._day_frames):
+                df.grid(row=0, column=per_row - 1 - i, sticky="nsew")
+        else:
+            for pos, (_col, frame) in enumerate(self._cards):
+                row, c = divmod(pos, per_row)
+                # מימין לשמאל: הנהג הראשון בפינה הימנית העליונה
+                frame.grid(row=row, column=per_row - 1 - c, sticky="nsew", padx=4, pady=4)
 
         # גובה הרשימות כך שכל שורות הכרטיסים שנקבעו ייכנסו במסך
         if self._cards:
@@ -420,23 +523,35 @@ class RouteEditor:
         self._listboxes.clear()
         self._col_frames.clear()
         self._cards = []
+        self._day_frames = []
         if self._col_of_id(self.selected_id) is None:
             self.selected_id = None
 
         list_height = self._list_lines
+        visible = self._visible_cols()
 
-        if self.pool:
-            self._build_column(POOL, self.pool, list_height, None)
-
-        drv_num = 0
-        for col, keys in enumerate(self.routes):
-            if keys:
-                drv_num += 1
-                self._build_column(col, keys, list_height, drv_num)
-            else:
-                self._build_column(col, keys, list_height, 0)
+        if self._week_view():
+            # עמודה לכל יום, והמסלולים של אותו יום אחד מתחת לשני
+            if self.pool:
+                pf = self._new_day_frame("ממתינות לשיבוץ", None)
+                self._build_column(POOL, self.pool, list_height, None, parent=pf)
+            for day in self.days:
+                df = self._new_day_frame(short_date(day), day)
+                for col in visible:
+                    if self.route_day.get(self.route_ids[col]) == day:
+                        num = self._day_number(col) if self.routes[col] else 0
+                        self._build_column(
+                            col, self.routes[col], list_height, num, parent=df
+                        )
+        else:
+            if self.pool:
+                self._build_column(POOL, self.pool, list_height, None)
+            for col in visible:
+                num = self._day_number(col) if self.routes[col] else 0
+                self._build_column(col, self.routes[col], list_height, num)
 
         self._update_info()
+        self._update_day_bar()
         self._layout()
         self._draw_map(fit=self._first_render)
         if self._first_render:
@@ -453,11 +568,124 @@ class RouteEditor:
                 lb.see(idx)
             self._reselect = None
 
+    def _new_day_frame(self, title: str, day: str | None) -> tk.Frame:
+        df = tk.Frame(self.board, bg=BG_APP)
+        self._day_frames.append(df)
+        head = tk.Frame(df, bg="#1F4E78", padx=6, pady=4)
+        head.pack(side="top", fill="x", padx=4, pady=(4, 2))
+        tk.Label(
+            head, text=title, font=F_HEAD, bg="#1F4E78", fg="white", anchor="e"
+        ).pack(side="right")
+        if day is not None or (self.days and title != "ממתינות לשיבוץ"):
+            tk.Button(
+                head, text="הצג יום", font=F_SMALL, padx=4, pady=0,
+                command=lambda d=day: self.show_day(d),
+            ).pack(side="left", padx=2)
+            tk.Button(
+                head, text="+ נהג", font=F_SMALL, padx=4, pady=0,
+                command=lambda d=day: self.add_driver(d),
+            ).pack(side="left", padx=2)
+        return df
+
+    def _update_day_bar(self) -> None:
+        bar = self.day_bar
+        for child in bar.winfo_children():
+            child.destroy()
+        if not self.multi_day:
+            bar.pack_forget()
+            return
+        bar.pack(side="top", fill="x", before=self._vbar)
+        if self.mode == "efficient":
+            text = "סידור יעיל - כל העצירות בלי התחשבות בתאריך (כל מסלול מקבל את התאריך המוקדם שבו)"
+        elif self.day_filter is not None:
+            text = f"מוצג: {short_date(self.day_filter)}"
+        else:
+            text = f"תצוגה שבועית: {len(self.days)} ימים"
+        tk.Label(bar, text=text, font=F_HEAD, bg=BG_APP, anchor="e").pack(side="right", padx=6)
+        if self.mode == "days" and self.day_filter is not None:
+            tk.Button(
+                bar, text="הצג את כל הימים", font=F_BTN, padx=8,
+                command=self.show_all_days,
+            ).pack(side="right", padx=6)
+
+    def show_day(self, day: str | None) -> None:
+        self.day_filter = day
+        self.selected_id = None
+        self.render()
+        self._draw_map(fit=True)
+
+    def show_all_days(self) -> None:
+        self.day_filter = None
+        self.render()
+        self._draw_map(fit=True)
+
+    # ------------------------------------------------------------------
+    # סידור יעיל / סידור לפי תאריך
+    # ------------------------------------------------------------------
+    def _get_state(self) -> dict[str, Any]:
+        return {
+            "routes": copy.deepcopy(self.routes),
+            "route_ids": list(self.route_ids),
+            "route_driver": dict(self.route_driver),
+            "route_day": dict(self.route_day),
+            "pool": list(self.pool),
+        }
+
+    def _set_state(self, st: dict[str, Any]) -> None:
+        self.routes = copy.deepcopy(st["routes"])
+        self.route_ids = list(st["route_ids"])
+        self.route_driver = dict(st["route_driver"])
+        self.route_day = dict(st["route_day"])
+        self.pool = list(st["pool"])
+
+    def _fresh_state(self, routes: list[list[str]], days: list[str | None]) -> dict[str, Any]:
+        ids = list(range(self._next_id, self._next_id + len(routes)))
+        self._next_id += len(routes)
+        return {
+            "routes": [list(r) for r in routes],
+            "route_ids": ids,
+            "route_driver": {},
+            "route_day": {rid: d for rid, d in zip(ids, days)},
+            "pool": [],
+        }
+
+    def toggle_efficient(self) -> None:
+        self._saved_states[self.mode] = self._get_state()
+        if self.mode == "days":
+            if "efficient" not in self._saved_states:
+                if self._efficient_initial is None:
+                    self.root.configure(cursor="watch")
+                    self.root.update()
+                    try:
+                        self._efficient_initial = self.compute_efficient()
+                    finally:
+                        self.root.configure(cursor="")
+                routes = self._efficient_initial
+                self._saved_states["efficient"] = self._fresh_state(
+                    routes, [None] * len(routes)
+                )
+            self.mode = "efficient"
+            self.eff_btn.configure(text="חזור לסידור לפי תאריך")
+        else:
+            self.mode = "days"
+            self.eff_btn.configure(text="מצא סידור יעיל")
+        self._set_state(self._saved_states[self.mode])
+        self.day_filter = None
+        self.selected_id = None
+        self._sim_cache.clear()
+        self.render()
+        self._draw_map(fit=True)
+
     def _register_drop(self, widget: tk.Widget, col: int) -> None:
         self._drop_map[str(widget)] = col
 
     def _build_column(
-        self, col: int, keys: list[str], list_height: int, drv_num: int | None
+        self,
+        col: int,
+        keys: list[str],
+        list_height: int,
+        drv_num: int | None,
+        parent: tk.Frame | None = None,
     ) -> None:
         is_pool = col == POOL
         sim = self._sim_col(col) if (keys and not is_pool) else None
@@ -474,9 +702,12 @@ class RouteEditor:
             bg = BG_OK
 
         frame = tk.Frame(
-            self.board, bg=bg, bd=1, relief="solid", padx=5, pady=4,
+            parent if parent is not None else self.board,
+            bg=bg, bd=1, relief="solid", padx=5, pady=4,
             highlightthickness=3, highlightbackground=bg, highlightcolor=bg,
         )
+        if parent is not None:
+            frame.pack(side="top", fill="x", padx=4, pady=4)
         self._cards.append((col, frame))
         self._register_drop(frame, col)
         self._col_frames[col] = frame
@@ -498,6 +729,8 @@ class RouteEditor:
             if driver and n_rounds > 1:
                 who += f" - סבב {rnd}"
             title = f"נהג {who}  ({self._region_title(keys)})"
+            if self.mode == "efficient" and self.multi_day:
+                title += f"  ·  {short_date(self._route_date(col))}"
             head_bg = self._region_color(keys)
         head = tk.Label(
             frame, text=title, font=F_HEAD, bg=head_bg, anchor="e", padx=4, pady=2,
@@ -619,9 +852,10 @@ class RouteEditor:
         self._register_drop(row, col)
         tk.Label(row, text="נהג:", font=F_SMALL, bg=bg).pack(side="right")
 
+        day = self._route_date(col)
         assigned = {
             self._driver_of(c) for c in range(len(self.routes))
-            if c != col and self._driver_of(c)
+            if c != col and self._driver_of(c) and self._route_date(c) == day
         }
         display_to_name: dict[str, str | None] = {self.NO_DRIVER: None}
         for d in self.drivers:
@@ -865,12 +1099,16 @@ class RouteEditor:
         self.routes[col] = [s["stop_key"] for s in sim["ordered_stops"]]
         self.render()
 
-    def add_driver(self) -> None:
+    def add_driver(self, day: str | None = "__auto__") -> None:
+        if day == "__auto__":
+            day = self.day_filter if self.day_filter is not None else self.days[0]
         self.routes.append([])
         self.route_ids.append(self._next_id)
+        self.route_day[self._next_id] = day if self.mode == "days" else None
         self._next_id += 1
         self.render()
-        self.canvas.yview_moveto(1.0)
+        if not self._week_view():
+            self.canvas.yview_moveto(1.0)
 
     def remove_driver(self, col: int) -> None:
         keys = self.routes[col]
@@ -898,12 +1136,13 @@ class RouteEditor:
         )
         if not ok:
             return
-        self.routes = copy.deepcopy(self.initial)
-        self.route_ids = list(range(len(self.routes)))
-        self._next_id = len(self.routes)
-        self.route_driver = {}
+        if self.mode == "days":
+            self._set_state(self._fresh_state(self.initial, self._initial_days))
+        else:
+            routes = self._efficient_initial or []
+            self._set_state(self._fresh_state(routes, [None] * len(routes)))
         self.selected_id = None
-        self.pool = []
+        self._sim_cache.clear()
         self._first_render = True
         self.render()
 
@@ -929,7 +1168,8 @@ class RouteEditor:
         if self.map_panel is None:
             return
         routes_data = []
-        for col, keys in enumerate(self.routes):
+        for col in self._visible_cols():
+            keys = self.routes[col]
             if not keys:
                 continue
             drv = self.drivers_by_name.get(self._driver_of(col) or "")
@@ -997,7 +1237,7 @@ class RouteEditor:
         view_h = self.canvas.winfo_height()
         if total <= view_h:
             return
-        fy = frame.winfo_y()
+        fy = frame.winfo_rooty() - self.board.winfo_rooty()
         top, bottom = self.canvas.yview()
         if top * total <= fy and fy + frame.winfo_height() <= bottom * total:
             return  # הכרטיס כבר גלוי
@@ -1054,7 +1294,10 @@ class RouteEditor:
                 )
                 if not ok:
                     return
-        self.result = [(list(self.routes[c]), self._driver_of(c)) for c in active_cols]
+        self.result = [
+            (list(self.routes[c]), self._driver_of(c), self._route_date(c))
+            for c in active_cols
+        ]
         self.root.destroy()
 
     def on_cancel(self) -> None:
@@ -1085,15 +1328,18 @@ def run_route_editor(
     cfg: dict[str, Any],
     region_order: list[str],
     drivers: list[dict[str, Any]] | None = None,
-) -> list[tuple[list[str], str | None]] | None:
+    initial_days: list[str | None] | None = None,
+    compute_efficient: Callable[[], list[list[str]]] | None = None,
+) -> list[tuple[list[str], str | None, str | None]] | None:
     """
     פותח את חלון העריכה וממתין עד שהמשתמש יאשר או יבטל.
-    מחזיר רשימת (מסלול, שם נהג או None), או None אם בוטל.
+    מחזיר רשימת (מסלול, שם נהג או None, תאריך המסלול), או None אם בוטל.
     """
     _enable_windows_dpi_awareness()
     root = tk.Tk()
     editor = RouteEditor(
-        root, initial_routes, stops_by_key, simulate, cfg, region_order, drivers
+        root, initial_routes, stops_by_key, simulate, cfg, region_order, drivers,
+        initial_days, compute_efficient,
     )
     root.lift()
     try:

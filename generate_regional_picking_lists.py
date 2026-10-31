@@ -4,10 +4,11 @@
 ==============================================================
 - קורא את הקובץ הממוין (<ListName>_sorted.xlsx) מתיקיית output_files.
 - מפצל את רשימות הליקוט גם לפי נהג (Driver_1, Driver_2...) וגם לפי מחסן העמסה:
-  1. אוברסיז:       <ListName>_Driver_<N>_<Region>.xlsx            -> שורה 1: "העמסות באוברסיז לנהג X"
-  2. מחסן קירור:    <ListName>_Driver_<N>_<Region>_Cooling.xlsx    -> שורה 1: "העמסות במחסן קירור לנהג X"
-  3. מחסן חומ"ס:    <ListName>_Driver_<N>_<Region>_Hazmat.xlsx     -> שורה 1: "העמסות במחסן חומ"ס לנהג X"
-  4. גולד בונד:     <ListName>_Driver_<N>_<Region>_Gold_Bond.xlsx  -> שורה 1: "העמסות בגולד בונד לנהג X"
+  1. אוברסיז:       "רשימת ליקוט עבור <נהג> <תאריך>.xlsx"
+  2. מחסן קירור:    "רשימת ליקוט עבור <נהג> <תאריך> - קירור.xlsx"
+  3. מחסן חומ"ס:    "רשימת ליקוט עבור <נהג> <תאריך> - חומס.xlsx"
+  4. גולד בונד:     "רשימת ליקוט עבור <נהג> <תאריך> - גולד בונד.xlsx"
+  שורה 1 בכל קובץ: "העמסות ב<מחסן> לנהג <נהג> - <תאריך>"
 - כל הטקסט בתוך כל המשבצות מיושר למרכז המשבצת (horizontal="center", vertical="center").
 - כל הקבצים נשמרים בתיקייה: output_files\רשימות ליקוט <ListName>\
 - אם בקובץ ההגדרות מוגדר SEND_PICKING_LIST_TO, נוצר בתיקייה גם הקובץ
@@ -308,12 +309,28 @@ def create_send_mail_launcher(
     return out
 
 
+PICKING_FILE_PREFIX = "רשימת ליקוט עבור "
+
+
+def date_dots(d: Any) -> str:
+    """'02-11-2026' -> '02.11.2026'"""
+    return str(d or "").strip().replace("-", ".").replace("/", ".")
+
+
+def driver_display(name: str) -> str:
+    """נהג בלי שם (מספר בלבד) מוצג כ-'נהג 3'."""
+    return f"נהג {name}" if str(name).isdigit() else str(name)
+
+
 def remove_old_picking_lists(picking_dir: pathlib.Path, list_name: str) -> int:
     """מוחק רשימות ליקוט מהרצה קודמת של אותה רשימה (כדי שלא יישלחו בטעות)."""
     removed = 0
     if not picking_dir.exists():
         return 0
-    for old in picking_dir.glob(f"{list_name}_Driver_*.xlsx"):
+    old_files = list(picking_dir.glob(f"{list_name}_Driver_*.xlsx")) + list(
+        picking_dir.glob(f"{PICKING_FILE_PREFIX}*.xlsx")
+    )
+    for old in old_files:
         try:
             old.unlink()
             removed += 1
@@ -650,6 +667,7 @@ def generate_picking_lists_from_sorted_excel(
 
     idx_region = find_col(["אזור חלוקה", "אזור"], 0)
     idx_driver = find_col(["נהג / משאית", "נהג"], 1)
+    idx_date = find_col(["תאריך אספקה", "תאריך"], -1)
     idx_wh = find_col(["מחסן העמסה למוצר", "מחסן העמסה"], 3)
     idx_order = find_col(["הזמנה"], 12)
     idx_cust_name = find_col(["שם לקוח"], 5)
@@ -662,7 +680,8 @@ def generate_picking_lists_from_sorted_excel(
 
     cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
 
-    drivers_meta: dict[str, tuple[str, str, str]] = {}
+    # מפתח = התווית המלאה של המסלול (ייחודית לכל נהג/סבב/יום)
+    drivers_meta: dict[str, tuple[str, str, str, str, str]] = {}
     grouped_rows: dict[tuple[str, str], list[list[Any]]] = {}
 
     for r in range(2, ws.max_row + 1):
@@ -686,7 +705,15 @@ def generate_picking_lists_from_sorted_excel(
         drv_num, eng_reg_tag, color_hex = extract_driver_number_and_regions(
             drv_val, reg_val
         )
-        drivers_meta.setdefault(drv_num, (drv_val, eng_reg_tag, color_hex))
+        date_val = (
+            str(row_vals[idx_date] or "").strip()
+            if 0 <= idx_date < len(row_vals)
+            else ""
+        )
+        drivers_meta.setdefault(
+            drv_val, (drv_val, eng_reg_tag, color_hex, drv_num, date_val)
+        )
+        drv_key = drv_val
 
         sku_val = (
             clean_sku_token(row_vals[idx_sku])
@@ -739,15 +766,15 @@ def generate_picking_lists_from_sorted_excel(
         ]
 
         if is_main:
-            grouped_rows.setdefault((drv_num, "main"), []).append(picking_row)
+            grouped_rows.setdefault((drv_key, "main"), []).append(picking_row)
         if is_cooling:
-            grouped_rows.setdefault((drv_num, "cooling"), []).append(
+            grouped_rows.setdefault((drv_key, "cooling"), []).append(
                 picking_row
             )
         if is_hazmat:
-            grouped_rows.setdefault((drv_num, "hazmat"), []).append(picking_row)
+            grouped_rows.setdefault((drv_key, "hazmat"), []).append(picking_row)
         if is_goldbond:
-            grouped_rows.setdefault((drv_num, "goldbond"), []).append(
+            grouped_rows.setdefault((drv_key, "goldbond"), []).append(
                 picking_row
             )
 
@@ -756,24 +783,25 @@ def generate_picking_lists_from_sorted_excel(
 
     warehouse_specs = [
         ("main", "", cfg["MAIN_WAREHOUSE_NAME"], None),
-        ("cooling", "_Cooling", cfg["COOLING_WAREHOUSE_NAME"], "D9E1F2"),
-        ("hazmat", "_Hazmat", cfg["HAZMAT_WAREHOUSE_NAME"], "FCE4D6"),
-        ("goldbond", "_Gold_Bond", cfg["GOLDBOND_WAREHOUSE_NAME"], "FFF2CC"),
+        ("cooling", " - קירור", cfg["COOLING_WAREHOUSE_NAME"], "D9E1F2"),
+        ("hazmat", " - חומס", cfg["HAZMAT_WAREHOUSE_NAME"], "FCE4D6"),
+        ("goldbond", " - גולד בונד", cfg["GOLDBOND_WAREHOUSE_NAME"], "FFF2CC"),
     ]
 
     # לפי סדר הנהגים בקובץ הממוין
-    for drv_num in drivers_meta.keys():
-        drv_label, eng_reg, base_tint = drivers_meta[drv_num]
+    for drv_key in drivers_meta.keys():
+        drv_label, _eng_reg, base_tint, drv_num, date_val = drivers_meta[drv_key]
+        who = driver_display(drv_num)
+        when = date_dots(date_val)
         for wh_key, file_suffix, wh_heb_name, special_tint in warehouse_specs:
-            rows = grouped_rows.get((drv_num, wh_key), [])
+            rows = grouped_rows.get((drv_key, wh_key), [])
             if not rows:
                 continue
 
-            out_filename = (
-                f"{list_name}_Driver_{safe_file_part(drv_num)}_{eng_reg}{file_suffix}.xlsx"
-            )
+            base_name = f"{PICKING_FILE_PREFIX}{who}" + (f" {when}" if when else "")
+            out_filename = re.sub(r'[\\/:*?"<>|]+', " ", f"{base_name}{file_suffix}") + ".xlsx"
             out_file = picking_dir / out_filename
-            sheet_title = re.sub(r"[\[\]:*?/\\]", " ", f"נהג {drv_num} - {wh_heb_name}")
+            sheet_title = re.sub(r"[\[\]:*?/\\]", " ", f"{who} - {wh_heb_name}")
             tint_to_use = special_tint if special_tint else base_tint
 
             create_single_picking_excel(
@@ -781,7 +809,7 @@ def generate_picking_lists_from_sorted_excel(
                 output_file=out_file,
                 sheet_title=sheet_title,
                 warehouse_hebrew_name=wh_heb_name,
-                driver_num=drv_num,
+                driver_num=f"{drv_num} - {when}" if when else drv_num,
                 tint_hex=tint_to_use,
             )
 

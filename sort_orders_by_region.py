@@ -1887,6 +1887,78 @@ def build_region_title(stops: list[dict[str, Any]]) -> str:
     return " + ".join(ordered)
 
 
+def date_sort_key(d: str | None) -> tuple:
+    """מפתח מיון לתאריך DD-MM-YYYY (תאריכים לא תקינים בסוף)."""
+    m = re.match(r"^\s*(\d{1,2})[-./](\d{1,2})[-./](\d{2,4})", str(d or ""))
+    if m:
+        y = int(m.group(3))
+        y = y + 2000 if y < 100 else y
+        return (0, y, int(m.group(2)), int(m.group(1)), "")
+    return (1, 0, 0, 0, str(d or ""))
+
+
+def plan_trucks(
+    stops: list[dict[str, Any]], travel_matrix: list[list[float]], cfg: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """תכנון אוטומטי של מסלולים לקבוצת עצירות: חלוקה לאזורים, פיצול למשאיות ואיחוד צפון+שרון."""
+    trucks_by_region: dict[str, list[dict[str, Any]]] = {}
+    for reg in REGION_ORDER:
+        reg_stops = [
+            st for st in stops if st["region"] == reg
+        ]
+        if reg_stops:
+            trucks_by_region[reg] = split_region_into_trucks(
+                reg_stops, travel_matrix, cfg
+            )
+        else:
+            trucks_by_region[reg] = []
+
+    if cfg.get("ENABLE_NORTH_SHARON_MERGE", True) and trucks_by_region.get(
+        "אזור השרון"
+    ):
+        best_merge: tuple[str, int, int, float, dict[str, Any]] | None = None
+        for north_reg in ("צפון מזרח", "צפון מערב"):
+            for n_idx, n_truck in enumerate(trucks_by_region.get(north_reg, [])):
+                for s_idx, s_truck in enumerate(trucks_by_region["אזור השרון"]):
+                    combined_stops = (
+                        n_truck["ordered_stops"] + s_truck["ordered_stops"]
+                    )
+                    merged_sim = simulate_driver_shift(
+                        combined_stops,
+                        travel_matrix,
+                        cfg,
+                        preserve_region_sequence=True,
+                    )
+                    if merged_sim["is_feasible"]:
+                        saved_min = (
+                            n_truck["total_shift_min"]
+                            + s_truck["total_shift_min"]
+                        ) - merged_sim["total_shift_min"]
+                        if best_merge is None or saved_min > best_merge[3]:
+                            best_merge = (
+                                north_reg,
+                                n_idx,
+                                s_idx,
+                                saved_min,
+                                merged_sim,
+                            )
+
+        if best_merge is not None:
+            north_reg, n_idx, s_idx, _saved, merged_sim = best_merge
+            merged_sim["merged_regions_label"] = f"{north_reg} + אזור השרון"
+            merged_sim["split_note"] = "אוחד נהג (צפון + השרון)"
+            trucks_by_region[north_reg][n_idx] = merged_sim
+            del trucks_by_region["אזור השרון"][s_idx]
+
+    planned_trucks: list[dict[str, Any]] = []
+    for reg in REGION_ORDER:
+        for t in trucks_by_region.get(reg, []):
+            t["region_title"] = t.get("merged_regions_label", reg)
+            planned_trucks.append(t)
+    return planned_trucks
+
+
+
 def apply_manual_route_edits(
     planned_trucks: list[dict[str, Any]],
     stops_by_key: dict[str, dict[str, Any]],
@@ -1919,6 +1991,14 @@ def apply_manual_route_edits(
     initial_routes = [
         [s["stop_key"] for s in t["ordered_stops"]] for t in planned_trucks
     ]
+    initial_days = [t.get("route_date", "") for t in planned_trucks]
+
+    def compute_efficient() -> list[list[str]]:
+        """סידור יעיל של כל העצירות בלי התחשבות בתאריך (כמו דוח יומי אחד גדול)."""
+        print("[*] מחשב סידור יעיל לכל העצירות (ללא התחשבות בתאריך)...")
+        trucks = plan_trucks(list(stops_by_key.values()), matrix, cfg)
+        return [[s["stop_key"] for s in t["ordered_stops"]] for t in trucks]
+
     print("\n[*] נפתח חלון עריכת המסלולים - ממתין לאישור המשתמש...")
     edited = run_route_editor(
         initial_routes=initial_routes,
@@ -1927,26 +2007,33 @@ def apply_manual_route_edits(
         cfg=cfg,
         region_order=REGION_ORDER,
         drivers=drivers,
+        initial_days=initial_days,
+        compute_efficient=compute_efficient,
     )
     if edited is None:
         raise RouteEditCancelled()
 
-    edited = [(keys, drv) for keys, drv in edited if keys]
-    edited_keys = [k for keys, _drv in edited for k in keys]
+    # לפי תאריך, ובתוך כל יום לפי סדר הכרטיסים בחלון
+    edited = sorted(
+        [(keys, drv, day or "") for keys, drv, day in edited if keys],
+        key=lambda e: date_sort_key(e[2]),
+    )
+    edited_keys = [k for keys, _drv, _day in edited for k in keys]
     if sorted(edited_keys) != sorted(stops_by_key.keys()):
         raise ValueError("שגיאה: לא כל העצירות שובצו לנהגים בחלון העריכה.")
 
     # נהג עם כמה מסלולים => סבבים ברצף לפי סדר הכרטיסים בחלון
-    rounds_of: dict[str, list[int]] = {}
-    for pos, (_keys, drv_name) in enumerate(edited):
+    # נהג עם כמה מסלולים באותו יום => סבבים ברצף
+    rounds_of: dict[tuple[str, str], list[int]] = {}
+    for pos, (_keys, drv_name, day) in enumerate(edited):
         if drv_name:
-            rounds_of.setdefault(drv_name, []).append(pos)
+            rounds_of.setdefault((drv_name, day), []).append(pos)
 
     sims_by_pos: dict[int, dict[str, Any]] = {}
-    for pos, (keys, drv_name) in enumerate(edited):
+    for pos, (keys, drv_name, _day) in enumerate(edited):
         if not drv_name:
             sims_by_pos[pos] = simulate_rounds([keys], [True], None)[0]
-    for drv_name, positions in rounds_of.items():
+    for (drv_name, _day), positions in rounds_of.items():
         sims = simulate_rounds(
             [edited[p][0] for p in positions], [True] * len(positions), drv_name
         )
@@ -1955,10 +2042,11 @@ def apply_manual_route_edits(
             sims_by_pos[p] = sim
 
     result: list[dict[str, Any]] = []
-    for pos, (keys, drv_name) in enumerate(edited):
+    for pos, (keys, drv_name, day) in enumerate(edited):
         sim = sims_by_pos[pos]
         sim["region_title"] = build_region_title([stops_by_key[k] for k in keys])
         sim["driver_name"] = drv_name
+        sim["route_date"] = day
         result.append(sim)
     print(f"[V] המסלולים אושרו ({len(result)} נהגים).")
     return result
@@ -2070,7 +2158,13 @@ def sort_orders_excel(
                 qty_val = 0.0
 
         cust_name = str(row_vals[idx_cust_name] or "").strip()
-        stop_key = f"{region}||{effective_dest}||{cust_name}||{lat:.5f},{lon:.5f}"
+        rec_date = (
+            str(row_vals[idx_date] or "").strip() if 0 <= idx_date < len(row_vals) else ""
+        )
+        # התאריך הוא חלק ממפתח העצירה: אותו לקוח בשני ימים = שתי עצירות נפרדות
+        stop_key = (
+            f"{rec_date}||{region}||{effective_dest}||{cust_name}||{lat:.5f},{lon:.5f}"
+        )
 
         records.append(
             {
@@ -2079,6 +2173,7 @@ def sort_orders_excel(
                 "effective_dest": effective_dest,
                 "address": str(addr_val or "").strip(),
                 "cust_name": cust_name,
+                "date": rec_date,
                 "order_no": str(row_vals[idx_order] or "").strip(),
                 "line_no": int(row_vals[idx_line] or 0)
                 if row_vals[idx_line] is not None
@@ -2116,6 +2211,7 @@ def sort_orders_excel(
                 "effective_dest": rec["effective_dest"],
                 "address": rec["address"],
                 "cust_name": rec["cust_name"],
+                "date": rec["date"],
                 "coords": (rec["lat"], rec["lon"]),
                 "matrix_idx": m_idx,
                 "weight": 0.0,
@@ -2139,59 +2235,15 @@ def sort_orders_excel(
 
     travel_matrix = build_travel_minutes_matrix(fixed_points, cfg)
 
-    trucks_by_region: dict[str, list[dict[str, Any]]] = {}
-    for reg in REGION_ORDER:
-        reg_stops = [
-            st for st in unique_stops_by_key.values() if st["region"] == reg
-        ]
-        if reg_stops:
-            trucks_by_region[reg] = split_region_into_trucks(
-                reg_stops, travel_matrix, cfg
-            )
-        else:
-            trucks_by_region[reg] = []
-
-    if cfg.get("ENABLE_NORTH_SHARON_MERGE", True) and trucks_by_region.get(
-        "אזור השרון"
-    ):
-        best_merge: tuple[str, int, int, float, dict[str, Any]] | None = None
-        for north_reg in ("צפון מזרח", "צפון מערב"):
-            for n_idx, n_truck in enumerate(trucks_by_region.get(north_reg, [])):
-                for s_idx, s_truck in enumerate(trucks_by_region["אזור השרון"]):
-                    combined_stops = (
-                        n_truck["ordered_stops"] + s_truck["ordered_stops"]
-                    )
-                    merged_sim = simulate_driver_shift(
-                        combined_stops,
-                        travel_matrix,
-                        cfg,
-                        preserve_region_sequence=True,
-                    )
-                    if merged_sim["is_feasible"]:
-                        saved_min = (
-                            n_truck["total_shift_min"]
-                            + s_truck["total_shift_min"]
-                        ) - merged_sim["total_shift_min"]
-                        if best_merge is None or saved_min > best_merge[3]:
-                            best_merge = (
-                                north_reg,
-                                n_idx,
-                                s_idx,
-                                saved_min,
-                                merged_sim,
-                            )
-
-        if best_merge is not None:
-            north_reg, n_idx, s_idx, _saved, merged_sim = best_merge
-            merged_sim["merged_regions_label"] = f"{north_reg} + אזור השרון"
-            merged_sim["split_note"] = "אוחד נהג (צפון + השרון)"
-            trucks_by_region[north_reg][n_idx] = merged_sim
-            del trucks_by_region["אזור השרון"][s_idx]
-
+    # תכנון אוטומטי בנפרד לכל יום (בדוח יומי יש יום אחד בלבד)
+    all_stops = list(unique_stops_by_key.values())
+    days = sorted({st["date"] for st in all_stops}, key=date_sort_key)
+    if len(days) > 1:
+        print(f"\n[*] דוח שבועי: {len(days)} ימים - " + ", ".join(d or "ללא תאריך" for d in days))
     planned_trucks: list[dict[str, Any]] = []
-    for reg in REGION_ORDER:
-        for t in trucks_by_region.get(reg, []):
-            t["region_title"] = t.get("merged_regions_label", reg)
+    for day in days:
+        for t in plan_trucks([st for st in all_stops if st["date"] == day], travel_matrix, cfg):
+            t["route_date"] = day
             planned_trucks.append(t)
 
     # עריכה ידנית של המסלולים בחלון (גרירת עצירות בין נהגים / שינוי סדר)
@@ -2203,15 +2255,22 @@ def sort_orders_excel(
     final_drivers: list[dict[str, Any]] = []
     stop_assignment: dict[str, dict[str, Any]] = {}
 
+    multi_day = len({t.get("route_date", "") for t in planned_trucks}) > 1
+    num_in_day: dict[str, int] = {}
     for driver_counter, t in enumerate(planned_trucks, start=1):
         reg_title = t["region_title"]
+        route_date = t.get("route_date", "")
+        num_in_day[route_date] = num_in_day.get(route_date, 0) + 1
         # "נהג <שם הנהג> (אזור)" אם נבחר נהג, אחרת "נהג <מספר> (אזור)"
         who = (
             f"{t['driver_name']}{t.get('round_label', '')}"
             if t.get("driver_name")
-            else str(driver_counter)
+            else str(num_in_day[route_date])
         )
         driver_label = f"נהג {who} ({reg_title})"
+        if multi_day and route_date:
+            # בדוח שבועי התאריך הוא חלק מהשם, כדי שכל מסלול יהיה ייחודי
+            driver_label += f" {route_date.replace('-', '.')}"
         t["driver_id"] = driver_counter
         t["driver_label"] = driver_label
         final_drivers.append(t)
@@ -2223,6 +2282,7 @@ def sort_orders_excel(
                 "route_stop_num": sched["route_stop_num"],
                 "arrival_str": sched["arrival_str"],
                 "departure_str": sched["departure_str"],
+                "route_date": route_date,
             }
 
     for rec in records:
@@ -2232,6 +2292,9 @@ def sort_orders_excel(
         rec["route_stop_num"] = assign["route_stop_num"]
         rec["arrival_str"] = assign["arrival_str"]
         rec["departure_str"] = assign["departure_str"]
+        # הזמנה שהועברה ליום אחר מקבלת את תאריך המסלול
+        if assign["route_date"] and 0 <= idx_date < len(rec["raw_values"]):
+            rec["raw_values"][idx_date] = assign["route_date"]
 
     records.sort(
         key=lambda item: (

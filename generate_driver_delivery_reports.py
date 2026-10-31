@@ -741,6 +741,7 @@ def generate_driver_reports_from_sorted_excel(
         return default_idx
 
     idx_driver = find_col(["נהג / משאית", "נהג"], 1)
+    idx_route_date = find_col(["תאריך אספקה", "תאריך"], -1)
     idx_stop = find_col(["תחנה במסלול", "תחנה"], 2)
     idx_wh = find_col(["מחסן העמסה למוצר", "מחסן העמסה"], 3)
     idx_cust_name = find_col(["שם לקוח"], 5)
@@ -759,7 +760,9 @@ def generate_driver_reports_from_sorted_excel(
 
     cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
 
+    # מפתח = התווית המלאה של המסלול (ייחודית לכל נהג/סבב/יום)
     drivers_map: dict[str, tuple[str, list[dict[str, Any]]]] = {}
+    route_meta: dict[str, tuple[str, str]] = {}  # תווית -> (שם נהג, תאריך)
 
     for r in range(2, ws.max_row + 1):
         row_vals = [ws.cell(r, c).value for c in range(1, ws.max_column + 1)]
@@ -776,6 +779,12 @@ def generate_driver_reports_from_sorted_excel(
             else "נהג 1"
         )
         driver_num = extract_driver_number(driver_label)
+        route_date_val = (
+            str(row_vals[idx_route_date] or "").strip()
+            if 0 <= idx_route_date < len(row_vals)
+            else ""
+        )
+        route_meta.setdefault(driver_label, (driver_num, route_date_val))
 
         try:
             stop_num = int(row_vals[idx_stop] or 1)
@@ -868,20 +877,23 @@ def generate_driver_reports_from_sorted_excel(
             "combined_notes": combined_notes,
         }
 
-        if driver_num not in drivers_map:
-            drivers_map[driver_num] = (driver_label, [])
-        drivers_map[driver_num][1].append(rec_dict)
+        if driver_label not in drivers_map:
+            drivers_map[driver_label] = (driver_label, [])
+        drivers_map[driver_label][1].append(rec_dict)
 
     reports_dir.mkdir(parents=True, exist_ok=True)
     created_files: list[pathlib.Path] = []
 
     # לפי סדר הנהגים בקובץ הממוין
-    for drv_num in drivers_map.keys():
-        drv_label, drv_rows = drivers_map[drv_num]
+    for drv_key in drivers_map.keys():
+        drv_label, drv_rows = drivers_map[drv_key]
+        drv_num, route_date_val = route_meta[drv_key]
+        when = route_date_val.replace("-", ".").replace("/", ".")
         drv_rows.sort(key=lambda x: (x["stop_num"], x["order_no"]))
-        out_file = reports_dir / f"הובלות ע״י נהג {safe_file_part(drv_num)}.xlsx"
+        file_who = safe_file_part(drv_num) + (f" {when}" if when else "")
+        out_file = reports_dir / f"הובלות ע״י נהג {file_who}.xlsx"
         create_single_driver_report(
-            driver_num=drv_num,
+            driver_num=f"{drv_num} - {when}" if when else drv_num,
             driver_label=drv_label,
             driver_rows=drv_rows,
             output_file=out_file,
