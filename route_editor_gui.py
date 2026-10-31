@@ -226,19 +226,23 @@ class RouteEditor:
             return None
         if self.mode == "days":
             return self.route_day.get(self.route_ids[col])
+        # סידור יעיל: התאריך המוקדם מבין ההזמנות במסלול (מסלול ריק - היום שבו נוצר)
         dates = [self.stops[k].get("date") for k in self.routes[col]]
-        return min(dates, key=date_sort_key) if dates else None
+        if dates:
+            return min(dates, key=date_sort_key)
+        return self.route_day.get(self.route_ids[col])
 
     def _visible_cols(self) -> list[int]:
-        if self.mode == "days" and self.day_filter is not None:
+        if self.multi_day and self.day_filter is not None:
             return [
                 c for c in range(len(self.routes))
-                if self.route_day.get(self.route_ids[c]) == self.day_filter
+                if self._route_date(c) == self.day_filter
             ]
         return list(range(len(self.routes)))
 
     def _week_view(self) -> bool:
-        return self.mode == "days" and self.multi_day and self.day_filter is None
+        # גם בסידור היעיל המסלולים מוצגים בעמודות לפי תאריך המסלול
+        return self.multi_day and self.day_filter is None
 
     def _day_number(self, col: int) -> int:
         """מספר הנהג בתוך אותו יום (לנהגים בלי שם)."""
@@ -538,7 +542,7 @@ class RouteEditor:
             for day in self.days:
                 df = self._new_day_frame(short_date(day), day)
                 for col in visible:
-                    if self.route_day.get(self.route_ids[col]) == day:
+                    if self._route_date(col) == day:
                         num = self._day_number(col) if self.routes[col] else 0
                         self._build_column(
                             col, self.routes[col], list_height, num, parent=df
@@ -595,14 +599,17 @@ class RouteEditor:
             bar.pack_forget()
             return
         bar.pack(side="top", fill="x", before=self._vbar)
-        if self.mode == "efficient":
-            text = "סידור יעיל - כל העצירות בלי התחשבות בתאריך (כל מסלול מקבל את התאריך המוקדם שבו)"
-        elif self.day_filter is not None:
-            text = f"מוצג: {short_date(self.day_filter)}"
+        prefix = (
+            "סידור יעיל (כל מסלול בתאריך ההזמנה המוקדמת שבו) | "
+            if self.mode == "efficient"
+            else ""
+        )
+        if self.day_filter is not None:
+            text = prefix + f"מוצג: {short_date(self.day_filter)}"
         else:
-            text = f"תצוגה שבועית: {len(self.days)} ימים"
+            text = prefix + f"תצוגה שבועית: {len(self.days)} ימים"
         tk.Label(bar, text=text, font=F_HEAD, bg=BG_APP, anchor="e").pack(side="right", padx=6)
-        if self.mode == "days" and self.day_filter is not None:
+        if self.day_filter is not None:
             tk.Button(
                 bar, text="הצג את כל הימים", font=F_BTN, padx=8,
                 command=self.show_all_days,
@@ -729,8 +736,6 @@ class RouteEditor:
             if driver and n_rounds > 1:
                 who += f" - סבב {rnd}"
             title = f"נהג {who}  ({self._region_title(keys)})"
-            if self.mode == "efficient" and self.multi_day:
-                title += f"  ·  {short_date(self._route_date(col))}"
             head_bg = self._region_color(keys)
         head = tk.Label(
             frame, text=title, font=F_HEAD, bg=head_bg, anchor="e", padx=4, pady=2,
@@ -1104,7 +1109,7 @@ class RouteEditor:
             day = self.day_filter if self.day_filter is not None else self.days[0]
         self.routes.append([])
         self.route_ids.append(self._next_id)
-        self.route_day[self._next_id] = day if self.mode == "days" else None
+        self.route_day[self._next_id] = day
         self._next_id += 1
         self.render()
         if not self._week_view():
