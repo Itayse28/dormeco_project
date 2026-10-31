@@ -11,9 +11,10 @@
   שורה 1 בכל קובץ: "העמסות ב<מחסן> לנהג <נהג> - <תאריך>"
 - כל הטקסט בתוך כל המשבצות מיושר למרכז המשבצת (horizontal="center", vertical="center").
 - כל הקבצים נשמרים בתיקייה: output_files\רשימות ליקוט <ListName>\
-- אם בקובץ ההגדרות מוגדר SEND_PICKING_LIST_TO, נוצר בתיקייה גם הקובץ
+- הרשימות מסודרות בתתי-תיקיות לפי תאריך: "רשימות ליקוט 2.11" וכו'.
+- אם בקובץ ההגדרות מוגדר SEND_PICKING_LIST_TO, נוצר בכל תת-תיקייה הקובץ
   "שליחת רשימות ליקוט במייל.bat" - לחיצה כפולה עליו שולחת את כל רשימות
-  הליקוט שבתיקייה דרך Outlook לכתובת שהוגדרה.
+  הליקוט של אותה תת-תיקייה דרך Outlook, בנושא "דוחות העמסה".
 - לפני יצירת הרשימות נמחקות רשימות ישנות של אותה רשימה מהרצה קודמת,
   כדי שלא יישלחו במייל בטעות.
 """
@@ -201,6 +202,7 @@ def load_picking_config(
 # שליחת רשימות הליקוט במייל (Outlook) בלחיצה כפולה
 # ==============================================================================
 MAIL_LAUNCHER_NAME = "שליחת רשימות ליקוט במייל.bat"
+MAIL_SUBJECT = "דוחות העמסה"
 MAIL_ATTACH_EXTENSIONS = (".xlsx", ".xls", ".pdf")
 
 _MAIL_BAT_HEADER = r"""@echo off
@@ -293,14 +295,14 @@ def _ps_quote(value: str) -> str:
 
 
 def create_send_mail_launcher(
-    picking_dir: pathlib.Path, list_name: str, recipients: list[str]
+    picking_dir: pathlib.Path, recipients: list[str]
 ) -> pathlib.Path | None:
-    """יוצר בתיקיית הליקוט קובץ bat ששולח את כל הרשימות במייל אחד לכל הנמענים."""
+    """יוצר בתיקייה קובץ bat ששולח את כל רשימות הליקוט שבה במייל אחד לכל הנמענים."""
     if not recipients:
         return None
     ps_body = (
         _MAIL_PS_BODY.replace("__TO__", _ps_quote("; ".join(recipients)))
-        .replace("__SUBJECT__", _ps_quote(f"רשימות ליקוט - {list_name}"))
+        .replace("__SUBJECT__", _ps_quote(MAIL_SUBJECT))
         .replace("__EXTS__", ",".join(_ps_quote(e) for e in MAIL_ATTACH_EXTENSIONS))
     )
     content = (_MAIL_BAT_HEADER + ps_body).replace("\r\n", "\n").replace("\n", "\r\n")
@@ -322,13 +324,24 @@ def driver_display(name: str) -> str:
     return f"נהג {name}" if str(name).isdigit() else str(name)
 
 
+def date_folder_suffix(d: Any) -> str:
+    """'02-11-2026' -> '2.11' (שם תת-התיקייה של אותו יום)."""
+    m = re.match(r"^\s*(\d{1,2})[-./](\d{1,2})", str(d or ""))
+    return f"{int(m.group(1))}.{int(m.group(2))}" if m else "ללא תאריך"
+
+
 def remove_old_picking_lists(picking_dir: pathlib.Path, list_name: str) -> int:
-    """מוחק רשימות ליקוט מהרצה קודמת של אותה רשימה (כדי שלא יישלחו בטעות)."""
+    """
+    מוחק רשימות ליקוט וקובצי שליחה מהרצה קודמת (גם בתתי-התיקיות של התאריכים),
+    כדי שלא יישלחו בטעות.
+    """
     removed = 0
     if not picking_dir.exists():
         return 0
-    old_files = list(picking_dir.glob(f"{list_name}_Driver_*.xlsx")) + list(
-        picking_dir.glob(f"{PICKING_FILE_PREFIX}*.xlsx")
+    old_files = (
+        list(picking_dir.rglob(f"{list_name}_Driver_*.xlsx"))
+        + list(picking_dir.rglob(f"{PICKING_FILE_PREFIX}*.xlsx"))
+        + list(picking_dir.rglob(MAIL_LAUNCHER_NAME))
     )
     for old in old_files:
         try:
@@ -336,6 +349,9 @@ def remove_old_picking_lists(picking_dir: pathlib.Path, list_name: str) -> int:
             removed += 1
         except OSError as exc:
             print(f"[!] לא ניתן למחוק קובץ ישן (אולי פתוח באקסל): {old.name} ({exc})")
+    for sub in picking_dir.iterdir():
+        if sub.is_dir() and not any(sub.iterdir()):
+            sub.rmdir()  # תת-תיקיית תאריך שהתרוקנה
     return removed
 
 
@@ -800,7 +816,9 @@ def generate_picking_lists_from_sorted_excel(
 
             base_name = f"{PICKING_FILE_PREFIX}{who}" + (f" {when}" if when else "")
             out_filename = re.sub(r'[\\/:*?"<>|]+', " ", f"{base_name}{file_suffix}") + ".xlsx"
-            out_file = picking_dir / out_filename
+            day_dir = picking_dir / f"רשימות ליקוט {date_folder_suffix(date_val)}"
+            day_dir.mkdir(parents=True, exist_ok=True)
+            out_file = day_dir / out_filename
             sheet_title = re.sub(r"[\[\]:*?/\\]", " ", f"{who} - {wh_heb_name}")
             tint_to_use = special_tint if special_tint else base_tint
 
@@ -969,12 +987,17 @@ def main() -> None:
             f"  - {label}: {f_path.name} ({count} שורות, {weight:,.0f} ק\"ג)"
         )
 
-    mail_launcher = create_send_mail_launcher(
-        picking_dir, list_name, cfg.get("SEND_PICKING_LIST_TO", [])
-    )
-    if mail_launcher:
-        print(f"\n[V] נוצר קובץ שליחה במייל: {mail_launcher.name}")
-        print("    לחיצה כפולה עליו תשלח את כל רשימות הליקוט אל:")
+    # קובץ שליחה במייל בכל תת-תיקיית תאריך
+    day_dirs = sorted({path.parent for _lbl, path, _n, _w in created})
+    launchers = [
+        create_send_mail_launcher(d, cfg.get("SEND_PICKING_LIST_TO", []))
+        for d in day_dirs
+    ]
+    if any(launchers):
+        print(f"\n[V] נוצר קובץ שליחה במייל ({MAIL_LAUNCHER_NAME}) בכל תיקיית תאריך:")
+        for d in day_dirs:
+            print(f"      - {d.name}")
+        print(f'    נושא המייל: "{MAIL_SUBJECT}". הנמענים:')
         for addr in cfg["SEND_PICKING_LIST_TO"]:
             print(f"      - {addr}")
     else:

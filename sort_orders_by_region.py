@@ -2520,12 +2520,21 @@ def sort_orders_excel(
         cell.border = header_border
     ws_sum.row_dimensions[1].height = 30
 
+    # צבע שורה לפי תאריך המסלול (כל יום בצבע משלו)
+    date_palette = [
+        "DDEBF7", "E2EFDA", "FFF2CC", "FCE4D6", "EDE2F6", "D9F2F2", "F2F2F2",
+    ]
+    route_dates = sorted(
+        {drv.get("route_date", "") for drv in final_drivers}, key=date_sort_key
+    )
+    date_color = {
+        d: date_palette[i % len(date_palette)] for i, d in enumerate(route_dates)
+    }
+
     for d_idx, drv in enumerate(final_drivers, start=2):
-        primary_reg = drv["ordered_stops"][0]["region"]
+        row_color = date_color.get(drv.get("route_date", ""), "FFFFFF")
         r_fill = PatternFill(
-            start_color=region_Palette.get(primary_reg, "FFFFFF"),
-            end_color=region_Palette.get(primary_reg, "FFFFFF"),
-            fill_type="solid",
+            start_color=row_color, end_color=row_color, fill_type="solid"
         )
         weight_formula = (
             f"=SUMIF('הזמנות ממוינות לפי אזור'!$B$2:$B${last_data_row}, "

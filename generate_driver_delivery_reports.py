@@ -891,7 +891,16 @@ def generate_driver_reports_from_sorted_excel(
         when = route_date_val.replace("-", ".").replace("/", ".")
         drv_rows.sort(key=lambda x: (x["stop_num"], x["order_no"]))
         file_who = safe_file_part(drv_num) + (f" {when}" if when else "")
-        out_file = reports_dir / f"הובלות ע״י נהג {file_who}.xlsx"
+        # תת-תיקייה לכל תאריך: "דוחות הובלה 2.11"
+        m_day = re.match(r"^\s*(\d{1,2})[-./](\d{1,2})", route_date_val)
+        day_folder = (
+            f"דוחות הובלה {int(m_day.group(1))}.{int(m_day.group(2))}"
+            if m_day
+            else "דוחות הובלה ללא תאריך"
+        )
+        day_dir = reports_dir / day_folder
+        day_dir.mkdir(parents=True, exist_ok=True)
+        out_file = day_dir / f"הובלות ע״י נהג {file_who}.xlsx"
         create_single_driver_report(
             driver_num=f"{drv_num} - {when}" if when else drv_num,
             driver_label=drv_label,
@@ -1029,11 +1038,14 @@ def main() -> None:
     reports_dir = out_dir / f"דוחות הובלה {list_name}"
     # מחיקת דוחות ישנים מהרצה קודמת (שמות/מספר הנהגים יכולים להשתנות בין הרצות)
     if reports_dir.exists():
-        for old in reports_dir.glob("הובלות ע״י נהג *.xlsx"):
+        for old in reports_dir.rglob("הובלות ע״י נהג *.xlsx"):
             try:
                 old.unlink()
             except OSError as exc:
                 print(f"[!] לא ניתן למחוק דוח ישן (אולי פתוח באקסל): {old.name} ({exc})")
+        for sub in reports_dir.iterdir():
+            if sub.is_dir() and not any(sub.iterdir()):
+                sub.rmdir()  # תת-תיקיית תאריך שהתרוקנה
 
     print("=" * 75)
     print(f"[*] קובץ ממוין שנקרא:  {sorted_excel_path}")
