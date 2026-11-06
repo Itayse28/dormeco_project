@@ -14,7 +14,7 @@
 - הרשימות מסודרות בתתי-תיקיות לפי תאריך: "רשימות ליקוט 2.11" וכו'.
 - בכל תת-תיקייה נוצר הקובץ "שליחת רשימות ליקוט במייל.bat" - לחיצה כפולה
   עליו שולחת כל רשימת ליקוט של אותה תת-תיקייה במייל נפרד (דרך Outlook,
-  בנושא "דוחות העמסה") לנמענים של המחסן שלה:
+  בנושא "דוח ליקוט עבור נהג X <תאריך>") לנמענים של המחסן שלה:
   SEND_PICKING_LIST_TO_OVERSEAS / _COOLING / _DANGEROUS / _GOLDBOND_GILI
 - לפני יצירת הרשימות נמחקות רשימות ישנות של אותה רשימה מהרצה קודמת,
   כדי שלא יישלחו במייל בטעות.
@@ -27,6 +27,8 @@ import io
 import pathlib
 import re
 from urllib.parse import quote
+
+import mail_sender
 import subprocess
 import sys
 import zipfile
@@ -288,80 +290,9 @@ def load_picking_config(
 # שליחת רשימות הליקוט במייל (Outlook) בלחיצה כפולה
 # ==============================================================================
 MAIL_LAUNCHER_NAME = "שליחת רשימות ליקוט במייל.bat"
-MAIL_SUBJECT = "דוחות העמסה"
+MAIL_SUBJECT_PREFIX = "דוח ליקוט עבור "  # + "נהג <שם> <תאריך>"
 MAIL_ATTACH_EXTENSIONS = (".xlsx", ".xls", ".pdf")
 
-_MAIL_BAT_HEADER = r"""@echo off
-chcp 65001 > nul
-title שליחת רשימות ליקוט במייל
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$f='%~f0'; $s=[IO.File]::ReadAllText($f,[Text.Encoding]::UTF8); $i=$s.LastIndexOf('#PS-START'); Invoke-Expression $s.Substring($i)"
-echo.
-pause
-exit /b
-"""
-
-_MAIL_PS_BODY = r"""#PS-START
-[Console]::OutputEncoding = [Text.Encoding]::UTF8
-function Send-PickingLists {
-    $subject = __SUBJECT__
-    $exts = @(__EXTS__)
-    # נמענים לפי מחסן: לפי סיומת שם הקובץ. קובץ בלי סיומת מחסן = אוברסיז
-    $rules = @(__RULES__)
-    $defaultTo = __DEFAULT_TO__
-    $folder = Split-Path -Parent $f
-    $files = @(Get-ChildItem -LiteralPath $folder -File |
-        Where-Object { $exts -contains $_.Extension.ToLower() } |
-        Sort-Object Name)
-
-    if ($files.Count -eq 0) {
-        Write-Host '[X] No picking list files were found in this folder.'
-        return
-    }
-
-    try {
-        $outlook = New-Object -ComObject Outlook.Application
-    } catch {
-        Write-Host '[X] Could not open Outlook.'
-        Write-Host '    Classic (desktop) Outlook must be installed and signed in.'
-        Write-Host '    The "new Outlook" app does not support automatic sending.'
-        return
-    }
-
-    $sent = 0
-    foreach ($file in $files) {
-        $base = [IO.Path]::GetFileNameWithoutExtension($file.Name)
-        $to = $defaultTo
-        $whName = 'Overseas'
-        foreach ($rule in $rules) {
-            if ($base.EndsWith($rule.Suffix)) { $to = $rule.To; $whName = $rule.Name; break }
-        }
-        if ([string]::IsNullOrWhiteSpace($to)) {
-            Write-Host ('[!] Skipped (no recipients defined for ' + $whName + '): ' + $file.Name)
-            continue
-        }
-        try {
-            $mail = $outlook.CreateItem(0)
-            $mail.To = $to
-            $mail.Subject = $subject
-            $mail.HTMLBody = '<div dir="rtl" style="font-family:Arial;font-size:11pt">' +
-                'שלום,<br><br>מצורפת רשימת ליקוט:<br><b>' +
-                [System.Net.WebUtility]::HtmlEncode($base) + '</b><br><br>' +
-                'נשלח אוטומטית ממערכת מיון ההזמנות.</div>'
-            [void]$mail.Attachments.Add($file.FullName)
-            $mail.Send()
-            $sent++
-            Write-Host ('[V] Sent (' + $whName + ') to ' + $to + ' : ' + $file.Name)
-        } catch {
-            Write-Host ('[X] Sending failed for ' + $file.Name + ': ' + $_.Exception.Message)
-        }
-    }
-    try { $outlook.Session.SendAndReceive($false) } catch {}
-    Start-Sleep -Seconds 3
-    Write-Host ''
-    Write-Host ('[V] Done: ' + $sent + ' of ' + $files.Count + ' emails sent.')
-}
-Send-PickingLists
-"""
 
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -422,33 +353,23 @@ def create_send_mail_launcher(
 ) -> pathlib.Path | None:
     """
     יוצר בתיקייה קובץ bat ששולח כל רשימת ליקוט במייל נפרד (דרך Outlook)
-    לנמענים של המחסן שלה.
+    לנמענים של המחסן שלה. נושא המייל: "דוח ליקוט עבור נהג <שם> <תאריך>".
     """
     rcpt = recipients_by_warehouse(cfg)
-    if not any(rcpt.values()):
-        return None
-
-    def to_str(key: str) -> str:
-        return _ps_quote("; ".join(rcpt[key]))
-
-    rules = ",".join(
-        f"@{{Suffix={_ps_quote(suffix)}; To={to_str(key)}; Name={_ps_quote(name)}}}"
-        for suffix, key, name in (
-            (GOLDBOND_FILE_SUFFIX, "goldbond", "Gold Bond Gili"),
-            (COOLING_FILE_SUFFIX, "cooling", "Cooling"),
-            (HAZMAT_FILE_SUFFIX, "hazmat", "Dangerous"),
-        )
+    return mail_sender.create_launcher(
+        folder=picking_dir,
+        launcher_name=MAIL_LAUNCHER_NAME,
+        title="שליחת רשימות ליקוט במייל",
+        default_to=rcpt["overseas"],
+        default_name="Overseas",
+        rules=[
+            (GOLDBOND_FILE_SUFFIX, rcpt["goldbond"], "Gold Bond Gili"),
+            (COOLING_FILE_SUFFIX, rcpt["cooling"], "Cooling"),
+            (HAZMAT_FILE_SUFFIX, rcpt["hazmat"], "Dangerous"),
+        ],
+        strip_prefix=PICKING_FILE_PREFIX,
+        subject_prefix=MAIL_SUBJECT_PREFIX,
     )
-    ps_body = (
-        _MAIL_PS_BODY.replace("__SUBJECT__", _ps_quote(MAIL_SUBJECT))
-        .replace("__EXTS__", ",".join(_ps_quote(e) for e in MAIL_ATTACH_EXTENSIONS))
-        .replace("__RULES__", rules)
-        .replace("__DEFAULT_TO__", to_str("overseas"))
-    )
-    content = (_MAIL_BAT_HEADER + ps_body).replace("\r\n", "\n").replace("\n", "\r\n")
-    out = picking_dir / MAIL_LAUNCHER_NAME
-    out.write_bytes(content.encode("utf-8"))  # UTF-8 בלי BOM - חובה לקובצי bat
-    return out
 
 
 PICKING_FILE_PREFIX = "רשימת ליקוט עבור "
@@ -1175,7 +1096,7 @@ def main() -> None:
         print(f"\n[V] נוצר קובץ שליחה במייל ({MAIL_LAUNCHER_NAME}) בכל תיקיית תאריך:")
         for d in day_dirs:
             print(f"      - {d.name}")
-        print(f'    כל רשימה נשלחת במייל נפרד, בנושא "{MAIL_SUBJECT}". נמענים לפי מחסן:')
+        print('    כל רשימה נשלחת במייל נפרד, בנושא "דוח ליקוט עבור נהג X <תאריך>". נמענים לפי מחסן:')
         wh_titles = {
             "overseas": cfg["MAIN_WAREHOUSE_NAME"],
             "cooling": cfg["COOLING_WAREHOUSE_NAME"],

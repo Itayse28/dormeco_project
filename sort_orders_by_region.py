@@ -191,6 +191,8 @@ SEND_PICKING_LIST_TO_OVERSEAS =
 SEND_PICKING_LIST_TO_COOLING = 
 SEND_PICKING_LIST_TO_DANGEROUS = 
 SEND_PICKING_LIST_TO_GOLDBOND_GILI = 
+# דוחות ההובלה של נהגי "אוברסיז <מספר>" יישלחו לכתובות האלה
+SEND_SHIPPING_LIST_TO_OVERSEAS = 
 GOOGLE_MAPS_API_KEY = 
 
 # 6. רשימת מק"טים נוספים (אופציונלי - מופרדים בפסיק, בנוסף לקבצים שבתיקיית input_files)
@@ -2112,6 +2114,7 @@ def apply_manual_route_edits(
     cfg: dict[str, Any],
     drivers: list[dict[str, Any]] | None = None,
     on_generate: Callable[[list[dict[str, Any]]], Any] | None = None,
+    send_mails: Callable[[str | None], str] | None = None,
 ) -> list[dict[str, Any]] | None:
     """
     פותח את חלון העריכה.
@@ -2170,6 +2173,7 @@ def apply_manual_route_edits(
         initial_days=initial_days,
         compute_efficient=compute_efficient,
         on_generate=gui_generate if on_generate else None,
+        send_mails=send_mails,
     )
     if edited is None:
         raise RouteEditCancelled()
@@ -2230,6 +2234,7 @@ def sort_orders_excel(
     output_path: str | pathlib.Path,
     cfg: dict[str, Any],
     after_write: Callable[[list[dict[str, Any]]], None] | None = None,
+    send_mails: Callable[[str | None], str] | None = None,
 ) -> list[dict[str, Any]]:
     wb_in = load_workbook_safe(input_path)
     ws_in = wb_in.active
@@ -2826,6 +2831,7 @@ def sort_orders_excel(
         result = apply_manual_route_edits(
             planned_trucks, unique_stops_by_key, travel_matrix, cfg, drivers,
             on_generate=on_generate,
+            send_mails=send_mails,
         )
         if result is None:
             return last_written.get("drivers", [])
@@ -2976,12 +2982,56 @@ def main() -> None:
                 raise RuntimeError(f"{script} נכשל (קוד יציאה {rc})")
         downstream_runs["count"] += 1
 
+    def send_day_mails(day: str | None) -> str:
+        """כפתור "שלח מיילים" בחלון: שולח את קבצי היום דרך Outlook ומחזיר סיכום."""
+        import mail_sender
+        import generate_regional_picking_lists as picking_mod
+        import generate_driver_delivery_reports as reports_mod
+
+        dm = picking_mod.date_folder_suffix(day)
+        stem = input_path.stem
+        targets = [
+            (
+                "רשימות ליקוט",
+                out_dir / f"רשימות ליקוט {stem}" / f"רשימות ליקוט {dm}"
+                / picking_mod.MAIL_LAUNCHER_NAME,
+            ),
+            (
+                "דוחות הובלה לנהגי אוברסיז",
+                out_dir / f"דוחות הובלה {stem}" / f"דוחות הובלה {dm}"
+                / reports_mod.SHIPPING_LAUNCHER_NAME,
+            ),
+        ]
+        lines: list[str] = []
+        for title, launcher in targets:
+            if not launcher.exists():
+                continue
+            print(f"\n[*] שולח במייל: {title} ({dm})")
+            sent, total, out = mail_sender.run_launcher(launcher)
+            if "Could not open Outlook" in out:
+                lines.append(
+                    f"{title}: לא ניתן לפתוח את Outlook (נדרש Outlook הקלאסי, מחובר לחשבון)."
+                )
+                continue
+            line = f"{title}: נשלחו {sent} מתוך {total} מיילים"
+            skipped = out.count("[!] Skipped")
+            if skipped:
+                line += f" ({skipped} דולגו - אין נמענים למחסן)"
+            lines.append(line)
+        if not lines:
+            return (
+                "אין מה לשלוח ליום הזה.\n"
+                "בדקו שהוגדרו נמענים בקובץ ההגדרות (SEND_PICKING_LIST_TO_...)."
+            )
+        return "\n".join(lines)
+
     try:
         drivers = sort_orders_excel(
             input_path=input_path,
             output_path=output_path,
             cfg=cfg,
             after_write=run_downstream,
+            send_mails=send_day_mails,
         )
     except RouteEditCancelled:
         print("\n[X] עריכת המסלולים בוטלה על ידי המשתמש. לא נוצרו קבצים.")

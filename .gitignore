@@ -8,3 +8,4 @@ env/
 .vs/
 output_files/
 input_files/config_parameters.txt
+geocoding_cache_v2.json

@@ -15,6 +15,8 @@
 - "אישור והמשך" - יוצר מיד את כל הקבצים (אקסל ממוין, רשימות ליקוט, דוחות הובלה)
   לפי המסלולים שבחלון. החלון נשאר פתוח: אפשר להמשיך לערוך ולאשר שוב כדי לעדכן.
 - "סיום" - סגירת החלון אחרי שהקבצים נוצרו.
+- "שלח מיילים" (בראש כל עמודת יום, או בתחתית המסך בדוח יומי) - שולח במייל את
+  רשימות הליקוט של אותו יום (ואת דוחות ההובלה של נהגי אוברסיז, אם הוגדרו נמענים).
 - "ביטול" / סגירת החלון לפני אישור - ההרצה נעצרת ולא נוצרים קבצים.
 - בחירת נהג לכל מסלול מתוך input_files/drivers.xlsx: המסלול מחושב מחדש
   מכתובת הבית של הנהג (יציאה וחזרה), והשם מופיע בכל הדוחות.
@@ -141,8 +143,12 @@ class RouteEditor:
         compute_efficient: Callable[[], list[list[str]]] | None = None,
         on_generate: Callable[[list[tuple[list[str], str | None, str | None]]], Any]
         | None = None,
+        send_mails: Callable[[str | None], str] | None = None,
     ) -> None:
         self.root = root
+        self.send_mails = send_mails
+        self._generated_sig: str | None = None
+        self._generated_time = ""
         # יצירת הקבצים מתוך החלון (החלון נשאר פתוח אחרי האישור)
         self.on_generate = on_generate
         self._generated_count = 0
@@ -391,6 +397,11 @@ class RouteEditor:
         )
         if self.multi_day and self.compute_efficient is not None:
             self.eff_btn.pack(side="left", padx=6)
+        if not self.multi_day and self.send_mails is not None:
+            tk.Button(
+                bottom, text="שלח מיילים", font=F_BTN, padx=12, pady=6,
+                command=lambda: self.send_mails_for(self.days[0] if self.days else None),
+            ).pack(side="right", padx=6)
 
         paned = tk.PanedWindow(
             r, orient="horizontal", sashwidth=8, sashrelief="raised", bg="#C9CED6"
@@ -597,6 +608,11 @@ class RouteEditor:
                 head, text="+ נהג", font=F_SMALL, padx=4, pady=0,
                 command=lambda d=day: self.add_driver(d),
             ).pack(side="left", padx=2)
+            if self.send_mails is not None:
+                tk.Button(
+                    head, text="שלח מיילים", font=F_SMALL, padx=4, pady=0,
+                    command=lambda d=day: self.send_mails_for(d),
+                ).pack(side="left", padx=2)
         return df
 
     def _update_day_bar(self) -> None:
@@ -939,7 +955,59 @@ class RouteEditor:
         if self.pool:
             parts.append(f"{len(self.pool)} ממתינות לשיבוץ")
             color = FG_BAD
+        if self._generated_sig is not None:
+            if self._state_signature() == self._generated_sig:
+                parts.append(f"הקבצים נוצרו ({self._generated_time})")
+            else:
+                parts.append("יש שינויים שעוד לא נוצרו לקבצים")
         self.info_label.configure(text="   |   ".join(parts), fg=color)
+
+    def _state_signature(self) -> str:
+        """מצב המסלולים (לבדיקה אם השתנה משהו מאז יצירת הקבצים)."""
+        return repr(
+            [
+                (tuple(self.routes[c]), self._driver_of(c), self._route_date(c))
+                for c in range(len(self.routes))
+                if self.routes[c]
+            ]
+        )
+
+    def send_mails_for(self, day: str | None) -> None:
+        """שליחת המיילים של יום אחד (רשימות ליקוט + דוחות הובלה של נהגי אוברסיז)."""
+        if self.send_mails is None:
+            return
+        if self._generated_sig is None:
+            messagebox.showwarning(
+                "עוד לא נוצרו קבצים",
+                "קודם צריך ללחוץ על \"אישור והמשך\" כדי ליצור את רשימות הליקוט.",
+                parent=self.root,
+            )
+            return
+        if self._state_signature() != self._generated_sig:
+            messagebox.showwarning(
+                "יש שינויים שלא נשמרו",
+                "בוצעו שינויים במסלולים מאז שהקבצים נוצרו.\n"
+                "לחצו על \"אישור והמשך\" כדי לעדכן את הקבצים, ואז שלחו.",
+                parent=self.root,
+            )
+            return
+        ok = messagebox.askyesno(
+            "שליחת מיילים",
+            f"לשלוח עכשיו במייל את רשימות הליקוט של {short_date(day)}?\n"
+            "(וגם את דוחות ההובלה של נהגי אוברסיז, אם הוגדרו להם נמענים)",
+            parent=self.root,
+        )
+        if not ok:
+            return
+        self.root.configure(cursor="watch")
+        self.root.update()
+        try:
+            summary = self.send_mails(day)
+        except Exception as exc:  # noqa: BLE001
+            summary = f"השליחה נכשלה: {exc}"
+        finally:
+            self.root.configure(cursor="")
+        messagebox.showinfo("שליחת מיילים", summary, parent=self.root)
 
     # ------------------------------------------------------------------
     # גרירה ושחרור
@@ -1332,17 +1400,12 @@ class RouteEditor:
             )
             return
         self.root.configure(cursor="")
-        self._update_info()
         self.result = result
         self._generated_count += 1
+        self._generated_sig = self._state_signature()
+        self._generated_time = datetime.datetime.now().strftime("%H:%M")
         self.cancel_btn.configure(text="סיום")
-        messagebox.showinfo(
-            "הקבצים נוצרו",
-            "הקובץ הממוין, רשימות הליקוט ודוחות ההובלה נוצרו לפי המסלולים שבחלון.\n\n"
-            "אפשר להמשיך לערוך וללחוץ שוב על \"אישור והמשך\" כדי לעדכן את הקבצים,\n"
-            "או ללחוץ על \"סיום\" כדי לסגור את החלון.",
-            parent=self.root,
-        )
+        self._update_info()  # בשורת המידע: "הקבצים נוצרו (HH:MM)" - בלי חלון קופץ
 
     def on_cancel(self) -> None:
         if self._generated_count > 0:
@@ -1379,6 +1442,7 @@ def run_route_editor(
     initial_days: list[str | None] | None = None,
     compute_efficient: Callable[[], list[list[str]]] | None = None,
     on_generate: Callable[..., Any] | None = None,
+    send_mails: Callable[[str | None], str] | None = None,
 ) -> list[tuple[list[str], str | None, str | None]] | None:
     """
     פותח את חלון העריכה וממתין עד שהמשתמש יאשר או יבטל.
@@ -1388,7 +1452,7 @@ def run_route_editor(
     root = tk.Tk()
     editor = RouteEditor(
         root, initial_routes, stops_by_key, simulate, cfg, region_order, drivers,
-        initial_days, compute_efficient, on_generate,
+        initial_days, compute_efficient, on_generate, send_mails,
     )
     root.lift()
     try:

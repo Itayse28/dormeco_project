@@ -16,6 +16,8 @@ import io
 import pathlib
 import re
 from urllib.parse import quote
+
+import mail_sender
 import subprocess
 import sys
 import zipfile
@@ -248,6 +250,10 @@ def load_config(custom_config_path: pathlib.Path | None = None) -> dict[str, Any
         "EXTRA_COOLING_SKUS": raw_kv.get("EXTRA_COOLING_SKUS", ""),
         "EXTRA_HAZMAT_SKUS": raw_kv.get("EXTRA_HAZMAT_SKUS", ""),
         "EXTRA_GOLDBOND_SKUS": raw_kv.get("EXTRA_GOLDBOND_SKUS", ""),
+        # דוחות הובלה של נהגי "אוברסיז <מספר>" נשלחים לכתובות האלה
+        "SEND_SHIPPING_LIST_TO_OVERSEAS": mail_sender.parse_email_list(
+            mail_sender.kv_get(raw_kv, "SEND_SHIPPING_LIST_TO_OVERSEAS")
+        ),
         **priority_cfg_values(raw_kv),
     }
 
@@ -389,6 +395,39 @@ def load_warehouse_sku_sets(
             goldbond_skus.add(tok)
 
     return cooling_skus, hazmat_skus, goldbond_skus
+
+
+# ==============================================================================
+# שליחת דוחות ההובלה של נהגי אוברסיז במייל
+# ==============================================================================
+SHIPPING_LAUNCHER_NAME = "שליחת דוחות הובלה אוברסיז במייל.bat"
+REPORT_FILE_PREFIX = "הובלות ע״י "
+OVERSEAS_DRIVER_PATTERN = r"נהג אוברסיז\s*\d+"  # "אוברסיז" + מספר
+
+
+def create_overseas_shipping_launcher(
+    day_dir: pathlib.Path, cfg: dict[str, Any]
+) -> pathlib.Path | None:
+    """
+    קובץ bat ששולח במייל (כל דוח במייל נפרד) רק את דוחות ההובלה של נהגי
+    "אוברסיז <מספר>" שבתיקייה, אל SEND_SHIPPING_LIST_TO_OVERSEAS.
+    """
+    recipients = cfg.get("SEND_SHIPPING_LIST_TO_OVERSEAS") or []
+    has_overseas = any(
+        re.search(OVERSEAS_DRIVER_PATTERN, f.stem) for f in day_dir.glob("*.xlsx")
+    )
+    if not recipients or not has_overseas:
+        return None
+    return mail_sender.create_launcher(
+        folder=day_dir,
+        launcher_name=SHIPPING_LAUNCHER_NAME,
+        title="שליחת דוחות הובלה אוברסיז במייל",
+        default_to=recipients,
+        default_name="Overseas drivers",
+        name_filter=OVERSEAS_DRIVER_PATTERN,
+        strip_prefix=REPORT_FILE_PREFIX,
+        subject_prefix="דוח הובלה עבור ",
+    )
 
 
 def extract_driver_number(driver_label: str) -> str:
@@ -1178,7 +1217,10 @@ def main() -> None:
     reports_dir = out_dir / f"דוחות הובלה {list_name}"
     # מחיקת דוחות ישנים מהרצה קודמת (שמות/מספר הנהגים יכולים להשתנות בין הרצות)
     if reports_dir.exists():
-        for old in reports_dir.rglob("הובלות ע״י נהג *.xlsx"):
+        old_files = list(reports_dir.rglob("הובלות ע״י נהג *.xlsx")) + list(
+            reports_dir.rglob(SHIPPING_LAUNCHER_NAME)
+        )
+        for old in old_files:
             try:
                 old.unlink()
             except OSError as exc:
@@ -1201,6 +1243,20 @@ def main() -> None:
     print(f"\n[V] נוצרו {len(created)} דוחות הובלה לנהגים בהצלחה:")
     for f_path in created:
         print(f"  - {f_path.name}")
+
+    # קובץ שליחה במייל לדוחות של נהגי אוברסיז (בכל תיקיית תאריך שיש בה כאלה)
+    launchers = [
+        create_overseas_shipping_launcher(d, cfg)
+        for d in sorted({f.parent for f in created})
+    ]
+    launchers = [x for x in launchers if x]
+    if launchers:
+        print(
+            f"\n[V] נוצר קובץ שליחה של דוחות נהגי אוברסיז ({SHIPPING_LAUNCHER_NAME}) ב:"
+        )
+        for x in launchers:
+            print(f"      - {x.parent.name}")
+        print("    נמענים: " + ", ".join(cfg["SEND_SHIPPING_LIST_TO_OVERSEAS"]))
 
     if cfg.get("AUTO_OPEN_OUTPUT_FOLDER", True) and not args.no_open:
         open_folder_in_explorer(out_dir)
