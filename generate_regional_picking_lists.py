@@ -28,7 +28,10 @@ import pathlib
 import re
 from urllib.parse import quote
 
-import mail_sender
+try:
+    import mail_sender  # מודול השליחה במייל (mail_sender.py באותה תיקייה)
+except ImportError:  # בלי המודול הדוחות עדיין נוצרים, רק בלי קובצי השליחה במייל
+    mail_sender = None
 import subprocess
 import sys
 import zipfile
@@ -348,6 +351,10 @@ def recipients_by_warehouse(cfg: dict[str, Any]) -> dict[str, list[str]]:
     }
 
 
+# קבצים שלא נשמרו (למשל כי הם פתוחים באקסל) - מדווחים בסוף ההרצה
+FAILED_SAVES: list[str] = []
+
+
 def create_send_mail_launcher(
     picking_dir: pathlib.Path, cfg: dict[str, Any]
 ) -> pathlib.Path | None:
@@ -355,6 +362,9 @@ def create_send_mail_launcher(
     יוצר בתיקייה קובץ bat ששולח כל רשימת ליקוט במייל נפרד (דרך Outlook)
     לנמענים של המחסן שלה. נושא המייל: "דוח ליקוט עבור נהג <שם> <תאריך>".
     """
+    if mail_sender is None:
+        print("[!] הקובץ mail_sender.py חסר בתיקיית הפרויקט - קובץ השליחה במייל לא נוצר.")
+        return None
     rcpt = recipients_by_warehouse(cfg)
     return mail_sender.create_launcher(
         folder=picking_dir,
@@ -919,16 +929,21 @@ def generate_picking_lists_from_sorted_excel(
             sheet_title = re.sub(r"[\[\]:*?/\\]", " ", f"{who} - {wh_heb_name}")
             tint_to_use = special_tint if special_tint else base_tint
 
-            create_single_picking_excel(
-                rows_data=rows,
-                output_file=out_file,
-                sheet_title=sheet_title,
-                warehouse_hebrew_name=wh_heb_name,
-                driver_num=f"{drv_num} - {when}" if when else drv_num,
-                tint_hex=tint_to_use,
-                cfg=cfg,
-                cust_no_by_order=cust_no_by_order,
-            )
+            try:
+                create_single_picking_excel(
+                    rows_data=rows,
+                    output_file=out_file,
+                    sheet_title=sheet_title,
+                    warehouse_hebrew_name=wh_heb_name,
+                    driver_num=f"{drv_num} - {when}" if when else drv_num,
+                    tint_hex=tint_to_use,
+                    cfg=cfg,
+                    cust_no_by_order=cust_no_by_order,
+                )
+            except PermissionError:
+                print(f"[!] לא ניתן לשמור (הקובץ פתוח באקסל?): {out_file.name}")
+                FAILED_SAVES.append(out_file.name)
+                continue
 
             total_w = sum(
                 float(r[4]) for r in rows if isinstance(r[4], (int, float))
@@ -1110,6 +1125,15 @@ def main() -> None:
             "\n[*] לא הוגדרו נמענים (SEND_PICKING_LIST_TO_OVERSEAS / _COOLING / "
             "_DANGEROUS / _GOLDBOND_GILI) - קובץ השליחה במייל לא נוצר."
         )
+
+    if FAILED_SAVES:
+        # שאר הקבצים נוצרו; מדווחים על מה שלא נשמר (קוד יציאה 4 = נוצר חלקית)
+        print(
+            "\n[!] הקבצים הבאים לא נשמרו כי הם פתוחים באקסל - סגרו אותם והריצו שוב:\n"
+            + "\n".join(f"      - {n}" for n in FAILED_SAVES),
+            file=sys.stderr,
+        )
+        sys.exit(4)
 
     if cfg.get("AUTO_OPEN_OUTPUT_FOLDER", True) and not args.no_open:
         open_folder_in_explorer(out_dir)

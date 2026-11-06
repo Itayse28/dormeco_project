@@ -17,7 +17,10 @@ import pathlib
 import re
 from urllib.parse import quote
 
-import mail_sender
+try:
+    import mail_sender  # מודול השליחה במייל (mail_sender.py באותה תיקייה)
+except ImportError:  # בלי המודול הדוחות עדיין נוצרים, רק בלי קובצי השליחה במייל
+    mail_sender = None
 import subprocess
 import sys
 import zipfile
@@ -251,8 +254,12 @@ def load_config(custom_config_path: pathlib.Path | None = None) -> dict[str, Any
         "EXTRA_HAZMAT_SKUS": raw_kv.get("EXTRA_HAZMAT_SKUS", ""),
         "EXTRA_GOLDBOND_SKUS": raw_kv.get("EXTRA_GOLDBOND_SKUS", ""),
         # דוחות הובלה של נהגי "אוברסיז <מספר>" נשלחים לכתובות האלה
-        "SEND_SHIPPING_LIST_TO_OVERSEAS": mail_sender.parse_email_list(
-            mail_sender.kv_get(raw_kv, "SEND_SHIPPING_LIST_TO_OVERSEAS")
+        "SEND_SHIPPING_LIST_TO_OVERSEAS": (
+            mail_sender.parse_email_list(
+                mail_sender.kv_get(raw_kv, "SEND_SHIPPING_LIST_TO_OVERSEAS")
+            )
+            if mail_sender is not None
+            else []
         ),
         **priority_cfg_values(raw_kv),
     }
@@ -401,6 +408,7 @@ def load_warehouse_sku_sets(
 # שליחת דוחות ההובלה של נהגי אוברסיז במייל
 # ==============================================================================
 SHIPPING_LAUNCHER_NAME = "שליחת דוחות הובלה אוברסיז במייל.bat"
+FAILED_SAVES: list[str] = []  # קבצים שלא נשמרו (למשל כי הם פתוחים באקסל)
 REPORT_FILE_PREFIX = "הובלות ע״י "
 OVERSEAS_DRIVER_PATTERN = r"נהג אוברסיז\s*\d+"  # "אוברסיז" + מספר
 
@@ -412,6 +420,8 @@ def create_overseas_shipping_launcher(
     קובץ bat ששולח במייל (כל דוח במייל נפרד) רק את דוחות ההובלה של נהגי
     "אוברסיז <מספר>" שבתיקייה, אל SEND_SHIPPING_LIST_TO_OVERSEAS.
     """
+    if mail_sender is None:
+        return None
     recipients = cfg.get("SEND_SHIPPING_LIST_TO_OVERSEAS") or []
     has_overseas = any(
         re.search(OVERSEAS_DRIVER_PATTERN, f.stem) for f in day_dir.glob("*.xlsx")
@@ -1077,13 +1087,18 @@ def generate_driver_reports_from_sorted_excel(
         day_dir = reports_dir / day_folder
         day_dir.mkdir(parents=True, exist_ok=True)
         out_file = day_dir / f"הובלות ע״י נהג {file_who}.xlsx"
-        create_single_driver_report(
-            driver_num=f"{drv_num} - {when}" if when else drv_num,
-            driver_label=drv_label,
-            driver_rows=drv_rows,
-            output_file=out_file,
-            cfg=cfg,
-        )
+        try:
+            create_single_driver_report(
+                driver_num=f"{drv_num} - {when}" if when else drv_num,
+                driver_label=drv_label,
+                driver_rows=drv_rows,
+                output_file=out_file,
+                cfg=cfg,
+            )
+        except PermissionError:
+            print(f"[!] לא ניתן לשמור (הקובץ פתוח באקסל?): {out_file.name}")
+            FAILED_SAVES.append(out_file.name)
+            continue
         created_files.append(out_file)
 
     return created_files
@@ -1257,6 +1272,15 @@ def main() -> None:
         for x in launchers:
             print(f"      - {x.parent.name}")
         print("    נמענים: " + ", ".join(cfg["SEND_SHIPPING_LIST_TO_OVERSEAS"]))
+
+    if FAILED_SAVES:
+        # שאר הקבצים נוצרו; מדווחים על מה שלא נשמר (קוד יציאה 4 = נוצר חלקית)
+        print(
+            "\n[!] הקבצים הבאים לא נשמרו כי הם פתוחים באקסל - סגרו אותם והריצו שוב:\n"
+            + "\n".join(f"      - {n}" for n in FAILED_SAVES),
+            file=sys.stderr,
+        )
+        sys.exit(4)
 
     if cfg.get("AUTO_OPEN_OUTPUT_FOLDER", True) and not args.no_open:
         open_folder_in_explorer(out_dir)

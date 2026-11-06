@@ -2967,6 +2967,7 @@ def main() -> None:
 
     def run_downstream(_drivers: list[dict[str, Any]]) -> None:
         here = pathlib.Path(__file__).resolve().parent
+        problems: list[str] = []
         passthrough = [a for a in sys.argv[1:] if a != "--no-open"]
         for script in (
             "generate_regional_picking_lists.py",
@@ -2977,10 +2978,20 @@ def main() -> None:
             if script.startswith("generate_regional") or downstream_runs["count"] > 0:
                 cmd.append("--no-open")
             print(f"\n[*] מריץ {script} ...")
-            rc = subprocess.run(cmd).returncode
-            if rc != 0:
-                raise RuntimeError(f"{script} נכשל (קוד יציאה {rc})")
+            proc = subprocess.run(cmd, stderr=subprocess.PIPE)
+            err_text = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+            if err_text:
+                print(err_text, file=sys.stderr)
+            if proc.returncode == 4:
+                # נוצר חלקית: חלק מהקבצים פתוחים באקסל
+                problems.append(f"{script}:\n{err_text}")
+            elif proc.returncode != 0:
+                tail = "\n".join(err_text.splitlines()[-4:]) or "(אין פרטים)"
+                problems.append(f"{script} נכשל (קוד יציאה {proc.returncode}):\n{tail}")
+            # ממשיכים גם אם הסקריפט הקודם נכשל, כדי שדוחות ההובלה ייווצרו בכל מקרה
         downstream_runs["count"] += 1
+        if problems:
+            raise RuntimeError("\n\n".join(problems))
 
     def send_day_mails(day: str | None) -> str:
         """כפתור "שלח מיילים" בחלון: שולח את קבצי היום דרך Outlook ומחזיר סיכום."""

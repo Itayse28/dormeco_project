@@ -1392,10 +1392,15 @@ class RouteEditor:
             self.on_generate(result)
         except Exception as exc:  # noqa: BLE001
             self.root.configure(cursor="")
+            # חלק מהקבצים נוצרו - "סיום" יסגור בלי לבטל (שליחה במייל רק אחרי יצירה מלאה)
+            self.result = result
+            self._generated_count += 1
+            self._generated_sig = None
+            self.cancel_btn.configure(text="סיום")
             self._update_info()
             messagebox.showerror(
                 "שגיאה ביצירת הקבצים",
-                f"{exc}\n\nאם אחד מקבצי הפלט פתוח באקסל - סגרו אותו ולחצו שוב על \"אישור והמשך\".",
+                f"{exc}\n\nהקבצים האחרים נוצרו. אם קובץ פתוח באקסל - סגרו אותו ולחצו שוב על \"אישור והמשך\".",
                 parent=self.root,
             )
             return
