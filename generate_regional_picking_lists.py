@@ -7,14 +7,15 @@
   1. אוברסיז:       "רשימת ליקוט עבור <נהג> <תאריך>.xlsx"
   2. מחסן קירור:    "רשימת ליקוט עבור <נהג> <תאריך> - קירור.xlsx"
   3. מחסן חומ"ס:    "רשימת ליקוט עבור <נהג> <תאריך> - חומס.xlsx"
-  4. גולד בונד:     "רשימת ליקוט עבור <נהג> <תאריך> - גולד בונד.xlsx"
+  4. גולד בונד גילי: "רשימת ליקוט עבור <נהג> <תאריך> - גולד בונד גילי.xlsx"
   שורה 1 בכל קובץ: "העמסות ב<מחסן> לנהג <נהג> - <תאריך>"
 - כל הטקסט בתוך כל המשבצות מיושר למרכז המשבצת (horizontal="center", vertical="center").
 - כל הקבצים נשמרים בתיקייה: output_files\רשימות ליקוט <ListName>\
 - הרשימות מסודרות בתתי-תיקיות לפי תאריך: "רשימות ליקוט 2.11" וכו'.
-- אם בקובץ ההגדרות מוגדר SEND_PICKING_LIST_TO, נוצר בכל תת-תיקייה הקובץ
-  "שליחת רשימות ליקוט במייל.bat" - לחיצה כפולה עליו שולחת את כל רשימות
-  הליקוט של אותה תת-תיקייה דרך Outlook, בנושא "דוחות העמסה".
+- בכל תת-תיקייה נוצר הקובץ "שליחת רשימות ליקוט במייל.bat" - לחיצה כפולה
+  עליו שולחת כל רשימת ליקוט של אותה תת-תיקייה במייל נפרד (דרך Outlook,
+  בנושא "דוחות העמסה") לנמענים של המחסן שלה:
+  SEND_PICKING_LIST_TO_OVERSEAS / _COOLING / _DANGEROUS / _GOLDBOND_GILI
 - לפני יצירת הרשימות נמחקות רשימות ישנות של אותה רשימה מהרצה קודמת,
   כדי שלא יישלחו במייל בטעות.
 """
@@ -247,7 +248,7 @@ def load_picking_config(
             "HAZMAT_FILE_NAME", "dangerous_products.xlsx"
         ),
         "GOLDBOND_FILE_NAME": raw_kv.get(
-            "GOLDBOND_FILE_NAME", "Gold_bond.xlsx"
+            "GOLDBOND_FILE_NAME", "Gold_bond_gili.xlsx"
         ),
         "MAIN_WAREHOUSE_NAME": main_wh_name,
         "COOLING_WAREHOUSE_NAME": raw_kv.get(
@@ -257,7 +258,7 @@ def load_picking_config(
             "HAZMAT_WAREHOUSE_NAME", 'מחסן חומ"ס'
         ),
         "GOLDBOND_WAREHOUSE_NAME": raw_kv.get(
-            "GOLDBOND_WAREHOUSE_NAME", "גולד בונד"
+            "GOLDBOND_WAREHOUSE_NAME", "גולד בונד גילי"
         ),
         "AUTO_OPEN_OUTPUT_FOLDER": parse_bool(
             raw_kv.get("AUTO_OPEN_OUTPUT_FOLDER", "true"), True
@@ -266,7 +267,20 @@ def load_picking_config(
         "EXTRA_HAZMAT_SKUS": raw_kv.get("EXTRA_HAZMAT_SKUS", ""),
         "EXTRA_GOLDBOND_SKUS": raw_kv.get("EXTRA_GOLDBOND_SKUS", ""),
         **priority_cfg_values(raw_kv),
-        "SEND_PICKING_LIST_TO": parse_email_list(raw_kv.get("SEND_PICKING_LIST_TO", "")),
+        # נמענים לכל מחסן (אם ריק - נשלח ל-SEND_PICKING_LIST_TO הכללי, אם הוגדר)
+        "SEND_PICKING_LIST_TO": parse_email_list(kv_get(raw_kv, "SEND_PICKING_LIST_TO")),
+        "SEND_PICKING_LIST_TO_OVERSEAS": parse_email_list(
+            kv_get(raw_kv, "SEND_PICKING_LIST_TO_OVERSEAS")
+        ),
+        "SEND_PICKING_LIST_TO_COOLING": parse_email_list(
+            kv_get(raw_kv, "SEND_PICKING_LIST_TO_COOLING")
+        ),
+        "SEND_PICKING_LIST_TO_DANGEROUS": parse_email_list(
+            kv_get(raw_kv, "SEND_PICKING_LIST_TO_DANGEROUS")
+        ),
+        "SEND_PICKING_LIST_TO_GOLDBOND_GILI": parse_email_list(
+            kv_get(raw_kv, "SEND_PICKING_LIST_TO_GOLDBOND_GILI")
+        ),
     }
 
 
@@ -289,9 +303,11 @@ exit /b
 _MAIL_PS_BODY = r"""#PS-START
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 function Send-PickingLists {
-    $to = __TO__
     $subject = __SUBJECT__
     $exts = @(__EXTS__)
+    # נמענים לפי מחסן: לפי סיומת שם הקובץ. קובץ בלי סיומת מחסן = אוברסיז
+    $rules = @(__RULES__)
+    $defaultTo = __DEFAULT_TO__
     $folder = Split-Path -Parent $f
     $files = @(Get-ChildItem -LiteralPath $folder -File |
         Where-Object { $exts -contains $_.Extension.ToLower() } |
@@ -301,7 +317,6 @@ function Send-PickingLists {
         Write-Host '[X] No picking list files were found in this folder.'
         return
     }
-    Write-Host ("[*] Sending {0} files to: {1}" -f $files.Count, $to)
 
     try {
         $outlook = New-Object -ComObject Outlook.Application
@@ -312,28 +327,38 @@ function Send-PickingLists {
         return
     }
 
-    try {
-        $mail = $outlook.CreateItem(0)
-        $mail.To = $to
-        $mail.Subject = $subject
-        $items = ($files | ForEach-Object {
-            '<li>' + [System.Net.WebUtility]::HtmlEncode($_.Name) + '</li>'
-        }) -join ''
-        $mail.HTMLBody = '<div dir="rtl" style="font-family:Arial;font-size:11pt">' +
-            'שלום,<br><br>' +
-            ('מצורפות רשימות הליקוט ({0} קבצים):' -f $files.Count) +
-            '<ul>' + $items + '</ul>' +
-            'נשלח אוטומטית ממערכת מיון ההזמנות.</div>'
-        foreach ($file in $files) {
-            [void]$mail.Attachments.Add($file.FullName)
+    $sent = 0
+    foreach ($file in $files) {
+        $base = [IO.Path]::GetFileNameWithoutExtension($file.Name)
+        $to = $defaultTo
+        $whName = 'Overseas'
+        foreach ($rule in $rules) {
+            if ($base.EndsWith($rule.Suffix)) { $to = $rule.To; $whName = $rule.Name; break }
         }
-        $mail.Send()
-        try { $outlook.Session.SendAndReceive($false) } catch {}
-        Start-Sleep -Seconds 3
-        Write-Host ('[V] Email sent successfully to: ' + $to)
-    } catch {
-        Write-Host ('[X] Sending failed: ' + $_.Exception.Message)
+        if ([string]::IsNullOrWhiteSpace($to)) {
+            Write-Host ('[!] Skipped (no recipients defined for ' + $whName + '): ' + $file.Name)
+            continue
+        }
+        try {
+            $mail = $outlook.CreateItem(0)
+            $mail.To = $to
+            $mail.Subject = $subject
+            $mail.HTMLBody = '<div dir="rtl" style="font-family:Arial;font-size:11pt">' +
+                'שלום,<br><br>מצורפת רשימת ליקוט:<br><b>' +
+                [System.Net.WebUtility]::HtmlEncode($base) + '</b><br><br>' +
+                'נשלח אוטומטית ממערכת מיון ההזמנות.</div>'
+            [void]$mail.Attachments.Add($file.FullName)
+            $mail.Send()
+            $sent++
+            Write-Host ('[V] Sent (' + $whName + ') to ' + $to + ' : ' + $file.Name)
+        } catch {
+            Write-Host ('[X] Sending failed for ' + $file.Name + ': ' + $_.Exception.Message)
+        }
     }
+    try { $outlook.Session.SendAndReceive($false) } catch {}
+    Start-Sleep -Seconds 3
+    Write-Host ''
+    Write-Host ('[V] Done: ' + $sent + ' of ' + $files.Count + ' emails sent.')
 }
 Send-PickingLists
 """
@@ -366,16 +391,59 @@ def _ps_quote(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+# סיומות שמות הקבצים לפי מחסן (אוברסיז = בלי סיומת)
+COOLING_FILE_SUFFIX = " - קירור"
+HAZMAT_FILE_SUFFIX = " - חומס"
+GOLDBOND_FILE_SUFFIX = " - גולד בונד גילי"
+
+
+def kv_get(raw_kv: dict[str, str], key: str) -> str:
+    """קריאת פרמטר מקובץ ההגדרות, סלחנית לרווחים בשם (SEND_PICKING_LIST_TO _COOLING)."""
+    want = key.replace(" ", "").upper()
+    for k, v in raw_kv.items():
+        if str(k).replace(" ", "").upper() == want:
+            return str(v or "")
+    return ""
+
+
+def recipients_by_warehouse(cfg: dict[str, Any]) -> dict[str, list[str]]:
+    """נמענים לכל מחסן. מחסן בלי נמענים משלו מקבל את SEND_PICKING_LIST_TO הכללי."""
+    general = cfg.get("SEND_PICKING_LIST_TO", []) or []
+    return {
+        "overseas": cfg.get("SEND_PICKING_LIST_TO_OVERSEAS") or general,
+        "cooling": cfg.get("SEND_PICKING_LIST_TO_COOLING") or general,
+        "hazmat": cfg.get("SEND_PICKING_LIST_TO_DANGEROUS") or general,
+        "goldbond": cfg.get("SEND_PICKING_LIST_TO_GOLDBOND_GILI") or general,
+    }
+
+
 def create_send_mail_launcher(
-    picking_dir: pathlib.Path, recipients: list[str]
+    picking_dir: pathlib.Path, cfg: dict[str, Any]
 ) -> pathlib.Path | None:
-    """יוצר בתיקייה קובץ bat ששולח את כל רשימות הליקוט שבה במייל אחד לכל הנמענים."""
-    if not recipients:
+    """
+    יוצר בתיקייה קובץ bat ששולח כל רשימת ליקוט במייל נפרד (דרך Outlook)
+    לנמענים של המחסן שלה.
+    """
+    rcpt = recipients_by_warehouse(cfg)
+    if not any(rcpt.values()):
         return None
+
+    def to_str(key: str) -> str:
+        return _ps_quote("; ".join(rcpt[key]))
+
+    rules = ",".join(
+        f"@{{Suffix={_ps_quote(suffix)}; To={to_str(key)}; Name={_ps_quote(name)}}}"
+        for suffix, key, name in (
+            (GOLDBOND_FILE_SUFFIX, "goldbond", "Gold Bond Gili"),
+            (COOLING_FILE_SUFFIX, "cooling", "Cooling"),
+            (HAZMAT_FILE_SUFFIX, "hazmat", "Dangerous"),
+        )
+    )
     ps_body = (
-        _MAIL_PS_BODY.replace("__TO__", _ps_quote("; ".join(recipients)))
-        .replace("__SUBJECT__", _ps_quote(MAIL_SUBJECT))
+        _MAIL_PS_BODY.replace("__SUBJECT__", _ps_quote(MAIL_SUBJECT))
         .replace("__EXTS__", ",".join(_ps_quote(e) for e in MAIL_ATTACH_EXTENSIONS))
+        .replace("__RULES__", rules)
+        .replace("__DEFAULT_TO__", to_str("overseas"))
     )
     content = (_MAIL_BAT_HEADER + ps_body).replace("\r\n", "\n").replace("\n", "\r\n")
     out = picking_dir / MAIL_LAUNCHER_NAME
@@ -541,6 +609,12 @@ def load_warehouse_sku_sets(
         if h_file.exists():
             hazmat_skus.update(load_skus_from_excel(h_file))
         g_file = folder / cfg["GOLDBOND_FILE_NAME"]
+        if not g_file.exists():
+            # מחסן גולד בונד גילי: הקובץ נקרא היום Gold_bond_gili.xlsx (בעבר Gold_bond.xlsx)
+            for alt in ("Gold_bond_gili.xlsx", "Gold_bond.xlsx"):
+                if (folder / alt).exists():
+                    g_file = folder / alt
+                    break
         if g_file.exists():
             goldbond_skus.update(load_skus_from_excel(g_file))
 
@@ -901,9 +975,9 @@ def generate_picking_lists_from_sorted_excel(
 
     warehouse_specs = [
         ("main", "", cfg["MAIN_WAREHOUSE_NAME"], None),
-        ("cooling", " - קירור", cfg["COOLING_WAREHOUSE_NAME"], "D9E1F2"),
-        ("hazmat", " - חומס", cfg["HAZMAT_WAREHOUSE_NAME"], "FCE4D6"),
-        ("goldbond", " - גולד בונד", cfg["GOLDBOND_WAREHOUSE_NAME"], "FFF2CC"),
+        ("cooling", COOLING_FILE_SUFFIX, cfg["COOLING_WAREHOUSE_NAME"], "D9E1F2"),
+        ("hazmat", HAZMAT_FILE_SUFFIX, cfg["HAZMAT_WAREHOUSE_NAME"], "FCE4D6"),
+        ("goldbond", GOLDBOND_FILE_SUFFIX, cfg["GOLDBOND_WAREHOUSE_NAME"], "FFF2CC"),
     ]
 
     # לפי סדר הנהגים בקובץ הממוין
@@ -967,6 +1041,8 @@ def is_excluded_support_file(p: pathlib.Path, cfg: dict[str, Any]) -> bool:
         CONFIG_FILE_NAME.lower(),
         "drivers.xlsx",
         "clients_marks.xlsx",
+        "gold_bond_gili.xlsx",
+        "gold_bond.xlsx",
         "dangerous_products.xlsx",
         "cooling_products.pdf",
         "cooling_products.xlsx",
@@ -1094,21 +1170,24 @@ def main() -> None:
 
     # קובץ שליחה במייל בכל תת-תיקיית תאריך
     day_dirs = sorted({path.parent for _lbl, path, _n, _w in created})
-    launchers = [
-        create_send_mail_launcher(d, cfg.get("SEND_PICKING_LIST_TO", []))
-        for d in day_dirs
-    ]
+    launchers = [create_send_mail_launcher(d, cfg) for d in day_dirs]
     if any(launchers):
         print(f"\n[V] נוצר קובץ שליחה במייל ({MAIL_LAUNCHER_NAME}) בכל תיקיית תאריך:")
         for d in day_dirs:
             print(f"      - {d.name}")
-        print(f'    נושא המייל: "{MAIL_SUBJECT}". הנמענים:')
-        for addr in cfg["SEND_PICKING_LIST_TO"]:
-            print(f"      - {addr}")
+        print(f'    כל רשימה נשלחת במייל נפרד, בנושא "{MAIL_SUBJECT}". נמענים לפי מחסן:')
+        wh_titles = {
+            "overseas": cfg["MAIN_WAREHOUSE_NAME"],
+            "cooling": cfg["COOLING_WAREHOUSE_NAME"],
+            "hazmat": cfg["HAZMAT_WAREHOUSE_NAME"],
+            "goldbond": cfg["GOLDBOND_WAREHOUSE_NAME"],
+        }
+        for key, addrs in recipients_by_warehouse(cfg).items():
+            print(f"      - {wh_titles[key]}: " + (", ".join(addrs) if addrs else "(אין נמענים - לא יישלח)"))
     else:
         print(
-            "\n[*] לא הוגדרה כתובת SEND_PICKING_LIST_TO בקובץ ההגדרות - "
-            "קובץ השליחה במייל לא נוצר."
+            "\n[*] לא הוגדרו נמענים (SEND_PICKING_LIST_TO_OVERSEAS / _COOLING / "
+            "_DANGEROUS / _GOLDBOND_GILI) - קובץ השליחה במייל לא נוצר."
         )
 
     if cfg.get("AUTO_OPEN_OUTPUT_FOLDER", True) and not args.no_open:

@@ -7,7 +7,7 @@
   1. אוברסיז (מבוא הספנים 1 אשדוד) - העמסה של 60 דקות כברירת מחדל
   2. מחסן קירור (מבוא הספנים 6 אשדוד) - מק"טים מ-Cooling_products.pdf (30 דקות כברירת מחדל)
   3. מחסן חומ"ס (פארק נמלי ישראל, אשדוד) - מק"טים מ-dangerous_products.xlsx (30 דקות כברירת מחדל)
-  4. גולד בונד (הקידמה 1 אשדוד) - מק"טים מ-Gold_bond.xlsx (30 דקות כברירת מחדל)
+  4. גולד בונד גילי (הקידמה 1 אשדוד) - מק"טים מ-Gold_bond_gili.xlsx (30 דקות כברירת מחדל)
 - תאריך אספקה מוצג תמיד בפורמט DD-MM-YYYY (למשל 02-11-2026).
 - גיליון "סיכום מסלולי נהגים ומשאיות" מותאם בדיוק לתצוגת מסך קומפקטית (5 עמודות: A עד E).
 - אחרי התכנון האוטומטי נפתח חלון עריכה (route_editor_gui.py) שבו אפשר לגרור עצירות
@@ -30,7 +30,7 @@ from urllib.parse import quote
 import subprocess
 import sys
 import zipfile
-from typing import Any
+from typing import Any, Callable
 
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -128,7 +128,7 @@ BASE_DIR = C:\\Users\\itaik\\OneDrive\\מסמכים\\dormeco-sorting-script
 INPUT_FILE_NAME = list.xlsx
 COOLING_FILE_NAME = Cooling_products.pdf
 HAZMAT_FILE_NAME = dangerous_products.xlsx
-GOLDBOND_FILE_NAME = Gold_bond.xlsx
+GOLDBOND_FILE_NAME = Gold_bond_gili.xlsx
 # קובץ רשימת הנהגים (עמודות: שם נהג, כתובת) - לבחירת נהג לכל מסלול בחלון העריכה
 DRIVERS_FILE_NAME = drivers.xlsx
 # קובץ לקוחות עם דגשים מיוחדים (עמודה א: שם לקוח, עמודה ב: הדגש)
@@ -167,7 +167,7 @@ HAZMAT_WAREHOUSE_ADDRESS = פארק נמלי ישראל, אשדוד
 HAZMAT_WAREHOUSE_LAT = 31.8245
 HAZMAT_WAREHOUSE_LON = 34.6610
 
-GOLDBOND_WAREHOUSE_NAME = גולד בונד
+GOLDBOND_WAREHOUSE_NAME = גולד בונד גילי
 GOLDBOND_WAREHOUSE_ADDRESS = הקידמה 1 אשדוד
 GOLDBOND_WAREHOUSE_LAT = 31.8210
 GOLDBOND_WAREHOUSE_LON = 34.6595
@@ -185,8 +185,12 @@ PRI_DOR_CODE =
 PRIORITY_SERVER_URL = https://pri.dormeco.co.il
 # כמה נהגים יוצגו במסך אחד בחלון העריכה (בלי לגלול)
 AMOUNT_OF_DRIVERS_ON_SCREEN = 10
-# רשימת כתובות מייל לשליחת רשימות הליקוט, מופרדות בפסיק
-SEND_PICKING_LIST_TO = 
+# כתובות מייל לשליחת רשימות הליקוט, לכל מחסן בנפרד (מופרדות בפסיק).
+# כל רשימת ליקוט נשלחת במייל נפרד לנמענים של המחסן שלה.
+SEND_PICKING_LIST_TO_OVERSEAS = 
+SEND_PICKING_LIST_TO_COOLING = 
+SEND_PICKING_LIST_TO_DANGEROUS = 
+SEND_PICKING_LIST_TO_GOLDBOND_GILI = 
 GOOGLE_MAPS_API_KEY = 
 
 # 6. רשימת מק"טים נוספים (אופציונלי - מופרדים בפסיק, בנוסף לקבצים שבתיקיית input_files)
@@ -306,7 +310,7 @@ def load_or_create_config(
             "HAZMAT_FILE_NAME", "dangerous_products.xlsx"
         ),
         "GOLDBOND_FILE_NAME": raw_kv.get(
-            "GOLDBOND_FILE_NAME", "Gold_bond.xlsx"
+            "GOLDBOND_FILE_NAME", "Gold_bond_gili.xlsx"
         ),
         "CLIENT_MARKS_FILE_NAME": raw_kv.get(
             "CLIENT_MARKS_FILE_NAME", "clients_marks.xlsx"
@@ -363,7 +367,7 @@ def load_or_create_config(
             float(raw_kv.get("HAZMAT_WAREHOUSE_LON", "34.6610") or 34.6610),
         ),
         "GOLDBOND_WAREHOUSE_NAME": raw_kv.get(
-            "GOLDBOND_WAREHOUSE_NAME", "גולד בונד"
+            "GOLDBOND_WAREHOUSE_NAME", "גולד בונד גילי"
         ),
         "GOLDBOND_WAREHOUSE_ADDRESS": raw_kv.get(
             "GOLDBOND_WAREHOUSE_ADDRESS", "הקידמה 1 אשדוד"
@@ -593,6 +597,12 @@ def load_warehouse_sku_sets(
                 hazmat_skus.update(loaded_h)
 
         g_file = folder / cfg["GOLDBOND_FILE_NAME"]
+        if not g_file.exists():
+            # מחסן גולד בונד גילי: הקובץ נקרא היום Gold_bond_gili.xlsx (בעבר Gold_bond.xlsx)
+            for alt in ("Gold_bond_gili.xlsx", "Gold_bond.xlsx"):
+                if (folder / alt).exists():
+                    g_file = folder / alt
+                    break
         if g_file.exists():
             loaded_g = load_skus_from_excel(g_file)
             if loaded_g:
@@ -2101,8 +2111,14 @@ def apply_manual_route_edits(
     matrix: list[list[float]],
     cfg: dict[str, Any],
     drivers: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    """פותח את חלון העריכה ומחזיר את המסלולים (והנהגים) כפי שהמשתמש אישר אותם."""
+    on_generate: Callable[[list[dict[str, Any]]], Any] | None = None,
+) -> list[dict[str, Any]] | None:
+    """
+    פותח את חלון העריכה.
+    עם on_generate: כל לחיצה על "אישור והמשך" יוצרת את הקבצים מיד והחלון נשאר פתוח
+    להמשך עריכה; מחזיר None בסגירה (אחרי שנוצרו קבצים לפחות פעם אחת).
+    בלי on_generate: מחזיר את המסלולים שאושרו.
+    """
     try:
         from route_editor_gui import run_route_editor
     except ImportError as exc:
@@ -2135,6 +2151,14 @@ def apply_manual_route_edits(
         trucks = plan_trucks(list(stops_by_key.values()), matrix, cfg)
         return [[s["stop_key"] for s in t["ordered_stops"]] for t in trucks]
 
+    def edited_to_trucks(
+        edited_routes: list[tuple[list[str], str | None, str | None]],
+    ) -> list[dict[str, Any]]:
+        return _edited_to_trucks_impl(edited_routes, stops_by_key, simulate_rounds)
+
+    def gui_generate(edited_routes: list[tuple[list[str], str | None, str | None]]) -> Any:
+        return on_generate(edited_to_trucks(edited_routes))  # type: ignore[misc]
+
     print("\n[*] נפתח חלון עריכת המסלולים - ממתין לאישור המשתמש...")
     edited = run_route_editor(
         initial_routes=initial_routes,
@@ -2145,10 +2169,20 @@ def apply_manual_route_edits(
         drivers=drivers,
         initial_days=initial_days,
         compute_efficient=compute_efficient,
+        on_generate=gui_generate if on_generate else None,
     )
     if edited is None:
         raise RouteEditCancelled()
+    if on_generate:
+        return None  # הקבצים כבר נוצרו מתוך החלון
+    return edited_to_trucks(edited)
 
+
+def _edited_to_trucks_impl(
+    edited: list[tuple[list[str], str | None, str | None]],
+    stops_by_key: dict[str, dict[str, Any]],
+    simulate_rounds: Callable[..., list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
     # לפי תאריך, ובתוך כל יום לפי סדר הכרטיסים בחלון
     edited = sorted(
         [(keys, drv, day or "") for keys, drv, day in edited if keys],
@@ -2195,6 +2229,7 @@ def sort_orders_excel(
     input_path: str | pathlib.Path,
     output_path: str | pathlib.Path,
     cfg: dict[str, Any],
+    after_write: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
     wb_in = load_workbook_safe(input_path)
     ws_in = wb_in.active
@@ -2391,395 +2426,412 @@ def sort_orders_excel(
             t["route_date"] = day
             planned_trucks.append(t)
 
-    # עריכה ידנית של המסלולים בחלון (גרירת עצירות בין נהגים / שינוי סדר)
-    if cfg.get("ENABLE_ROUTE_EDITOR", True):
-        planned_trucks = apply_manual_route_edits(
-            planned_trucks, unique_stops_by_key, travel_matrix, cfg, drivers
+    def write_output(planned_trucks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """כתיבת קובץ האקסל הממוין לפי המסלולים שנקבעו (נקרא שוב בכל אישור בחלון)."""
+        final_drivers: list[dict[str, Any]] = []
+        stop_assignment: dict[str, dict[str, Any]] = {}
+
+        multi_day = len({t.get("route_date", "") for t in planned_trucks}) > 1
+        num_in_day: dict[str, int] = {}
+        for driver_counter, t in enumerate(planned_trucks, start=1):
+            reg_title = t["region_title"]
+            route_date = t.get("route_date", "")
+            num_in_day[route_date] = num_in_day.get(route_date, 0) + 1
+            # "נהג <שם הנהג> (אזור)" אם נבחר נהג, אחרת "נהג <מספר> (אזור)"
+            who = (
+                f"{t['driver_name']}{t.get('round_label', '')}"
+                if t.get("driver_name")
+                else str(num_in_day[route_date])
+            )
+            driver_label = f"נהג {who} ({reg_title})"
+            if multi_day and route_date:
+                # בדוח שבועי התאריך הוא חלק מהשם, כדי שכל מסלול יהיה ייחודי
+                driver_label += f" {route_date.replace('-', '.')}"
+            t["driver_id"] = driver_counter
+            t["driver_label"] = driver_label
+            final_drivers.append(t)
+
+            for st_key, sched in t["schedule_by_stop"].items():
+                stop_assignment[st_key] = {
+                    "driver_id": driver_counter,
+                    "driver_label": driver_label,
+                    "route_stop_num": sched["route_stop_num"],
+                    "arrival_str": sched["arrival_str"],
+                    "departure_str": sched["departure_str"],
+                    "route_date": route_date,
+                }
+
+        for rec in records:
+            assign = stop_assignment[rec["stop_key"]]
+            rec["driver_id"] = assign["driver_id"]
+            rec["driver_label"] = assign["driver_label"]
+            rec["route_stop_num"] = assign["route_stop_num"]
+            rec["arrival_str"] = assign["arrival_str"]
+            rec["departure_str"] = assign["departure_str"]
+            rec["route_date"] = assign["route_date"]
+            rec["client_mark"] = find_client_mark(rec["cust_name"], client_marks)
+            # הזמנה שהועברה ליום אחר מקבלת את תאריך המסלול
+            if assign["route_date"] and 0 <= idx_date < len(rec["raw_values"]):
+                rec["raw_values"][idx_date] = assign["route_date"]
+
+        records.sort(
+            key=lambda item: (
+                item["driver_id"],
+                item["route_stop_num"],
+                item["order_no"],
+                item["line_no"],
+            )
         )
 
-    final_drivers: list[dict[str, Any]] = []
-    stop_assignment: dict[str, dict[str, Any]] = {}
+        reordered_raw_indices: list[int] = []
+        for c_idx in range(len(raw_headers)):
+            if c_idx in (idx_qty, idx_unit, idx_cust_note):
+                continue
+            reordered_raw_indices.append(c_idx)
 
-    multi_day = len({t.get("route_date", "") for t in planned_trucks}) > 1
-    num_in_day: dict[str, int] = {}
-    for driver_counter, t in enumerate(planned_trucks, start=1):
-        reg_title = t["region_title"]
-        route_date = t.get("route_date", "")
-        num_in_day[route_date] = num_in_day.get(route_date, 0) + 1
-        # "נהג <שם הנהג> (אזור)" אם נבחר נהג, אחרת "נהג <מספר> (אזור)"
-        who = (
-            f"{t['driver_name']}{t.get('round_label', '')}"
-            if t.get("driver_name")
-            else str(num_in_day[route_date])
-        )
-        driver_label = f"נהג {who} ({reg_title})"
-        if multi_day and route_date:
-            # בדוח שבועי התאריך הוא חלק מהשם, כדי שכל מסלול יהיה ייחודי
-            driver_label += f" {route_date.replace('-', '.')}"
-        t["driver_id"] = driver_counter
-        t["driver_label"] = driver_label
-        final_drivers.append(t)
+        insert_pos = len(reordered_raw_indices)
+        for pos, orig_i in enumerate(reordered_raw_indices):
+            if orig_i > idx_qty:
+                insert_pos = pos
+                break
 
-        for st_key, sched in t["schedule_by_stop"].items():
-            stop_assignment[st_key] = {
-                "driver_id": driver_counter,
-                "driver_label": driver_label,
-                "route_stop_num": sched["route_stop_num"],
-                "arrival_str": sched["arrival_str"],
-                "departure_str": sched["departure_str"],
-                "route_date": route_date,
-            }
+        qty_group = [idx_qty]
+        if 0 <= idx_unit < len(raw_headers) and idx_unit != idx_qty:
+            qty_group.append(idx_unit)
+        if 0 <= idx_cust_note < len(raw_headers) and idx_cust_note not in qty_group:
+            qty_group.append(idx_cust_note)
 
-    for rec in records:
-        assign = stop_assignment[rec["stop_key"]]
-        rec["driver_id"] = assign["driver_id"]
-        rec["driver_label"] = assign["driver_label"]
-        rec["route_stop_num"] = assign["route_stop_num"]
-        rec["arrival_str"] = assign["arrival_str"]
-        rec["departure_str"] = assign["departure_str"]
-        rec["route_date"] = assign["route_date"]
-        rec["client_mark"] = find_client_mark(rec["cust_name"], client_marks)
-        # הזמנה שהועברה ליום אחר מקבלת את תאריך המסלול
-        if assign["route_date"] and 0 <= idx_date < len(rec["raw_values"]):
-            rec["raw_values"][idx_date] = assign["route_date"]
+        reordered_raw_indices[insert_pos:insert_pos] = qty_group
 
-    records.sort(
-        key=lambda item: (
-            item["driver_id"],
-            item["route_stop_num"],
-            item["order_no"],
-            item["line_no"],
-        )
-    )
-
-    reordered_raw_indices: list[int] = []
-    for c_idx in range(len(raw_headers)):
-        if c_idx in (idx_qty, idx_unit, idx_cust_note):
-            continue
-        reordered_raw_indices.append(c_idx)
-
-    insert_pos = len(reordered_raw_indices)
-    for pos, orig_i in enumerate(reordered_raw_indices):
-        if orig_i > idx_qty:
-            insert_pos = pos
-            break
-
-    qty_group = [idx_qty]
-    if 0 <= idx_unit < len(raw_headers) and idx_unit != idx_qty:
-        qty_group.append(idx_unit)
-    if 0 <= idx_cust_note < len(raw_headers) and idx_cust_note not in qty_group:
-        qty_group.append(idx_cust_note)
-
-    reordered_raw_indices[insert_pos:insert_pos] = qty_group
-
-    out_headers: list[str] = [
-        "אזור חלוקה",
-        "נהג / משאית",
-        "תחנה במסלול",
-        "מחסן העמסה למוצר",
-    ]
-    unload_col_title = f"שעת יציאה (+{int(cfg['UNLOAD_MINUTES'])} דק' פריקה)"
-
-    for c_idx in reordered_raw_indices:
-        out_headers.append(raw_headers[c_idx])
-        if c_idx == idx_dest:
-            out_headers.append("שעת הגעה ליעד")
-            out_headers.append(unload_col_title)
-    out_headers.append(CLIENT_MARK_HEADER)
-    col_mark_out = len(out_headers)
-    mark_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-    mark_font = Font(name="Arial", size=10, bold=True, color="9C0006")
-
-    wb_out = openpyxl.Workbook()
-    ws_orders = wb_out.active
-    ws_orders.title = "הזמנות ממוינות לפי אזור"
-    ws_orders.sheet_view.rightToLeft = True
-
-    font_family = "Arial"
-    header_font = Font(name=font_family, size=11, bold=True, color="FFFFFF")
-    header_fill = PatternFill(
-        start_color="1F4E78", end_color="1F4E78", fill_type="solid"
-    )
-    data_font = Font(name=font_family, size=10, bold=False, color="000000")
-    bold_font = Font(name=font_family, size=10, bold=True, color="000000")
-    total_fill = PatternFill(
-        start_color="D9E1F2", end_color="D9E1F2", fill_type="solid"
-    )
-    wh_special_font = Font(name=font_family, size=10, bold=True, color="833C0C")
-
-    region_Palette = {
-        "צפון מזרח": "E8F4F8",
-        "צפון מערב": "EBF5DF",
-        "איזור ירושלים": "FFF5E6",
-        "אזור השרון": "F3E8F8",
-        "איזור גוש דן": "E8EEF8",
-        "דרום הארץ": "F9EBE8",
-    }
-
-    thin_side = Side(style="thin", color="D9D9D9")
-    med_navy = Side(style="medium", color="1F4E78")
-    double_bottom = Side(style="double", color="1F4E78")
-
-    data_border = Border(
-        left=thin_side, right=thin_side, top=thin_side, bottom=thin_side
-    )
-    header_border = Border(
-        left=thin_side, right=thin_side, top=med_navy, bottom=med_navy
-    )
-    total_border = Border(
-        top=thin_side, bottom=double_bottom, left=thin_side, right=thin_side
-    )
-
-    for col_idx, h_text in enumerate(out_headers, start=1):
-        cell = ws_orders.cell(1, col_idx, h_text)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(
-            horizontal="center", vertical="center", wrap_text=True
-        )
-        cell.border = header_border
-    ws_orders.row_dimensions[1].height = 28
-
-    col_qty_out = 1
-    col_line_out = 1
-    col_date_out = -1
-    col_order_out = -1
-    col_cust_out = -1
-
-    # צבע שורה לפי תאריך המסלול (אותם צבעים כמו בגיליון סיכום הנהגים)
-    order_date_palette = [
-        "DDEBF7", "E2EFDA", "FFF2CC", "FCE4D6", "EDE2F6", "D9F2F2", "F2F2F2",
-    ]
-    order_route_dates = sorted(
-        {drv.get("route_date", "") for drv in final_drivers}, key=date_sort_key
-    )
-    order_date_color = {
-        d: order_date_palette[i % len(order_date_palette)]
-        for i, d in enumerate(order_route_dates)
-    }
-
-    for row_offset, rec in enumerate(records, start=2):
-        reg = rec["region"]
-        row_color = order_date_color.get(rec.get("route_date", ""), "FFFFFF")
-        row_fill = PatternFill(
-            start_color=row_color, end_color=row_color, fill_type="solid"
-        )
-        raw_vals = rec["raw_values"]
-        row_out: list[Any] = [
-            reg,
-            rec["driver_label"],
-            rec["route_stop_num"],
-            rec["warehouse_label"],
+        out_headers: list[str] = [
+            "אזור חלוקה",
+            "נהג / משאית",
+            "תחנה במסלול",
+            "מחסן העמסה למוצר",
         ]
+        unload_col_title = f"שעת יציאה (+{int(cfg['UNLOAD_MINUTES'])} דק' פריקה)"
 
         for c_idx in reordered_raw_indices:
-            val = raw_vals[c_idx] if c_idx < len(raw_vals) else None
-            row_out.append(val)
-            if c_idx == idx_qty:
-                col_qty_out = len(row_out)
-            if c_idx == idx_line:
-                col_line_out = len(row_out)
-            if c_idx == idx_date:
-                col_date_out = len(row_out)
-            if c_idx == idx_order:
-                col_order_out = len(row_out)
-            if c_idx == idx_cust_name:
-                col_cust_out = len(row_out)
+            out_headers.append(raw_headers[c_idx])
             if c_idx == idx_dest:
-                row_out.append(rec["arrival_str"])
-                row_out.append(rec["departure_str"])
+                out_headers.append("שעת הגעה ליעד")
+                out_headers.append(unload_col_title)
+        out_headers.append(CLIENT_MARK_HEADER)
+        col_mark_out = len(out_headers)
+        mark_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+        mark_font = Font(name="Arial", size=10, bold=True, color="9C0006")
 
-        row_out.append(rec.get("client_mark") or None)
-        for col_idx, val in enumerate(row_out, start=1):
-            cell = ws_orders.cell(row_offset, col_idx, val)
-            cell.fill = row_fill
-            cell.border = data_border
-            cell.font = bold_font if col_idx in (1, 2, 3) else data_font
+        wb_out = openpyxl.Workbook()
+        ws_orders = wb_out.active
+        ws_orders.title = "הזמנות ממוינות לפי אזור"
+        ws_orders.sheet_view.rightToLeft = True
 
-            if col_idx == 4 and (
-                rec["is_cooling"] or rec["is_hazmat"] or rec["is_goldbond"]
-            ):
-                cell.font = wh_special_font
+        font_family = "Arial"
+        header_font = Font(name=font_family, size=11, bold=True, color="FFFFFF")
+        header_fill = PatternFill(
+            start_color="1F4E78", end_color="1F4E78", fill_type="solid"
+        )
+        data_font = Font(name=font_family, size=10, bold=False, color="000000")
+        bold_font = Font(name=font_family, size=10, bold=True, color="000000")
+        total_fill = PatternFill(
+            start_color="D9E1F2", end_color="D9E1F2", fill_type="solid"
+        )
+        wh_special_font = Font(name=font_family, size=10, bold=True, color="833C0C")
 
-            if col_idx == col_qty_out and isinstance(val, (int, float)):
-                cell.number_format = "#,##0.##"
-                cell.alignment = Alignment(
-                    horizontal="right", vertical="center"
-                )
-            elif col_idx == col_date_out:
-                cell.number_format = "@"
-                cell.alignment = Alignment(
-                    horizontal="center", vertical="center"
-                )
-            elif col_idx in (3, 5) or h_text_is_time(out_headers[col_idx - 1]):
-                cell.alignment = Alignment(
-                    horizontal="center", vertical="center"
-                )
-            else:
-                cell.alignment = Alignment(
-                    horizontal="right", vertical="center", wrap_text=False
-                )
-        if rec.get("client_mark"):
-            mc = ws_orders.cell(row_offset, col_mark_out)
-            mc.fill = mark_fill
-            mc.font = mark_font
-            mc.alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
-        # קישורים לפריוריטי: מספר הזמנה ושם לקוח
-        if col_order_out > 0:
-            set_link(ws_orders.cell(row_offset, col_order_out), order_link(cfg, rec["order_no"]))
-        if col_cust_out > 0 and 0 <= idx_cust_no < len(raw_vals):
-            set_link(
-                ws_orders.cell(row_offset, col_cust_out),
-                customer_link(cfg, raw_vals[idx_cust_no]),
+        region_Palette = {
+            "צפון מזרח": "E8F4F8",
+            "צפון מערב": "EBF5DF",
+            "איזור ירושלים": "FFF5E6",
+            "אזור השרון": "F3E8F8",
+            "איזור גוש דן": "E8EEF8",
+            "דרום הארץ": "F9EBE8",
+        }
+
+        thin_side = Side(style="thin", color="D9D9D9")
+        med_navy = Side(style="medium", color="1F4E78")
+        double_bottom = Side(style="double", color="1F4E78")
+
+        data_border = Border(
+            left=thin_side, right=thin_side, top=thin_side, bottom=thin_side
+        )
+        header_border = Border(
+            left=thin_side, right=thin_side, top=med_navy, bottom=med_navy
+        )
+        total_border = Border(
+            top=thin_side, bottom=double_bottom, left=thin_side, right=thin_side
+        )
+
+        for col_idx, h_text in enumerate(out_headers, start=1):
+            cell = ws_orders.cell(1, col_idx, h_text)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
             )
-        ws_orders.row_dimensions[row_offset].height = 21
+            cell.border = header_border
+        ws_orders.row_dimensions[1].height = 28
 
-    last_data_row = len(records) + 1
-    total_row_idx = last_data_row + 1
-    ws_orders.cell(total_row_idx, 1, 'סה"כ כללי').font = bold_font
+        col_qty_out = 1
+        col_line_out = 1
+        col_date_out = -1
+        col_order_out = -1
+        col_cust_out = -1
 
-    qty_col_letter = get_column_letter(col_qty_out)
-    line_col_letter = get_column_letter(col_line_out)
-    ws_orders.cell(
-        total_row_idx,
-        col_line_out,
-        f"=COUNT({line_col_letter}2:{line_col_letter}{last_data_row})",
-    )
-    ws_orders.cell(
-        total_row_idx,
-        col_qty_out,
-        f"=SUM({qty_col_letter}2:{qty_col_letter}{last_data_row})",
-    )
+        # צבע שורה לפי תאריך המסלול (אותם צבעים כמו בגיליון סיכום הנהגים)
+        order_date_palette = [
+            "DDEBF7", "E2EFDA", "FFF2CC", "FCE4D6", "EDE2F6", "D9F2F2", "F2F2F2",
+        ]
+        order_route_dates = sorted(
+            {drv.get("route_date", "") for drv in final_drivers}, key=date_sort_key
+        )
+        order_date_color = {
+            d: order_date_palette[i % len(order_date_palette)]
+            for i, d in enumerate(order_route_dates)
+        }
 
-    for c in range(1, len(out_headers) + 1):
-        cell = ws_orders.cell(total_row_idx, c)
-        cell.font = bold_font
-        cell.fill = total_fill
-        cell.border = total_border
-        if c == col_qty_out:
-            cell.number_format = "#,##0.##"
-            cell.alignment = Alignment(horizontal="right", vertical="center")
-        elif c == col_line_out:
-            cell.number_format = "#,##0"
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-    ws_orders.row_dimensions[total_row_idx].height = 24
-    ws_orders.freeze_panes = "A2"
+        for row_offset, rec in enumerate(records, start=2):
+            reg = rec["region"]
+            row_color = order_date_color.get(rec.get("route_date", ""), "FFFFFF")
+            row_fill = PatternFill(
+                start_color=row_color, end_color=row_color, fill_type="solid"
+            )
+            raw_vals = rec["raw_values"]
+            row_out: list[Any] = [
+                reg,
+                rec["driver_label"],
+                rec["route_stop_num"],
+                rec["warehouse_label"],
+            ]
 
-    # התאמת רוחב עמודות לגיליון הראשון בלבד
-    for col in ws_orders.columns:
-        col_letter = get_column_letter(col[0].column)
-        max_len = 0
-        for cell in col:
-            val_str = str(cell.value or "")
-            if val_str.startswith("="):
-                val_str = "123,456"
-            max_len = max(max_len, len(val_str))
-        ws_orders.column_dimensions[col_letter].width = max(
-            min(max_len + 5, 55), 12
+            for c_idx in reordered_raw_indices:
+                val = raw_vals[c_idx] if c_idx < len(raw_vals) else None
+                row_out.append(val)
+                if c_idx == idx_qty:
+                    col_qty_out = len(row_out)
+                if c_idx == idx_line:
+                    col_line_out = len(row_out)
+                if c_idx == idx_date:
+                    col_date_out = len(row_out)
+                if c_idx == idx_order:
+                    col_order_out = len(row_out)
+                if c_idx == idx_cust_name:
+                    col_cust_out = len(row_out)
+                if c_idx == idx_dest:
+                    row_out.append(rec["arrival_str"])
+                    row_out.append(rec["departure_str"])
+
+            row_out.append(rec.get("client_mark") or None)
+            for col_idx, val in enumerate(row_out, start=1):
+                cell = ws_orders.cell(row_offset, col_idx, val)
+                cell.fill = row_fill
+                cell.border = data_border
+                cell.font = bold_font if col_idx in (1, 2, 3) else data_font
+
+                if col_idx == 4 and (
+                    rec["is_cooling"] or rec["is_hazmat"] or rec["is_goldbond"]
+                ):
+                    cell.font = wh_special_font
+
+                if col_idx == col_qty_out and isinstance(val, (int, float)):
+                    cell.number_format = "#,##0.##"
+                    cell.alignment = Alignment(
+                        horizontal="right", vertical="center"
+                    )
+                elif col_idx == col_date_out:
+                    cell.number_format = "@"
+                    cell.alignment = Alignment(
+                        horizontal="center", vertical="center"
+                    )
+                elif col_idx in (3, 5) or h_text_is_time(out_headers[col_idx - 1]):
+                    cell.alignment = Alignment(
+                        horizontal="center", vertical="center"
+                    )
+                else:
+                    cell.alignment = Alignment(
+                        horizontal="right", vertical="center", wrap_text=False
+                    )
+            if rec.get("client_mark"):
+                mc = ws_orders.cell(row_offset, col_mark_out)
+                mc.fill = mark_fill
+                mc.font = mark_font
+                mc.alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
+            # קישורים לפריוריטי: מספר הזמנה ושם לקוח
+            if col_order_out > 0:
+                set_link(ws_orders.cell(row_offset, col_order_out), order_link(cfg, rec["order_no"]))
+            if col_cust_out > 0 and 0 <= idx_cust_no < len(raw_vals):
+                set_link(
+                    ws_orders.cell(row_offset, col_cust_out),
+                    customer_link(cfg, raw_vals[idx_cust_no]),
+                )
+            ws_orders.row_dimensions[row_offset].height = 21
+
+        last_data_row = len(records) + 1
+        total_row_idx = last_data_row + 1
+        ws_orders.cell(total_row_idx, 1, 'סה"כ כללי').font = bold_font
+
+        qty_col_letter = get_column_letter(col_qty_out)
+        line_col_letter = get_column_letter(col_line_out)
+        ws_orders.cell(
+            total_row_idx,
+            col_line_out,
+            f"=COUNT({line_col_letter}2:{line_col_letter}{last_data_row})",
+        )
+        ws_orders.cell(
+            total_row_idx,
+            col_qty_out,
+            f"=SUM({qty_col_letter}2:{qty_col_letter}{last_data_row})",
         )
 
-    # ==========================================================================
-    # גיליון 2: סיכום מסלולי נהגים ומשאיות (בדיוק לפי התמונה - 5 עמודות A עד E)
-    # ==========================================================================
-    ws_sum = wb_out.create_sheet(title="סיכום מסלולי נהגים ומשאיות")
-    ws_sum.sheet_view.rightToLeft = True
+        for c in range(1, len(out_headers) + 1):
+            cell = ws_orders.cell(total_row_idx, c)
+            cell.font = bold_font
+            cell.fill = total_fill
+            cell.border = total_border
+            if c == col_qty_out:
+                cell.number_format = "#,##0.##"
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+            elif c == col_line_out:
+                cell.number_format = "#,##0"
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws_orders.row_dimensions[total_row_idx].height = 24
+        ws_orders.freeze_panes = "A2"
 
-    sum_headers = [
-        "נהג / משאית",
-        "אזורי חלוקה",
-        'סה"כ זמן',
-        'סה"כ משקל',
-        "פירוט מלא של מסלול הנסיעה ושעות ההגעה",
-    ]
+        # התאמת רוחב עמודות לגיליון הראשון בלבד
+        for col in ws_orders.columns:
+            col_letter = get_column_letter(col[0].column)
+            max_len = 0
+            for cell in col:
+                val_str = str(cell.value or "")
+                if val_str.startswith("="):
+                    val_str = "123,456"
+                max_len = max(max_len, len(val_str))
+            ws_orders.column_dimensions[col_letter].width = max(
+                min(max_len + 5, 55), 12
+            )
 
-    for c_idx, h_val in enumerate(sum_headers, start=1):
-        cell = ws_sum.cell(1, c_idx, h_val)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(
-            horizontal="center", vertical="center", wrap_text=True
-        )
-        cell.border = header_border
-    ws_sum.row_dimensions[1].height = 30
+        # ==========================================================================
+        # גיליון 2: סיכום מסלולי נהגים ומשאיות (בדיוק לפי התמונה - 5 עמודות A עד E)
+        # ==========================================================================
+        ws_sum = wb_out.create_sheet(title="סיכום מסלולי נהגים ומשאיות")
+        ws_sum.sheet_view.rightToLeft = True
 
-    # צבע שורה לפי תאריך המסלול (כל יום בצבע משלו)
-    date_palette = [
-        "DDEBF7", "E2EFDA", "FFF2CC", "FCE4D6", "EDE2F6", "D9F2F2", "F2F2F2",
-    ]
-    route_dates = sorted(
-        {drv.get("route_date", "") for drv in final_drivers}, key=date_sort_key
-    )
-    date_color = {
-        d: date_palette[i % len(date_palette)] for i, d in enumerate(route_dates)
-    }
-
-    for d_idx, drv in enumerate(final_drivers, start=2):
-        row_color = date_color.get(drv.get("route_date", ""), "FFFFFF")
-        r_fill = PatternFill(
-            start_color=row_color, end_color=row_color, fill_type="solid"
-        )
-        weight_formula = (
-            f"=SUMIF('הזמנות ממוינות לפי אזור'!$B$2:$B${last_data_row}, "
-            f"A{d_idx}, 'הזמנות ממוינות לפי אזור'!${qty_col_letter}$2:${qty_col_letter}${last_data_row})"
-        )
-
-        row_vals_sum = [
-            drv["driver_label"],
-            drv["region_title"],
-            drv["total_shift_hhmm"],
-            weight_formula,
-            drv["Timeline_str"],
+        sum_headers = [
+            "נהג / משאית",
+            "אזורי חלוקה",
+            'סה"כ זמן',
+            'סה"כ משקל',
+            "פירוט מלא של מסלול הנסיעה ושעות ההגעה",
         ]
 
-        for c_i, v in enumerate(row_vals_sum, start=1):
-            c = ws_sum.cell(d_idx, c_i, v)
-            c.fill = r_fill
-            c.border = data_border
-            c.font = bold_font if c_i in (1, 3, 4) else data_font
-            if c_i == 3:
-                c.alignment = Alignment(
-                    horizontal="center", vertical="center", wrap_text=False
-                )
-            elif c_i == 4:
+        for c_idx, h_val in enumerate(sum_headers, start=1):
+            cell = ws_sum.cell(1, c_idx, h_val)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
+            cell.border = header_border
+        ws_sum.row_dimensions[1].height = 30
+
+        # צבע שורה לפי תאריך המסלול (כל יום בצבע משלו)
+        date_palette = [
+            "DDEBF7", "E2EFDA", "FFF2CC", "FCE4D6", "EDE2F6", "D9F2F2", "F2F2F2",
+        ]
+        route_dates = sorted(
+            {drv.get("route_date", "") for drv in final_drivers}, key=date_sort_key
+        )
+        date_color = {
+            d: date_palette[i % len(date_palette)] for i, d in enumerate(route_dates)
+        }
+
+        for d_idx, drv in enumerate(final_drivers, start=2):
+            row_color = date_color.get(drv.get("route_date", ""), "FFFFFF")
+            r_fill = PatternFill(
+                start_color=row_color, end_color=row_color, fill_type="solid"
+            )
+            weight_formula = (
+                f"=SUMIF('הזמנות ממוינות לפי אזור'!$B$2:$B${last_data_row}, "
+                f"A{d_idx}, 'הזמנות ממוינות לפי אזור'!${qty_col_letter}$2:${qty_col_letter}${last_data_row})"
+            )
+
+            row_vals_sum = [
+                drv["driver_label"],
+                drv["region_title"],
+                drv["total_shift_hhmm"],
+                weight_formula,
+                drv["Timeline_str"],
+            ]
+
+            for c_i, v in enumerate(row_vals_sum, start=1):
+                c = ws_sum.cell(d_idx, c_i, v)
+                c.fill = r_fill
+                c.border = data_border
+                c.font = bold_font if c_i in (1, 3, 4) else data_font
+                if c_i == 3:
+                    c.alignment = Alignment(
+                        horizontal="center", vertical="center", wrap_text=False
+                    )
+                elif c_i == 4:
+                    c.number_format = "#,##0.##"
+                    c.alignment = Alignment(
+                        horizontal="right", vertical="center", wrap_text=False
+                    )
+                else:
+                    c.alignment = Alignment(
+                        horizontal="right", vertical="center", wrap_text=False
+                    )
+            ws_sum.row_dimensions[d_idx].height = 24
+
+        sum_total_row = len(final_drivers) + 2
+        ws_sum.cell(
+            sum_total_row, 1, f'סה"כ ({len(final_drivers)} נהגים)'
+        ).font = bold_font
+        ws_sum.cell(sum_total_row, 4, f"=SUM(D2:D{sum_total_row - 1})")
+
+        for c_i in range(1, len(sum_headers) + 1):
+            c = ws_sum.cell(sum_total_row, c_i)
+            c.font = bold_font
+            c.fill = total_fill
+            c.border = total_border
+            if c_i == 4:
                 c.number_format = "#,##0.##"
-                c.alignment = Alignment(
-                    horizontal="right", vertical="center", wrap_text=False
-                )
+                c.alignment = Alignment(horizontal="right", vertical="center")
             else:
-                c.alignment = Alignment(
-                    horizontal="right", vertical="center", wrap_text=False
-                )
-        ws_sum.row_dimensions[d_idx].height = 24
+                c.alignment = Alignment(horizontal="right", vertical="center")
+        ws_sum.row_dimensions[sum_total_row].height = 25
 
-    sum_total_row = len(final_drivers) + 2
-    ws_sum.cell(
-        sum_total_row, 1, f'סה"כ ({len(final_drivers)} נהגים)'
-    ).font = bold_font
-    ws_sum.cell(sum_total_row, 4, f"=SUM(D2:D{sum_total_row - 1})")
+        # הגדרת רוחב עמודות קבוע וקומפקטי לגיליון הסיכום בדיוק כמו בתמונה
+        ws_sum.column_dimensions["A"].width = 12.0
+        ws_sum.column_dimensions["B"].width = 10.0
+        ws_sum.column_dimensions["C"].width = 8.0
+        ws_sum.column_dimensions["D"].width = 9.5
+        ws_sum.column_dimensions["E"].width = 62.0
 
-    for c_i in range(1, len(sum_headers) + 1):
-        c = ws_sum.cell(sum_total_row, c_i)
-        c.font = bold_font
-        c.fill = total_fill
-        c.border = total_border
-        if c_i == 4:
-            c.number_format = "#,##0.##"
-            c.alignment = Alignment(horizontal="right", vertical="center")
-        else:
-            c.alignment = Alignment(horizontal="right", vertical="center")
-    ws_sum.row_dimensions[sum_total_row].height = 25
+        out_path = pathlib.Path(output_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        wb_out.save(out_path)
+        return final_drivers
 
-    # הגדרת רוחב עמודות קבוע וקומפקטי לגיליון הסיכום בדיוק כמו בתמונה
-    ws_sum.column_dimensions["A"].width = 12.0
-    ws_sum.column_dimensions["B"].width = 10.0
-    ws_sum.column_dimensions["C"].width = 8.0
-    ws_sum.column_dimensions["D"].width = 9.5
-    ws_sum.column_dimensions["E"].width = 62.0
+    # עריכה ידנית בחלון: כל אישור יוצר את הקבצים, והחלון נשאר פתוח להמשך עריכה
+    if cfg.get("ENABLE_ROUTE_EDITOR", True):
+        last_written: dict[str, Any] = {}
 
-    output_path = pathlib.Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    wb_out.save(output_path)
-    return final_drivers
+        def on_generate(trucks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            out = write_output(trucks)
+            last_written["drivers"] = out
+            if after_write is not None:
+                after_write(out)
+            return out
+
+        result = apply_manual_route_edits(
+            planned_trucks, unique_stops_by_key, travel_matrix, cfg, drivers,
+            on_generate=on_generate,
+        )
+        if result is None:
+            return last_written.get("drivers", [])
+        planned_trucks = result  # החלון לא זמין - ממשיכים עם התכנון האוטומטי
+
+    return write_output(planned_trucks)
 
 
 def h_text_is_time(header_name: str) -> bool:
@@ -2818,6 +2870,8 @@ def is_excluded_support_file(
         str(cfg.get("CLIENT_MARKS_FILE_NAME", "clients_marks.xlsx")).lower(),
         "drivers.xlsx",
         "clients_marks.xlsx",
+        "gold_bond_gili.xlsx",
+        "gold_bond.xlsx",
         "dangerous_products.xlsx",
         "cooling_products.pdf",
         "cooling_products.xlsx",
@@ -2902,9 +2956,32 @@ def main() -> None:
     print(f"[*] קובץ הזמנות:  {input_path.name}")
     print("=" * 75)
 
+    # כל אישור בחלון העריכה מריץ מיד גם את רשימות הליקוט ודוחות ההובלה
+    downstream_runs = {"count": 0}
+
+    def run_downstream(_drivers: list[dict[str, Any]]) -> None:
+        here = pathlib.Path(__file__).resolve().parent
+        passthrough = [a for a in sys.argv[1:] if a != "--no-open"]
+        for script in (
+            "generate_regional_picking_lists.py",
+            "generate_driver_delivery_reports.py",
+        ):
+            cmd = [sys.executable, str(here / script), *passthrough]
+            # התיקייה נפתחת רק בפעם הראשונה (בסוף דוחות ההובלה)
+            if script.startswith("generate_regional") or downstream_runs["count"] > 0:
+                cmd.append("--no-open")
+            print(f"\n[*] מריץ {script} ...")
+            rc = subprocess.run(cmd).returncode
+            if rc != 0:
+                raise RuntimeError(f"{script} נכשל (קוד יציאה {rc})")
+        downstream_runs["count"] += 1
+
     try:
         drivers = sort_orders_excel(
-            input_path=input_path, output_path=output_path, cfg=cfg
+            input_path=input_path,
+            output_path=output_path,
+            cfg=cfg,
+            after_write=run_downstream,
         )
     except RouteEditCancelled:
         print("\n[X] עריכת המסלולים בוטלה על ידי המשתמש. לא נוצרו קבצים.")
@@ -2925,6 +3002,11 @@ def main() -> None:
             )
             + f"{drv['return_home_str']}"
         )
+
+    if downstream_runs["count"] > 0:
+        # רשימות הליקוט ודוחות ההובלה כבר נוצרו מתוך החלון - run_all.bat לא יריץ אותם שוב
+        print("\n[V] רשימות הליקוט ודוחות ההובלה נוצרו מתוך חלון העריכה.")
+        sys.exit(3)
 
     if cfg.get("AUTO_OPEN_OUTPUT_FOLDER", True) and not args.no_open:
         open_output_folder_in_explorer(output_path)

@@ -218,7 +218,7 @@ def load_config(custom_config_path: pathlib.Path | None = None) -> dict[str, Any
             "HAZMAT_FILE_NAME", "dangerous_products.xlsx"
         ),
         "GOLDBOND_FILE_NAME": raw_kv.get(
-            "GOLDBOND_FILE_NAME", "Gold_bond.xlsx"
+            "GOLDBOND_FILE_NAME", "Gold_bond_gili.xlsx"
         ),
         "MAIN_WAREHOUSE_NAME": main_wh_name,
         "MAIN_WAREHOUSE_ADDRESS": raw_kv.get(
@@ -237,7 +237,7 @@ def load_config(custom_config_path: pathlib.Path | None = None) -> dict[str, Any
             "HAZMAT_WAREHOUSE_ADDRESS", "פארק נמלי ישראל, אשדוד"
         ),
         "GOLDBOND_WAREHOUSE_NAME": raw_kv.get(
-            "GOLDBOND_WAREHOUSE_NAME", "גולד בונד"
+            "GOLDBOND_WAREHOUSE_NAME", "גולד בונד גילי"
         ),
         "GOLDBOND_WAREHOUSE_ADDRESS": raw_kv.get(
             "GOLDBOND_WAREHOUSE_ADDRESS", "הקידמה 1 אשדוד"
@@ -366,6 +366,12 @@ def load_warehouse_sku_sets(
         if h_file.exists():
             hazmat_skus.update(load_skus_from_excel(h_file))
         g_file = folder / cfg["GOLDBOND_FILE_NAME"]
+        if not g_file.exists():
+            # מחסן גולד בונד גילי: הקובץ נקרא היום Gold_bond_gili.xlsx (בעבר Gold_bond.xlsx)
+            for alt in ("Gold_bond_gili.xlsx", "Gold_bond.xlsx"):
+                if (folder / alt).exists():
+                    g_file = folder / alt
+                    break
         if g_file.exists():
             goldbond_skus.update(load_skus_from_excel(g_file))
 
@@ -1066,6 +1072,8 @@ def is_excluded_support_file(p: pathlib.Path, cfg: dict[str, Any]) -> bool:
         CONFIG_FILE_NAME.lower(),
         "drivers.xlsx",
         "clients_marks.xlsx",
+        "gold_bond_gili.xlsx",
+        "gold_bond.xlsx",
         "dangerous_products.xlsx",
         "cooling_products.pdf",
         "cooling_products.xlsx",

@@ -12,8 +12,10 @@
 - "סדר אוטומטי" - מחשב מחדש את הסדר הקצר ביותר לעצירות של אותו נהג.
 - שעות ההגעה, המשקל וזמן המשמרת מתעדכנים מיד אחרי כל שינוי.
 - נהג שחורג ממשקל המשאית או משעות המשמרת מסומן באדום (מותר לאשר בכל זאת).
-- "אישור והמשך" - הסקריפט ממשיך ומייצר את קובץ האקסל לפי המסלולים שבחלון.
-- "ביטול" / סגירת החלון - ההרצה נעצרת ולא נוצרים קבצים.
+- "אישור והמשך" - יוצר מיד את כל הקבצים (אקסל ממוין, רשימות ליקוט, דוחות הובלה)
+  לפי המסלולים שבחלון. החלון נשאר פתוח: אפשר להמשיך לערוך ולאשר שוב כדי לעדכן.
+- "סיום" - סגירת החלון אחרי שהקבצים נוצרו.
+- "ביטול" / סגירת החלון לפני אישור - ההרצה נעצרת ולא נוצרים קבצים.
 - בחירת נהג לכל מסלול מתוך input_files/drivers.xlsx: המסלול מחושב מחדש
   מכתובת הבית של הנהג (יציאה וחזרה), והשם מופיע בכל הדוחות.
 - אפשר לשבץ את אותו נהג לכמה מסלולים: הם הופכים לסבבים ברצף
@@ -137,8 +139,13 @@ class RouteEditor:
         drivers: list[dict[str, Any]] | None = None,
         initial_days: list[str | None] | None = None,
         compute_efficient: Callable[[], list[list[str]]] | None = None,
+        on_generate: Callable[[list[tuple[list[str], str | None, str | None]]], Any]
+        | None = None,
     ) -> None:
         self.root = root
+        # יצירת הקבצים מתוך החלון (החלון נשאר פתוח אחרי האישור)
+        self.on_generate = on_generate
+        self._generated_count = 0
         # ימים (תאריכי אספקה) - בדוח יומי יש יום אחד בלבד
         if initial_days is None:
             initial_days = [None] * len(initial_routes)
@@ -368,10 +375,11 @@ class RouteEditor:
             bottom, text="חזרה לתכנון המקורי", font=F_BTN, padx=12, pady=6,
             command=self.reset,
         ).pack(side="right", padx=6)
-        tk.Button(
+        self.cancel_btn = tk.Button(
             bottom, text="ביטול", font=F_BTN, padx=12, pady=6,
             command=self.on_cancel,
-        ).pack(side="left", padx=6)
+        )
+        self.cancel_btn.pack(side="left", padx=6)
         self.map_btn = tk.Button(
             bottom, text="הסתר מפה", font=F_BTN, padx=12, pady=6,
             command=self.toggle_map,
@@ -1299,13 +1307,48 @@ class RouteEditor:
                 )
                 if not ok:
                     return
-        self.result = [
+        result = [
             (list(self.routes[c]), self._driver_of(c), self._route_date(c))
             for c in active_cols
         ]
-        self.root.destroy()
+        if self.on_generate is None:
+            self.result = result
+            self.root.destroy()
+            return
+
+        # יצירת הקבצים עכשיו - החלון נשאר פתוח להמשך עריכה
+        self.root.configure(cursor="watch")
+        self.info_label.configure(text="יוצר את הקבצים... (אקסל ממוין, רשימות ליקוט, דוחות הובלה)")
+        self.root.update()
+        try:
+            self.on_generate(result)
+        except Exception as exc:  # noqa: BLE001
+            self.root.configure(cursor="")
+            self._update_info()
+            messagebox.showerror(
+                "שגיאה ביצירת הקבצים",
+                f"{exc}\n\nאם אחד מקבצי הפלט פתוח באקסל - סגרו אותו ולחצו שוב על \"אישור והמשך\".",
+                parent=self.root,
+            )
+            return
+        self.root.configure(cursor="")
+        self._update_info()
+        self.result = result
+        self._generated_count += 1
+        self.cancel_btn.configure(text="סיום")
+        messagebox.showinfo(
+            "הקבצים נוצרו",
+            "הקובץ הממוין, רשימות הליקוט ודוחות ההובלה נוצרו לפי המסלולים שבחלון.\n\n"
+            "אפשר להמשיך לערוך וללחוץ שוב על \"אישור והמשך\" כדי לעדכן את הקבצים,\n"
+            "או ללחוץ על \"סיום\" כדי לסגור את החלון.",
+            parent=self.root,
+        )
 
     def on_cancel(self) -> None:
+        if self._generated_count > 0:
+            # הקבצים כבר נוצרו - "סיום"
+            self.root.destroy()
+            return
         ok = messagebox.askyesno(
             "ביטול",
             "לבטל את ההרצה?\nקבצי האקסל לא ייווצרו.",
@@ -1335,6 +1378,7 @@ def run_route_editor(
     drivers: list[dict[str, Any]] | None = None,
     initial_days: list[str | None] | None = None,
     compute_efficient: Callable[[], list[list[str]]] | None = None,
+    on_generate: Callable[..., Any] | None = None,
 ) -> list[tuple[list[str], str | None, str | None]] | None:
     """
     פותח את חלון העריכה וממתין עד שהמשתמש יאשר או יבטל.
@@ -1344,7 +1388,7 @@ def run_route_editor(
     root = tk.Tk()
     editor = RouteEditor(
         root, initial_routes, stops_by_key, simulate, cfg, region_order, drivers,
-        initial_days, compute_efficient,
+        initial_days, compute_efficient, on_generate,
     )
     root.lift()
     try:
