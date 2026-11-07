@@ -801,10 +801,17 @@ def create_single_driver_report(
             else ""
         )
 
-        stop_banner_text = (
-            f"תחנה {stop_num}: {dest}  |  שם הלקוח: {cust_name}  |  "
-            f"כתובת מדויקת: {full_address}{arr_txt}{phone_txt}"
-        )
+        if first_it.get("chosen_address"):
+            # כתובת שנבחרה (מקובץ הכתובות הנכונות) - היעד שבהזמנה עלול להיות שגוי
+            stop_banner_text = (
+                f"תחנה {stop_num}  |  שם הלקוח: {cust_name}  |  "
+                f"כתובת מדויקת: {first_it['chosen_address']}{arr_txt}{phone_txt}"
+            )
+        else:
+            stop_banner_text = (
+                f"תחנה {stop_num}: {dest}  |  שם הלקוח: {cust_name}  |  "
+                f"כתובת מדויקת: {full_address}{arr_txt}{phone_txt}"
+            )
 
         ws.merge_cells(
             start_row=curr_row,
@@ -976,6 +983,8 @@ def generate_driver_reports_from_sorted_excel(
     idx_internal_note = find_col(["הערה פנימית להזמנה", "הערה פנימית"], 20)
     idx_cust_no = find_cust_no_col(headers)
     idx_mark = find_col(["דגש מיוחד ללקוח"], -1)
+    # הכתובת שנבחרה בחלון העריכה (מקובץ הכתובות הנכונות) - גוברת על הכתובת מההזמנה
+    idx_chosen = find_col(["כתובת אספקה נבחרת"], -1)
 
     cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
 
@@ -1098,6 +1107,9 @@ def generate_driver_reports_from_sorted_excel(
             "is_goldbond": is_goldbond,
             "wh_short": " + ".join(wh_names_short),
             "combined_notes": combined_notes,
+            "chosen_address": str(row_vals[idx_chosen] or "").strip()
+            if 0 <= idx_chosen < len(row_vals)
+            else "",
         }
 
         if driver_label not in drivers_map:
@@ -1163,6 +1175,7 @@ def is_excluded_support_file(p: pathlib.Path, cfg: dict[str, Any]) -> bool:
         CONFIG_FILE_NAME.lower(),
         "drivers.xlsx",
         "clients_marks.xlsx",
+        "clients_with_correct_adresses.xlsx",
         "gold_bond_gili.xlsx",
         "gold_bond.xlsx",
         "dangerous_products.xlsx",

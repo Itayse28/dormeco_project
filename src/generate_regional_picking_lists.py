@@ -981,6 +981,7 @@ def is_excluded_support_file(p: pathlib.Path, cfg: dict[str, Any]) -> bool:
         CONFIG_FILE_NAME.lower(),
         "drivers.xlsx",
         "clients_marks.xlsx",
+        "clients_with_correct_adresses.xlsx",
         "gold_bond_gili.xlsx",
         "gold_bond.xlsx",
         "dangerous_products.xlsx",

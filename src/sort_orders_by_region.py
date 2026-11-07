@@ -121,6 +121,7 @@ except ImportError:
 # ==============================================================================
 DEFAULT_BASE_DIR = r"C:\Users\itaik\OneDrive\מסמכים\dormeco-sorting-script"
 CONFIG_FILE_NAME = "config_parameters.txt"
+CLIENT_ADDRESSES_DEFAULT_FILE = "Clients_With_Correct_Adresses.xlsx"
 
 DEFAULT_CONFIG_TEMPLATE = """# ==============================================================================
 # קובץ הגדרות ופרמטרים דינמיים - מערכת מיון הזמנות ותכנון מסלולים (דורמקו)
@@ -139,6 +140,8 @@ GOLDBOND_FILE_NAME = Gold_bond_gili.xlsx
 DRIVERS_FILE_NAME = drivers.xlsx
 # קובץ לקוחות עם דגשים מיוחדים (עמודה א: שם לקוח, עמודה ב: הדגש)
 CLIENT_MARKS_FILE_NAME = clients_marks.xlsx
+# קובץ כתובות האספקה הנכונות של הלקוחות (לפי מספר לקוח, אפשר כמה כתובות ללקוח)
+CLIENT_ADDRESSES_FILE_NAME = Clients_With_Correct_Adresses.xlsx
 
 # 2. זמני העמסה במחסנים באשדוד וזמן פריקה אצל לקוח (בדקות)
 MAIN_WAREHOUSE_LOAD_MINUTES = 60
@@ -331,6 +334,10 @@ def load_or_create_config(
         or "clients_marks.xlsx",
         "DRIVERS_FILE_NAME": raw_kv.get("DRIVERS_FILE_NAME", "drivers.xlsx").strip()
         or "drivers.xlsx",
+        "CLIENT_ADDRESSES_FILE_NAME": raw_kv.get(
+            "CLIENT_ADDRESSES_FILE_NAME", CLIENT_ADDRESSES_DEFAULT_FILE
+        ).strip()
+        or CLIENT_ADDRESSES_DEFAULT_FILE,
         "MAIN_WAREHOUSE_LOAD_MINUTES": main_load,
         "COOLING_WAREHOUSE_LOAD_MINUTES": cooling_load,
         "HAZMAT_WAREHOUSE_LOAD_MINUTES": hazmat_load,
@@ -2037,6 +2044,220 @@ def find_client_mark(cust_name: Any, marks: list[tuple[str, str]]) -> str:
     return best[1]
 
 
+# ==============================================================================
+# כתובות אספקה נכונות (input_files/Clients_With_Correct_Adresses.xlsx)
+# ==============================================================================
+# הכתובת בקובץ ההזמנות לא תמיד נכונה (למשל ת.ד. במקום כתובת המפעל).
+# לכל לקוח (לפי מספר לקוח) יכולות להיות כמה כתובות אספקה בקובץ הכתובות.
+# ברירת המחדל לכל עצירה: הכתובת מקובץ הכתובות שמתאימה לכתובת שבקובץ ההזמנות,
+# ואם אף אחת לא מתאימה - הכתובת הראשונה של הלקוח בקובץ הכתובות.
+# בחלון העריכה אפשר לבחור כתובת אחרת (קליק ימני על העצירה).
+CHOSEN_ADDRESS_HEADER = "כתובת אספקה נבחרת"
+SOURCE_CLIENTS_FILE = "קובץ כתובות"
+SOURCE_ORDERS_FILE = "קובץ ההזמנות"
+
+# מילים שלא עוזרות להשוואת כתובות ("שדרות" לא כאן - זו גם עיר)
+_ADDRESS_STOPWORDS = {
+    "רח", "רחוב", "שד", "דרך", "אזהת", "אזה", "את", "אזור", "איזור",
+    "תעשיה", "תעשייה", "התעשיה", "התעשייה", "פארק", "תד", "ת", "ד", "מיקוד",
+    "קיבוץ", "מושב", "ליד", "פינת", "בניין", "בנין", "קומה", "מפעל", "מחסן",
+    "אספקה", "באתר",
+}
+_HEB_PREFIXES = "בלהומכש"
+
+
+def _address_tokens(text: Any) -> set[str]:
+    """מילות כתובת מנורמלות להשוואה (בלי פיסוק, מספרי ת.ד./מיקוד ומילים כלליות)."""
+    s = str(text or "")
+    s = re.sub(r"\([^)]*\)", " ", s)
+    s = re.sub(r"ת\.?\s?ד\.?\s*\d+", " ", s)
+    s = re.sub(r"[\"'`״׳]", "", s)
+    # "בר-מן" נחשב גם כ"ברמן"
+    joined = re.findall(r"(\w+)-(\w+)", s)
+    s = re.sub(r"[^\w\s]", " ", s)
+    words = set(s.split()) | {a + b for a, b in joined}
+    words = {w for w in words if len(w) > 1 and not re.fullmatch(r"\d{5,}", w)}
+    return {w for w in words if w not in _ADDRESS_STOPWORDS}
+
+
+def _words_match(a: str, b: str) -> bool:
+    """מילים זהות, או זהות אחרי הורדת אות שימוש אחת (בברמן = ברמן, לקיבוץ = קיבוץ)."""
+    if a == b:
+        return True
+    for x, y in ((a, b), (b, a)):
+        if len(x) >= 4 and x[0] in _HEB_PREFIXES and x[1:] == y:
+            return True
+    return False
+
+
+def address_match_score(option_address: Any, raw_texts: list[Any]) -> float:
+    """כמה מהמילים של הכתובת מקובץ הכתובות מופיעות בנתוני ההזמנה (0 עד 1)."""
+    opt = _address_tokens(option_address)
+    if not opt:
+        return 0.0
+    raw: set[str] = set()
+    for t in raw_texts:
+        raw |= _address_tokens(t)
+    hits = sum(1 for w in opt if any(_words_match(w, r) for r in raw))
+    return hits / len(opt)
+
+
+ADDRESS_MATCH_THRESHOLD = 0.5
+
+
+def load_client_addresses(cfg: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
+    """
+    קורא את קובץ הכתובות הנכונות: {מספר לקוח: [{address, contact, notes}, ...]}.
+    כתובות כפולות של אותו לקוח מאוחדות. קובץ חסר => מילון ריק (המערכת עובדת כרגיל).
+    """
+    name = cfg.get("CLIENT_ADDRESSES_FILE_NAME", CLIENT_ADDRESSES_DEFAULT_FILE)
+    path = cfg["INPUT_DIR_PATH"] / name
+    if not path.exists():
+        print(f"[*] קובץ כתובות הלקוחות לא נמצא ({name}) - משתמשים בכתובות מקובץ ההזמנות.")
+        return {}
+    try:
+        ws = load_workbook_safe(path).worksheets[0]
+    except Exception as exc:  # noqa: BLE001
+        print(f"[!] לא ניתן לקרוא את קובץ כתובות הלקוחות {name}: {exc}")
+        return {}
+
+    rows = ws.iter_rows(values_only=True)
+    headers = [str(h or "").strip() for h in next(rows, [])]
+
+    def col(names: list[str], default: int) -> int:
+        for n in names:
+            for i, h in enumerate(headers):
+                if n in h:
+                    return i
+        return default
+
+    i_no = col(["מס. לקוח", "מס' לקוח", "מספר לקוח"], 0)
+    i_addr = col(["כתובת אספקה"], 2)
+    i_contact = col(["איש קשר"], -1)
+    i_notes = col(["הערות אספקה"], -1)
+
+    def cell(row: tuple, i: int) -> str:
+        return str(row[i] or "").strip() if 0 <= i < len(row) else ""
+
+    result: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        cust_no, addr = cell(row, i_no), cell(row, i_addr)
+        if not cust_no or not addr:
+            continue
+        opts = result.setdefault(cust_no, [])
+        if any(o["address"] == addr for o in opts):
+            continue
+        opts.append({
+            "address": addr,
+            "contact": cell(row, i_contact),
+            "notes": cell(row, i_notes),
+        })
+    print(f"[*] נטענו כתובות אספקה ל-{len(result)} לקוחות מ-{name}")
+    return result
+
+
+def locality_name_in(text: Any) -> str:
+    """שם היישוב שמופיע בכתובת (לתצוגה קצרה ברשימת העצירות), או "" אם לא נמצא."""
+    s = normalize_locality_text(str(text or ""), remove_parens=True)
+    for loc_name in sorted(KNOWN_LOCALITIES, key=len, reverse=True):
+        if len(loc_name) < 3:
+            continue
+        if re.search(rf"(?:^|[\s,.\-/()]){re.escape(loc_name)}(?:$|[\s,.\-/()])", s):
+            return loc_name
+    return ""
+
+
+def resolve_address_coords(
+    address: str, cache: dict[str, Any], cfg: dict[str, Any]
+) -> tuple[str, float, float] | None:
+    """מיקום של כתובת מלאה מקובץ הכתובות: מילון היישובים, המטמון, ואז חיפוש באינטרנט."""
+    for city_kw, street_kw, s_lat, s_lon in SPECIFIC_ADDRESS_COORDS:
+        if city_kw in address and street_kw in address:
+            return KNOWN_LOCALITIES[city_kw][0], s_lat, s_lon
+    res = match_in_known_localities(address, is_address_field=True)
+    if res:
+        return res
+    cached = cache.get(address)
+    if isinstance(cached, list) and len(cached) == 3:
+        return str(cached[0]), float(cached[1]), float(cached[2])
+    if cfg.get("USE_EXTERNAL_ROUTING_API", True):
+        ext = query_external_geocoding_coords(
+            address, api_key=cfg.get("GOOGLE_MAPS_API_KEY", "")
+        )
+        if ext:
+            cache[address] = list(ext)
+            save_cache(cache)
+            return ext
+    return None
+
+
+def build_address_options(
+    stop: dict[str, Any],
+    raw_texts: list[Any],
+    client_opts: list[dict[str, str]],
+    preferred: str,
+    cache: dict[str, Any],
+    cfg: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int]:
+    """
+    רשימת הכתובות האפשריות לעצירה + האינדקס של ברירת המחדל.
+    האפשרות האחרונה היא תמיד הכתובת מקובץ ההזמנות (כדי שאפשר יהיה לחזור אליה).
+    preferred: כתובת שנבחרה בעבר (מטבלה ממוינת) - גוברת על כל השאר.
+    """
+    options: list[dict[str, Any]] = []
+    for o in client_opts:
+        loc = resolve_address_coords(o["address"], cache, cfg)
+        found = loc is not None
+        region, lat, lon = loc if loc else (stop["region"], *stop["coords"])
+        options.append({
+            "address": o["address"],
+            "source": SOURCE_CLIENTS_FILE,
+            "contact": o.get("contact", ""),
+            "notes": o.get("notes", ""),
+            "region": region,
+            "coords": (lat, lon),
+            "located": found,
+            "city": locality_name_in(o["address"]) or o["address"],
+        })
+    raw_address = ", ".join(dict.fromkeys(
+        str(t).strip() for t in raw_texts[:2] if t and str(t).strip()
+    ))
+    options.append({
+        "address": raw_address or stop["effective_dest"],
+        "source": SOURCE_ORDERS_FILE,
+        "contact": "",
+        "notes": "",
+        "region": stop["region"],
+        "coords": tuple(stop["coords"]),
+        "located": True,
+        "city": stop["effective_dest"] or raw_address,
+    })
+
+    default = 0 if client_opts else len(options) - 1
+    if client_opts:
+        scores = [address_match_score(o["address"], raw_texts) for o in client_opts]
+        best = max(range(len(scores)), key=lambda i: scores[i])
+        if scores[best] >= ADDRESS_MATCH_THRESHOLD:
+            default = best
+    if preferred:
+        for i, o in enumerate(options):
+            if o["address"] == preferred:
+                default = i
+                break
+    return options, default
+
+
+def apply_address_choice(stop: dict[str, Any], idx: int) -> None:
+    """מעדכן את העצירה לפי הכתובת שנבחרה (מיקום, אזור ואינדקס במטריצת הזמנים)."""
+    opt = stop["address_options"][idx]
+    stop["address_choice"] = idx
+    stop["coords"] = opt["coords"]
+    stop["region"] = opt["region"]
+    stop["matrix_idx"] = opt["matrix_idx"]
+    stop["chosen_address"] = opt["address"]
+    stop["display_city"] = opt["city"]
+
+
 # עמודות שהסקריפט מוסיף לטבלה הממוינת (לא חלק מנתוני ההזמנה המקוריים)
 GENERATED_HEADERS = {
     "אזור חלוקה",
@@ -2045,6 +2266,7 @@ GENERATED_HEADERS = {
     "מחסן העמסה למוצר",
     "שעת הגעה ליעד",
     "דגש מיוחד ללקוח",
+    CHOSEN_ADDRESS_HEADER,
 }
 
 
@@ -2251,6 +2473,7 @@ def apply_manual_route_edits(
         on_generate=gui_generate if on_generate else None,
         send_mails=send_mails,
         initial_drivers=initial_drivers,
+        apply_address=apply_address_choice,
         **(gui_extras or {}),
     )
     if edited is None:
@@ -2333,6 +2556,12 @@ def sort_orders_excel(
         raw_headers = [raw_headers[i] for i in keep_idx]
         i_prior_label = full_headers.index("נהג / משאית")
         i_prior_stop = full_headers.index("תחנה במסלול")
+    # כתובת שנבחרה בהרצה קודמת (טבלה ממוינת) - נשמרת כברירת מחדל
+    i_prior_chosen = (
+        full_headers.index(CHOSEN_ADDRESS_HEADER)
+        if CHOSEN_ADDRESS_HEADER in full_headers
+        else -1
+    )
 
     def find_col(possible_names: list[str], default_idx: int) -> int:
         for name in possible_names:
@@ -2373,12 +2602,14 @@ def sort_orders_excel(
         ]
         if not any(v is not None and str(v).strip() != "" for v in row_vals):
             continue
-        prior_label, prior_stop = None, None
+        prior_label, prior_stop, prior_chosen = None, None, ""
         if is_sorted_input:
             if str(row_vals[0] or "").strip().startswith('סה"כ'):
                 continue  # שורת הסיכום בתחתית הטבלה הממוינת
             prior_label = str(row_vals[i_prior_label] or "").strip()
             prior_stop = row_vals[i_prior_stop]
+            if 0 <= i_prior_chosen < len(row_vals):
+                prior_chosen = str(row_vals[i_prior_chosen] or "").strip()
             row_vals = [row_vals[i] if i < len(row_vals) else None for i in keep_idx]
 
         # תיקון תאריך אספקה לפורמט DD-MM-YYYY (למשל 02-11-2026)
@@ -2473,6 +2704,12 @@ def sort_orders_excel(
                 "raw_values": row_vals,
                 "prior_label": prior_label,
                 "prior_stop": prior_stop,
+                "prior_chosen": prior_chosen,
+                "cust_no": str(row_vals[idx_cust_no] or "").strip()
+                if 0 <= idx_cust_no < len(row_vals)
+                else "",
+                # הכתובת כפי שהיא בקובץ ההזמנות (להשוואה מול קובץ הכתובות)
+                "raw_address_texts": [addr_val, dest_val, site_val],
             }
         )
 
@@ -2495,9 +2732,12 @@ def sort_orders_excel(
                 "effective_dest": rec["effective_dest"],
                 "address": rec["address"],
                 "cust_name": rec["cust_name"],
+                "cust_no": rec["cust_no"],
                 "date": rec["date"],
                 "coords": (rec["lat"], rec["lon"]),
                 "matrix_idx": m_idx,
+                "raw_address_texts": rec["raw_address_texts"],
+                "prior_chosen": rec["prior_chosen"],
                 "weight": 0.0,
                 "needs_main": False,
                 "needs_cooling": False,
@@ -2510,6 +2750,43 @@ def sort_orders_excel(
         st["needs_cooling"] = st["needs_cooling"] or rec["is_cooling"]
         st["needs_hazmat"] = st["needs_hazmat"] or rec["is_hazmat"]
         st["needs_goldbond"] = st["needs_goldbond"] or rec["is_goldbond"]
+
+    # כתובות אספקה אפשריות לכל עצירה (מקובץ הכתובות + מקובץ ההזמנות).
+    # כל כתובת מקבלת נקודה במטריצת הזמנים, כדי שבחירת כתובת אחרת בחלון תעדכן מיד
+    # את זמני הנסיעה. כתובות באותו מיקום חולקות נקודה אחת.
+    client_addresses = load_client_addresses(cfg)
+    point_idx: dict[tuple[float, float], int] = {}
+    changed = 0
+
+    def point_key(c: tuple[float, float]) -> tuple[float, float]:
+        return (round(float(c[0]), 5), round(float(c[1]), 5))
+
+    for st in unique_stops_by_key.values():
+        point_idx.setdefault(point_key(st["coords"]), st["matrix_idx"])
+        options, default = build_address_options(
+            st,
+            st["raw_address_texts"],
+            client_addresses.get(st["cust_no"], []),
+            st["prior_chosen"],
+            cache,
+            cfg,
+        )
+        for opt in options:
+            c = point_key(opt["coords"])
+            if c not in point_idx:
+                point_idx[c] = len(fixed_points)
+                fixed_points.append(opt["coords"])
+            opt["matrix_idx"] = point_idx[c]
+        options[-1]["matrix_idx"] = st["matrix_idx"]  # הכתובת מקובץ ההזמנות
+        st["address_options"] = options
+        apply_address_choice(st, default)
+        if options[default]["source"] == SOURCE_CLIENTS_FILE:
+            changed += 1
+    if client_addresses:
+        print(
+            f"[*] כתובות אספקה: {changed} מתוך {len(unique_stops_by_key)} עצירות "
+            "לפי קובץ הכתובות (אפשר לשנות בחלון - קליק ימני על עצירה)."
+        )
 
     # כתובות הבית של הנהגים מתווספות למטריצת זמני הנסיעה (אחרי העצירות)
     drivers = load_drivers(cfg, cache) if cfg.get("ENABLE_ROUTE_EDITOR", True) else []
@@ -2629,6 +2906,8 @@ def sort_orders_excel(
                 out_headers.append(unload_col_title)
         out_headers.append(CLIENT_MARK_HEADER)
         col_mark_out = len(out_headers)
+        # בסוף הטבלה, כדי לא לבלבל את זיהוי העמודה "כתובת" המקורית
+        out_headers.append(CHOSEN_ADDRESS_HEADER)
         mark_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
         mark_font = Font(name="Arial", size=10, bold=True, color="9C0006")
 
@@ -2701,7 +2980,8 @@ def sort_orders_excel(
         }
 
         for row_offset, rec in enumerate(records, start=2):
-            reg = rec["region"]
+            stop = unique_stops_by_key[rec["stop_key"]]
+            reg = stop["region"]  # לפי הכתובת שנבחרה
             row_color = order_date_color.get(rec.get("route_date", ""), "FFFFFF")
             row_fill = PatternFill(
                 start_color=row_color, end_color=row_color, fill_type="solid"
@@ -2732,6 +3012,7 @@ def sort_orders_excel(
                     row_out.append(rec["departure_str"])
 
             row_out.append(rec.get("client_mark") or None)
+            row_out.append(stop.get("chosen_address") or None)
             for col_idx, val in enumerate(row_out, start=1):
                 cell = ws_orders.cell(row_offset, col_idx, val)
                 cell.fill = row_fill
@@ -2982,6 +3263,8 @@ def is_excluded_support_file(
         CONFIG_FILE_NAME.lower(),
         str(cfg.get("DRIVERS_FILE_NAME", "drivers.xlsx")).lower(),
         str(cfg.get("CLIENT_MARKS_FILE_NAME", "clients_marks.xlsx")).lower(),
+        str(cfg.get("CLIENT_ADDRESSES_FILE_NAME", CLIENT_ADDRESSES_DEFAULT_FILE)).lower(),
+        CLIENT_ADDRESSES_DEFAULT_FILE.lower(),
         "drivers.xlsx",
         "clients_marks.xlsx",
         "gold_bond_gili.xlsx",

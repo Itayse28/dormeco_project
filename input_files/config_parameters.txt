@@ -12,6 +12,8 @@ GOLDBOND_FILE_NAME = Gold_bond.xlsx
 
 # קובץ רשימת הנהגים (עמודות: שם נהג, כתובת) - לבחירת נהג לכל מסלול בחלון העריכה
 DRIVERS_FILE_NAME = drivers.xlsx
+# קובץ כתובות האספקה הנכונות של הלקוחות (לפי מספר לקוח, אפשר כמה כתובות ללקוח)
+CLIENT_ADDRESSES_FILE_NAME = Clients_With_Correct_Adresses.xlsx
 
 
 # --- 2. זמני העמסה בכל מחסן בנפרד וזמן פריקה אצל לקוחות (בדקות) ---

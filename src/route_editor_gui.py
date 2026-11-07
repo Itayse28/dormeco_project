@@ -150,8 +150,15 @@ class RouteEditor:
         list_mail_groups: Callable[[], list[tuple[str, str, bool]]] | None = None,
         save_copy: Callable[[], str] | None = None,
         save_as_path: str = "",
+        apply_address: Callable[[dict[str, Any], int], None] | None = None,
     ) -> None:
         self.root = root
+        # בחירת כתובת אספקה לעצירה (מעדכן מיקום ואינדקס במטריצה - מהסקריפט הראשי)
+        self.apply_address = apply_address
+        self._tip: tk.Toplevel | None = None
+        self._tip_job: str | None = None
+        self._tip_key: str | None = None
+        self._menu_var: tk.IntVar | None = None
         self.send_mails = send_mails
         self.list_mail_groups = list_mail_groups
         self.save_copy = save_copy
@@ -334,11 +341,17 @@ class RouteEditor:
                 return REGION_COLORS[idx]
         return "#E6E6E6"
 
+    def _stop_city(self, key: str) -> str:
+        """היישוב של העצירה לפי הכתובת שנבחרה."""
+        st = self.stops[key]
+        return str(
+            st.get("display_city") or st.get("effective_dest") or st.get("address") or "-"
+        ).strip()
+
     def _stop_text(self, key: str) -> str:
         """שורת עצירה ברשימה: עיר/יישוב ומשקל בלבד."""
         st = self.stops[key]
-        city = str(st.get("effective_dest") or st.get("address") or "-").strip()
-        return f'{city}  |  {st.get("weight", 0):,.0f} ק"ג'
+        return f'{self._stop_city(key)}  |  {st.get("weight", 0):,.0f} ק"ג'
 
     # ------------------------------------------------------------------
     # בניית החלון
@@ -561,6 +574,7 @@ class RouteEditor:
     # ציור הלוח
     # ------------------------------------------------------------------
     def render(self) -> None:
+        self._hide_tip()
         yview = self.canvas.yview()
         for child in self.board.winfo_children():
             child.destroy()
@@ -906,6 +920,10 @@ class RouteEditor:
         lb.bind("<ButtonPress-1>", lambda e, c=col: self._on_press(e, c))
         lb.bind("<B1-Motion>", self._on_motion)
         lb.bind("<ButtonRelease-1>", self._on_release)
+        # ריחוף: פרטי העצירה. קליק ימני: בחירת כתובת אספקה
+        lb.bind("<Motion>", lambda e, c=col: self._on_list_hover(e, c))
+        lb.bind("<Leave>", lambda _e: self._hide_tip())
+        lb.bind("<Button-3>", lambda e, c=col: self._on_list_right_click(e, c))
 
         # כפתורי עמודה
         btns = tk.Frame(frame, bg=bg)
@@ -1026,11 +1044,15 @@ class RouteEditor:
     def _state_signature(self) -> str:
         """מצב המסלולים (לבדיקה אם השתנה משהו מאז יצירת הקבצים)."""
         return repr(
-            [
-                (tuple(self.routes[c]), self._driver_of(c), self._route_date(c))
-                for c in range(len(self.routes))
-                if self.routes[c]
-            ]
+            (
+                [
+                    (tuple(self.routes[c]), self._driver_of(c), self._route_date(c))
+                    for c in range(len(self.routes))
+                    if self.routes[c]
+                ],
+                # גם שינוי כתובת אספקה מחייב יצירה מחדש של הקבצים
+                sorted((k, s.get("address_choice")) for k, s in self.stops.items()),
+            )
         )
 
     def send_mails_for(
@@ -1079,6 +1101,189 @@ class RouteEditor:
         messagebox.showinfo("שליחת מיילים", summary, parent=self.root)
 
     # ------------------------------------------------------------------
+    # פרטי עצירה בריחוף ובחירת כתובת אספקה (קליק ימני)
+    # ------------------------------------------------------------------
+    TIP_DELAY_MS = 450
+
+    def _stop_at(self, event: tk.Event, col: int) -> tuple[int, str] | None:
+        """(אינדקס, מפתח) של העצירה שמתחת לעכבר ברשימה, או None."""
+        lb: tk.Listbox = event.widget
+        if lb.size() == 0:
+            return None
+        idx = lb.nearest(event.y)
+        bbox = lb.bbox(idx)
+        if not bbox or not (bbox[1] <= event.y <= bbox[1] + bbox[3]):
+            return None
+        keys = self._col_list(col)
+        if not 0 <= idx < len(keys):
+            return None
+        return idx, keys[idx]
+
+    def _on_list_hover(self, event: tk.Event, col: int) -> None:
+        if self._drag is not None:
+            return
+        hit = self._stop_at(event, col)
+        key = hit[1] if hit else None
+        if key == self._tip_key:
+            return
+        self._hide_tip()
+        if key is None:
+            return
+        self._tip_key = key
+        x, y = event.x_root, event.y_root
+        self._tip_job = self.root.after(
+            self.TIP_DELAY_MS, lambda: self._show_tip(col, key, x, y)
+        )
+
+    def _hide_tip(self) -> None:
+        if self._tip_job is not None:
+            try:
+                self.root.after_cancel(self._tip_job)
+            except tk.TclError:
+                pass
+            self._tip_job = None
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
+        self._tip_key = None
+
+    def _stop_details(self, col: int, key: str) -> list[tuple[str, str]]:
+        """שורות חלון הפרטים: [(טקסט, סגנון)] - סגנון: title / text / muted / bad."""
+        st = self.stops[key]
+        cfg = self.cfg
+        lines: list[tuple[str, str]] = [(str(st.get("cust_name") or "-"), "title")]
+        meta = []
+        if st.get("cust_no"):
+            meta.append(f"מס' לקוח {st['cust_no']}")
+        if st.get("date"):
+            meta.append(f"תאריך {st['date']}")
+        meta.append(f'{st.get("weight", 0):,.0f} ק"ג')
+        lines.append(("  |  ".join(meta), "text"))
+
+        whs = [
+            cfg.get(name_key, default)
+            for flag, name_key, default in (
+                ("needs_main", "MAIN_WAREHOUSE_NAME", "אוברסיז"),
+                ("needs_cooling", "COOLING_WAREHOUSE_NAME", "מחסן קירור"),
+                ("needs_hazmat", "HAZMAT_WAREHOUSE_NAME", 'מחסן חומ"ס'),
+                ("needs_goldbond", "GOLDBOND_WAREHOUSE_NAME", "גולד בונד גילי"),
+            )
+            if st.get(flag)
+        ]
+        if whs:
+            lines.append(("העמסה: " + ", ".join(whs), "text"))
+        if col != POOL and self.routes[col]:
+            sched = self._sim_col(col).get("schedule_by_stop", {}).get(key)
+            if sched:
+                lines.append(
+                    (
+                        f"הגעה משוערת {sched['arrival_str']}  (יציאה {sched['departure_str']})",
+                        "text",
+                    )
+                )
+
+        opts = st.get("address_options") or []
+        choice = st.get("address_choice", 0)
+        if opts:
+            cur = opts[choice]
+            lines.append(("", "text"))
+            lines.append((f"כתובת אספקה: {cur['address']}", "title"))
+            lines.append((f"מקור: {cur['source']}", "muted"))
+            if not cur.get("located", True):
+                lines.append(("המיקום של הכתובת לא אותר - משתמשים במיקום מקובץ ההזמנות", "bad"))
+            if cur.get("contact"):
+                lines.append((f"איש קשר: {cur['contact']}", "text"))
+            if cur.get("notes"):
+                lines.append((f"הערות אספקה: {cur['notes']}", "text"))
+            if len(opts) > 1:
+                lines.append(("", "text"))
+                lines.append(("כתובות אפשריות (קליק ימני לבחירה):", "muted"))
+                for i, o in enumerate(opts):
+                    mark = "●" if i == choice else "○"
+                    lines.append((f"{mark} {o['address']}  ({o['source']})", "text"))
+        else:
+            addr = st.get("address") or st.get("effective_dest") or "-"
+            lines.append((f"כתובת: {addr}", "text"))
+        return lines
+
+    def _show_tip(self, col: int, key: str, x: int, y: int) -> None:
+        self._tip_job = None
+        if key not in self.stops or self._drag is not None:
+            return
+        tip = tk.Toplevel(self.root)
+        tip.overrideredirect(True)
+        try:
+            tip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        box = tk.Frame(tip, bg="#FFFDE7", bd=1, relief="solid", padx=8, pady=6)
+        box.pack()
+        styles = {
+            "title": ((FONT, 10, "bold"), "black"),
+            "text": (F_SMALL, "black"),
+            "muted": (F_SMALL, FG_MUTED),
+            "bad": (F_SMALL, FG_BAD),
+        }
+        for text, style in self._stop_details(col, key):
+            font, fg = styles[style]
+            tk.Label(
+                box, text=text, font=font, fg=fg, bg="#FFFDE7",
+                anchor="e", justify="right", wraplength=460,
+            ).pack(side="top", fill="x")
+        tip.update_idletasks()
+        w, h = tip.winfo_reqwidth(), tip.winfo_reqheight()
+        sw, sh = tip.winfo_screenwidth(), tip.winfo_screenheight()
+        px = x + 16 if x + 16 + w < sw else max(0, x - w - 16)
+        py = y + 12 if y + 12 + h < sh else max(0, y - h - 12)
+        tip.geometry(f"+{px}+{py}")
+        self._tip = tip
+
+    def _on_list_right_click(self, event: tk.Event, col: int) -> str | None:
+        self._hide_tip()
+        hit = self._stop_at(event, col)
+        if hit is None:
+            return None
+        idx, key = hit
+        st = self.stops[key]
+        opts = st.get("address_options") or []
+        menu = tk.Menu(self.root, tearoff=0, font=F_TEXT)
+        menu.add_command(
+            label=f"כתובת אספקה - {st.get('cust_name', '')}", state="disabled"
+        )
+        menu.add_separator()
+        if len(opts) <= 1 or self.apply_address is None:
+            menu.add_command(
+                label="אין כתובות נוספות ללקוח הזה בקובץ הכתובות", state="disabled"
+            )
+        else:
+            self._menu_var = tk.IntVar(master=self.root, value=st.get("address_choice", 0))
+            for i, o in enumerate(opts):
+                label = f"{o['address']}   ({o['source']})"
+                if not o.get("located", True):
+                    label += " - מיקום לא אותר"
+                menu.add_radiobutton(
+                    label=label, variable=self._menu_var, value=i,
+                    command=lambda k=key, i=i: self.set_stop_address(k, i),
+                )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def set_stop_address(self, key: str, idx: int) -> None:
+        """בחירת כתובת אספקה לעצירה: המיקום וזמני הנסיעה מחושבים מחדש."""
+        st = self.stops.get(key)
+        if st is None or self.apply_address is None or idx == st.get("address_choice"):
+            return
+        self.apply_address(st, idx)
+        self._sim_cache.clear()
+        self.render()
+
+    # ------------------------------------------------------------------
     # גרירה ושחרור
     # ------------------------------------------------------------------
     def _col_list(self, col: int) -> list[str]:
@@ -1096,6 +1301,7 @@ class RouteEditor:
     def _on_press(self, event: tk.Event, col: int) -> None:
         lb: tk.Listbox = event.widget
         self._drag = None
+        self._hide_tip()
         if lb.size() == 0:
             return
         idx = lb.nearest(event.y)
@@ -1130,7 +1336,7 @@ class RouteEditor:
                 pass
             tk.Label(
                 self.ghost,
-                text=f"{st.get('effective_dest', '')}  -  {st.get('cust_name', '')}",
+                text=f"{self._stop_city(key)}  -  {st.get('cust_name', '')}",
                 font=F_TEXT, bg="#1976D2", fg="white", padx=10, pady=4,
             ).pack()
 
@@ -1554,6 +1760,7 @@ def run_route_editor(
     list_mail_groups: Callable[[], list[tuple[str, str, bool]]] | None = None,
     save_copy: Callable[[], str] | None = None,
     save_as_path: str = "",
+    apply_address: Callable[[dict[str, Any], int], None] | None = None,
 ) -> list[tuple[list[str], str | None, str | None]] | None:
     """
     פותח את חלון העריכה וממתין עד שהמשתמש יאשר או יבטל.
@@ -1565,6 +1772,7 @@ def run_route_editor(
         root, initial_routes, stops_by_key, simulate, cfg, region_order, drivers,
         initial_days, compute_efficient, on_generate, send_mails,
         initial_drivers, list_mail_groups, save_copy, save_as_path,
+        apply_address,
     )
     root.lift()
     try:
