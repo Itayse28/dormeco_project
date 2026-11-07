@@ -2753,16 +2753,17 @@ def sort_orders_excel(
 
     # כתובות אספקה אפשריות לכל עצירה (מקובץ הכתובות + מקובץ ההזמנות).
     # כל כתובת מקבלת נקודה במטריצת הזמנים, כדי שבחירת כתובת אחרת בחלון תעדכן מיד
-    # את זמני הנסיעה. כתובות באותו מיקום חולקות נקודה אחת.
+    # את זמני הנסיעה. חשוב: לכל עצירה אינדקסים משלה במטריצה - החישוב מזהה עצירות
+    # לפי האינדקס, ולכן שתי עצירות לעולם לא חולקות אינדקס (גם אם הן באותו מיקום).
+    # רק כתובות של אותה עצירה באותו מיקום חולקות נקודה.
     client_addresses = load_client_addresses(cfg)
-    point_idx: dict[tuple[float, float], int] = {}
     changed = 0
 
     def point_key(c: tuple[float, float]) -> tuple[float, float]:
         return (round(float(c[0]), 5), round(float(c[1]), 5))
 
     for st in unique_stops_by_key.values():
-        point_idx.setdefault(point_key(st["coords"]), st["matrix_idx"])
+        point_idx: dict[tuple[float, float], int] = {point_key(st["coords"]): st["matrix_idx"]}
         options, default = build_address_options(
             st,
             st["raw_address_texts"],
@@ -2794,7 +2795,19 @@ def sort_orders_excel(
         drv["matrix_idx"] = len(fixed_points)
         fixed_points.append(drv["coords"])
 
-    travel_matrix = build_travel_minutes_matrix(fixed_points, cfg)
+    # זמני הנסיעה מחושבים פעם אחת לכל מיקום ייחודי ואז נפרסים לכל האינדקסים
+    # (כך מספר הנקודות שנשלחות לשירות המפות לא גדל בגלל הכתובות החלופיות)
+    unique_pos: dict[tuple[float, float], int] = {}
+    unique_points: list[tuple[float, float]] = []
+    pos_of: list[int] = []
+    for p in fixed_points:
+        k = point_key(p)
+        if k not in unique_pos:
+            unique_pos[k] = len(unique_points)
+            unique_points.append(p)
+        pos_of.append(unique_pos[k])
+    unique_matrix = build_travel_minutes_matrix(unique_points, cfg)
+    travel_matrix = [[unique_matrix[a][b] for b in pos_of] for a in pos_of]
 
     # תכנון אוטומטי בנפרד לכל יום (בדוח יומי יש יום אחד בלבד)
     all_stops = list(unique_stops_by_key.values())
