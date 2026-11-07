@@ -15,8 +15,10 @@
 - "אישור והמשך" - יוצר מיד את כל הקבצים (אקסל ממוין, רשימות ליקוט, דוחות הובלה)
   לפי המסלולים שבחלון. החלון נשאר פתוח: אפשר להמשיך לערוך ולאשר שוב כדי לעדכן.
 - "סיום" - סגירת החלון אחרי שהקבצים נוצרו.
-- "שלח מיילים" (בראש כל עמודת יום, או בתחתית המסך בדוח יומי) - שולח במייל את
-  רשימות הליקוט של אותו יום (ואת דוחות ההובלה של נהגי אוברסיז, אם הוגדרו נמענים).
+- "שלח מיילים" (בראש כל עמודת יום, או בתחתית המסך בדוח יומי) - שולח את כל
+  קבוצות המיילים של אותו יום. "שלח חלקית" - תפריט לשליחת קבוצה אחת בלבד
+  (קבוצה = פרמטר נמענים אחד בקובץ ההגדרות).
+- "שמור בשם" - שומר עותק של כל הקבצים בתיקייה SAVE_AS_PATH.
 - "ביטול" / סגירת החלון לפני אישור - ההרצה נעצרת ולא נוצרים קבצים.
 - בחירת נהג לכל מסלול מתוך input_files/drivers.xlsx: המסלול מחושב מחדש
   מכתובת הבית של הנהג (יציאה וחזרה), והשם מופיע בכל הדוחות.
@@ -143,10 +145,18 @@ class RouteEditor:
         compute_efficient: Callable[[], list[list[str]]] | None = None,
         on_generate: Callable[[list[tuple[list[str], str | None, str | None]]], Any]
         | None = None,
-        send_mails: Callable[[str | None], str] | None = None,
+        send_mails: Callable[..., str] | None = None,
+        initial_drivers: list[str | None] | None = None,
+        list_mail_groups: Callable[[], list[tuple[str, str, bool]]] | None = None,
+        save_copy: Callable[[], str] | None = None,
+        save_as_path: str = "",
     ) -> None:
         self.root = root
         self.send_mails = send_mails
+        self.list_mail_groups = list_mail_groups
+        self.save_copy = save_copy
+        self.save_as_path = save_as_path
+        self._saved_text = ""
         self._generated_sig: str | None = None
         self._generated_time = ""
         # יצירת הקבצים מתוך החלון (החלון נשאר פתוח אחרי האישור)
@@ -185,6 +195,13 @@ class RouteEditor:
         self.route_ids: list[int] = list(range(len(self.routes)))
         self._next_id = len(self.routes)
         self.route_day = {rid: self._initial_days[rid] for rid in self.route_ids}
+        # נהגים התחלתיים (כשנפתחת טבלה שכבר מוינה)
+        self._initial_drivers = list(initial_drivers or [None] * len(self.routes))
+        self.route_driver = {
+            rid: d
+            for rid, d in zip(self.route_ids, self._initial_drivers)
+            if d and d in self.drivers_by_name
+        }
         self.selected_id: int | None = None
         self.pool: list[str] = []
         self.depot = tuple(cfg.get("MAIN_WAREHOUSE_COORDS", (31.8315, 34.6465)))
@@ -397,11 +414,16 @@ class RouteEditor:
         )
         if self.multi_day and self.compute_efficient is not None:
             self.eff_btn.pack(side="left", padx=6)
+        # "שמור בשם" - ירוק בהיר (שונה מכפתור האישור)
+        tk.Button(
+            bottom, text="שמור בשם", font=F_BTN, padx=12, pady=6,
+            bg="#C8E6C9", activebackground="#A5D6A7",
+            command=self.on_save_as,
+        ).pack(side="right", padx=6)
         if not self.multi_day and self.send_mails is not None:
-            tk.Button(
-                bottom, text="שלח מיילים", font=F_BTN, padx=12, pady=6,
-                command=lambda: self.send_mails_for(self.days[0] if self.days else None),
-            ).pack(side="right", padx=6)
+            daily_mail = tk.Frame(bottom, bg=BG_APP)
+            daily_mail.pack(side="right", padx=6)
+            self._mail_buttons(daily_mail, self.days[0] if self.days else None, small=False)
 
         paned = tk.PanedWindow(
             r, orient="horizontal", sashwidth=8, sashrelief="raised", bg="#C9CED6"
@@ -596,24 +618,52 @@ class RouteEditor:
         self._day_frames.append(df)
         head = tk.Frame(df, bg="#1F4E78", padx=6, pady=4)
         head.pack(side="top", fill="x", padx=4, pady=(4, 2))
+        top_row = tk.Frame(head, bg="#1F4E78")
+        top_row.pack(side="top", fill="x")
         tk.Label(
-            head, text=title, font=F_HEAD, bg="#1F4E78", fg="white", anchor="e"
+            top_row, text=title, font=F_HEAD, bg="#1F4E78", fg="white", anchor="e"
         ).pack(side="right")
         if day is not None or (self.days and title != "ממתינות לשיבוץ"):
             tk.Button(
-                head, text="הצג יום", font=F_SMALL, padx=4, pady=0,
+                top_row, text="הצג יום", font=F_SMALL, padx=4, pady=0,
                 command=lambda d=day: self.show_day(d),
             ).pack(side="left", padx=2)
             tk.Button(
-                head, text="+ נהג", font=F_SMALL, padx=4, pady=0,
+                top_row, text="+ נהג", font=F_SMALL, padx=4, pady=0,
                 command=lambda d=day: self.add_driver(d),
             ).pack(side="left", padx=2)
             if self.send_mails is not None:
-                tk.Button(
-                    head, text="שלח מיילים", font=F_SMALL, padx=4, pady=0,
-                    command=lambda d=day: self.send_mails_for(d),
-                ).pack(side="left", padx=2)
+                # שורה שנייה: כפתורי המיילים של היום
+                mail_row = tk.Frame(head, bg="#1F4E78")
+                mail_row.pack(side="top", fill="x", pady=(3, 0))
+                self._mail_buttons(mail_row, day, small=True)
         return df
+
+    def _mail_buttons(self, parent: tk.Misc, day: str | None, small: bool) -> None:
+        """'שלח מיילים' + 'שלח חלקית' (תפריט קבוצות) עבור יום אחד."""
+        font = F_SMALL if small else F_BTN
+        pad = (4, 0) if small else (12, 6)
+        tk.Button(
+            parent, text="שלח מיילים", font=font, padx=pad[0], pady=pad[1],
+            command=lambda d=day: self.send_mails_for(d),
+        ).pack(side="right", padx=2)
+        partial = tk.Button(parent, text="שלח חלקית ▾", font=font, padx=pad[0], pady=pad[1])
+        partial.configure(command=lambda d=day, b=partial: self._post_mail_menu(d, b))
+        partial.pack(side="right", padx=2)
+
+    def _post_mail_menu(self, day: str | None, button: tk.Widget) -> None:
+        """תפריט קטן: כל קבוצת מיילים (פרמטר נמענים) בשורה משלה."""
+        menu = tk.Menu(self.root, tearoff=0, font=F_TEXT)
+        groups = self.list_mail_groups() if self.list_mail_groups else []
+        if not groups:
+            menu.add_command(label="אין קבוצות מיילים", state="disabled")
+        for key, title, enabled in groups:
+            menu.add_command(
+                label=title if enabled else f"{title} - אין נמענים",
+                state="normal" if enabled else "disabled",
+                command=lambda d=day, k=key, t=title: self.send_mails_for(d, k, t),
+            )
+        menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
 
     def _update_day_bar(self) -> None:
         bar = self.day_bar
@@ -669,13 +719,22 @@ class RouteEditor:
         self.route_day = dict(st["route_day"])
         self.pool = list(st["pool"])
 
-    def _fresh_state(self, routes: list[list[str]], days: list[str | None]) -> dict[str, Any]:
+    def _fresh_state(
+        self,
+        routes: list[list[str]],
+        days: list[str | None],
+        drivers: list[str | None] | None = None,
+    ) -> dict[str, Any]:
         ids = list(range(self._next_id, self._next_id + len(routes)))
         self._next_id += len(routes)
         return {
             "routes": [list(r) for r in routes],
             "route_ids": ids,
-            "route_driver": {},
+            "route_driver": {
+                rid: d
+                for rid, d in zip(ids, drivers or [])
+                if d and d in self.drivers_by_name
+            },
             "route_day": {rid: d for rid, d in zip(ids, days)},
             "pool": [],
         }
@@ -960,6 +1019,8 @@ class RouteEditor:
                 parts.append(f"הקבצים נוצרו ({self._generated_time})")
             else:
                 parts.append("יש שינויים שעוד לא נוצרו לקבצים")
+        if self._saved_text:
+            parts.append(self._saved_text)
         self.info_label.configure(text="   |   ".join(parts), fg=color)
 
     def _state_signature(self) -> str:
@@ -972,8 +1033,10 @@ class RouteEditor:
             ]
         )
 
-    def send_mails_for(self, day: str | None) -> None:
-        """שליחת המיילים של יום אחד (רשימות ליקוט + דוחות הובלה של נהגי אוברסיז)."""
+    def send_mails_for(
+        self, day: str | None, group_key: str | None = None, group_title: str = ""
+    ) -> None:
+        """שליחת המיילים של יום אחד: כל הקבוצות, או קבוצה אחת ("שלח חלקית")."""
         if self.send_mails is None:
             return
         if self._generated_sig is None:
@@ -991,10 +1054,14 @@ class RouteEditor:
                 parent=self.root,
             )
             return
+        what = (
+            group_title
+            if group_key
+            else "כל קבוצות המיילים (רשימות ליקוט ודוחות הובלה שהוגדרו להם נמענים)"
+        )
         ok = messagebox.askyesno(
             "שליחת מיילים",
-            f"לשלוח עכשיו במייל את רשימות הליקוט של {short_date(day)}?\n"
-            "(וגם את דוחות ההובלה של נהגי אוברסיז, אם הוגדרו להם נמענים)",
+            f"לשלוח עכשיו במייל את הקבצים של {short_date(day)}?\n\n{what}",
             parent=self.root,
         )
         if not ok:
@@ -1002,7 +1069,9 @@ class RouteEditor:
         self.root.configure(cursor="watch")
         self.root.update()
         try:
-            summary = self.send_mails(day)
+            summary = (
+                self.send_mails(day, group_key) if group_key else self.send_mails(day)
+            )
         except Exception as exc:  # noqa: BLE001
             summary = f"השליחה נכשלה: {exc}"
         finally:
@@ -1218,7 +1287,9 @@ class RouteEditor:
         if not ok:
             return
         if self.mode == "days":
-            self._set_state(self._fresh_state(self.initial, self._initial_days))
+            self._set_state(
+                self._fresh_state(self.initial, self._initial_days, self._initial_drivers)
+            )
         else:
             routes = self._efficient_initial or []
             self._set_state(self._fresh_state(routes, [None] * len(routes)))
@@ -1412,6 +1483,37 @@ class RouteEditor:
         self.cancel_btn.configure(text="סיום")
         self._update_info()  # בשורת המידע: "הקבצים נוצרו (HH:MM)" - בלי חלון קופץ
 
+    def on_save_as(self) -> None:
+        """'שמור בשם': יוצר את הקבצים (אם צריך) ושומר עותק שלהם בתיקייה SAVE_AS_PATH."""
+        if self.save_copy is None:
+            messagebox.showwarning(
+                "שמור בשם",
+                "לא הוגדרה תיקייה לשמירה.\nהוסיפו לקובץ input_files\\config_local.txt את השורה:\nSAVE_AS_PATH = <נתיב התיקייה>",
+                parent=self.root,
+            )
+            return
+        if self._generated_sig is None or self._state_signature() != self._generated_sig:
+            self.on_approve()  # קודם יוצרים קבצים עדכניים (כמו "אישור והמשך")
+            if self._generated_sig is None or self._state_signature() != self._generated_sig:
+                return  # בוטל או נכשל
+        self.root.configure(cursor="watch")
+        self.root.update()
+        try:
+            dest = self.save_copy()
+        except Exception as exc:  # noqa: BLE001
+            self.root.configure(cursor="")
+            messagebox.showerror(
+                "שמור בשם",
+                f"השמירה נכשלה:\n{exc}\n\nאם קובץ פתוח באקסל - סגרו אותו ונסו שוב.",
+                parent=self.root,
+            )
+            return
+        self.root.configure(cursor="")
+        self._saved_text = (
+            f"נשמר עותק ב-{dest} ({datetime.datetime.now().strftime('%H:%M')})"
+        )
+        self._update_info()
+
     def on_cancel(self) -> None:
         if self._generated_count > 0:
             # הקבצים כבר נוצרו - "סיום"
@@ -1447,7 +1549,11 @@ def run_route_editor(
     initial_days: list[str | None] | None = None,
     compute_efficient: Callable[[], list[list[str]]] | None = None,
     on_generate: Callable[..., Any] | None = None,
-    send_mails: Callable[[str | None], str] | None = None,
+    send_mails: Callable[..., str] | None = None,
+    initial_drivers: list[str | None] | None = None,
+    list_mail_groups: Callable[[], list[tuple[str, str, bool]]] | None = None,
+    save_copy: Callable[[], str] | None = None,
+    save_as_path: str = "",
 ) -> list[tuple[list[str], str | None, str | None]] | None:
     """
     פותח את חלון העריכה וממתין עד שהמשתמש יאשר או יבטל.
@@ -1458,6 +1564,7 @@ def run_route_editor(
     editor = RouteEditor(
         root, initial_routes, stops_by_key, simulate, cfg, region_order, drivers,
         initial_days, compute_efficient, on_generate, send_mails,
+        initial_drivers, list_mail_groups, save_copy, save_as_path,
     )
     root.lift()
     try:

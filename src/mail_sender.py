@@ -7,6 +7,7 @@
 - create_launcher: יוצר בתיקייה קובץ bat. לחיצה כפולה עליו שולחת כל קובץ
   בתיקייה במייל נפרד דרך Outlook (הגרסה הקלאסית), לנמענים לפי סיומת שם הקובץ.
 - run_launcher: מריץ את אותה שליחה מתוך Python (לכפתור "שלח מיילים" בחלון העריכה).
+- run_inline: שליחה של קבוצת קבצים מתיקייה בלי קובץ bat (לכפתור "שלח חלקית").
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 MAIL_ATTACH_EXTENSIONS = (".xlsx", ".xls", ".pdf")
@@ -158,6 +160,26 @@ def create_launcher(
     rules = rules or []
     if not default_to and not any(r[1] for r in rules):
         return None
+    ps_body = build_ps_body(
+        default_to, default_name, rules, name_filter, strip_prefix, subject_prefix
+    )
+    content = (_BAT_HEADER.replace("__TITLE__", title) + ps_body)
+    content = content.replace("\r\n", "\n").replace("\n", "\r\n")
+    out = folder / launcher_name
+    out.write_bytes(content.encode("utf-8"))  # UTF-8 בלי BOM - חובה לקובצי bat
+    return out
+
+
+def build_ps_body(
+    default_to: list[str],
+    default_name: str,
+    rules: list[tuple[str, list[str], str]] | None = None,
+    name_filter: str = "",
+    strip_prefix: str = "",
+    subject_prefix: str = "",
+) -> str:
+    """סקריפט ה-PowerShell של השליחה (מתחיל בשורה #PS-START)."""
+    rules = rules or []
     rules_ps = ",".join(
         f"@{{Suffix={_ps_quote(suf)}; To={_ps_quote('; '.join(to))}; Name={_ps_quote(nm)}}}"
         for suf, to, nm in rules
@@ -171,11 +193,7 @@ def create_launcher(
         .replace("__STRIP_PREFIX__", _ps_quote(strip_prefix))
         .replace("__SUBJECT_PREFIX__", _ps_quote(subject_prefix))
     )
-    content = (_BAT_HEADER.replace("__TITLE__", title) + ps_body)
-    content = content.replace("\r\n", "\n").replace("\n", "\r\n")
-    out = folder / launcher_name
-    out.write_bytes(content.encode("utf-8"))  # UTF-8 בלי BOM - חובה לקובצי bat
-    return out
+    return ps_body
 
 
 def run_launcher(launcher: pathlib.Path, powershell: str = "powershell") -> tuple[int, int, str]:
@@ -199,6 +217,57 @@ def run_launcher(launcher: pathlib.Path, powershell: str = "powershell") -> tupl
     out = (proc.stdout or b"").decode("utf-8", errors="replace")
     out += (proc.stderr or b"").decode("utf-8", errors="replace")
     print(out)
+    m = re.search(r"Done: (\d+) of (\d+)", out)
+    if m:
+        return int(m.group(1)), int(m.group(2)), out
+    return 0, 0, out
+
+
+def _run_powershell(args: list[str], powershell: str) -> str:
+    kwargs: dict[str, Any] = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    proc = subprocess.run([powershell, *args], capture_output=True, **kwargs)
+    out = (proc.stdout or b"").decode("utf-8", errors="replace")
+    out += (proc.stderr or b"").decode("utf-8", errors="replace")
+    print(out)
+    return out
+
+
+def run_inline(
+    folder: pathlib.Path,
+    default_to: list[str],
+    default_name: str,
+    rules: list[tuple[str, list[str], str]] | None = None,
+    name_filter: str = "",
+    strip_prefix: str = "",
+    subject_prefix: str = "",
+    powershell: str = "powershell",
+) -> tuple[int, int, str]:
+    """
+    שולח מיד את הקבצים המתאימים בתיקייה (כל קובץ במייל נפרד), בלי ליצור bat.
+    מחזיר (כמה נשלחו, כמה קבצים, הפלט המלא).
+    """
+    if not default_to and not any(r[1] for r in (rules or [])):
+        return 0, 0, "no recipients"
+    body = build_ps_body(
+        default_to, default_name, rules, name_filter, strip_prefix, subject_prefix
+    )
+    fake_self = str((folder / "_send.bat").resolve()).replace("'", "''")
+    script = f"$f = '{fake_self}'\r\n" + body.replace("\r\n", "\n").replace("\n", "\r\n")
+    tmp = tempfile.NamedTemporaryFile("wb", suffix=".ps1", delete=False)
+    try:
+        # UTF-8 עם BOM - כדי ש-PowerShell 5 יקרא נכון את העברית
+        tmp.write(script.encode("utf-8-sig"))
+        tmp.close()
+        out = _run_powershell(
+            ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tmp.name], powershell
+        )
+    finally:
+        try:
+            pathlib.Path(tmp.name).unlink()
+        except OSError:
+            pass
     m = re.search(r"Done: (\d+) of (\d+)", out)
     if m:
         return int(m.group(1)), int(m.group(2)), out

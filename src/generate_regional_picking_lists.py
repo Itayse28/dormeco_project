@@ -42,6 +42,8 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.page import PageMargins
 
+from config_files import read_local_overrides
+
 
 # ==============================================================================
 # קישורים לפריוריטי (מספר הזמנה / לקוח נפתחים בפריוריטי בלחיצה)
@@ -203,7 +205,7 @@ def parse_bool(val: str, default: bool = True) -> bool:
 def load_picking_config(
     custom_config_path: pathlib.Path | None = None,
 ) -> dict[str, Any]:
-    script_dir = pathlib.Path(__file__).resolve().parent
+    script_dir = pathlib.Path(__file__).resolve().parent.parent  # תיקיית הפרויקט (הקוד נמצא ב-src)
     default_base = pathlib.Path(DEFAULT_BASE_DIR)
     base_dir = default_base if default_base.exists() else script_dir
 
@@ -220,6 +222,8 @@ def load_picking_config(
                     raw_kv[k.strip()] = v.strip()
         except Exception:
             pass
+    # הגדרות מקומיות (BASE_DIR, SAVE_AS_PATH...) גוברות על הקובץ הראשי
+    raw_kv.update(read_local_overrides(cfg_path))
 
     configured_base = raw_kv.get("BASE_DIR", DEFAULT_BASE_DIR).strip()
     BASE_FILE = configured_base if configured_base else DEFAULT_BASE_DIR
@@ -530,7 +534,7 @@ def load_warehouse_sku_sets(
     goldbond_skus = {s.upper() for s in DEFAULT_GOLDBOND_SKUS}
 
     in_dir: pathlib.Path = cfg["INPUT_DIR_PATH"]
-    script_dir = pathlib.Path(__file__).resolve().parent
+    script_dir = pathlib.Path(__file__).resolve().parent.parent  # תיקיית הפרויקט (הקוד נמצא ב-src)
 
     for folder in (in_dir, script_dir):
         c_file = folder / cfg["COOLING_FILE_NAME"]

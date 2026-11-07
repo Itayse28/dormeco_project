@@ -31,6 +31,8 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.page import PageMargins
 
+from config_files import read_local_overrides
+
 
 # ==============================================================================
 # קישורים לפריוריטי (מספר הזמנה / לקוח נפתחים בפריוריטי בלחיצה)
@@ -174,7 +176,7 @@ def parse_bool(val: str, default: bool = True) -> bool:
 
 
 def load_config(custom_config_path: pathlib.Path | None = None) -> dict[str, Any]:
-    script_dir = pathlib.Path(__file__).resolve().parent
+    script_dir = pathlib.Path(__file__).resolve().parent.parent  # תיקיית הפרויקט (הקוד נמצא ב-src)
     default_base = pathlib.Path(DEFAULT_BASE_DIR)
     base_dir = default_base if default_base.exists() else script_dir
 
@@ -191,6 +193,8 @@ def load_config(custom_config_path: pathlib.Path | None = None) -> dict[str, Any
                     raw_kv[k.strip()] = v.strip()
         except Exception:
             pass
+    # הגדרות מקומיות (BASE_DIR, SAVE_AS_PATH...) גוברות על הקובץ הראשי
+    raw_kv.update(read_local_overrides(cfg_path))
 
     configured_base = raw_kv.get("BASE_DIR", DEFAULT_BASE_DIR).strip()
     BASE_FILE = configured_base if configured_base else DEFAULT_BASE_DIR
@@ -254,9 +258,19 @@ def load_config(custom_config_path: pathlib.Path | None = None) -> dict[str, Any
         "EXTRA_HAZMAT_SKUS": raw_kv.get("EXTRA_HAZMAT_SKUS", ""),
         "EXTRA_GOLDBOND_SKUS": raw_kv.get("EXTRA_GOLDBOND_SKUS", ""),
         # דוחות הובלה של נהגי "אוברסיז <מספר>" נשלחים לכתובות האלה
-        "SEND_SHIPPING_LIST_TO_OVERSEAS": (
+        # (השם הקודם SEND_SHIPPING_LIST_TO_OVERSEAS עדיין נתמך)
+        "SEND_SHIPPING_LIST_TO_OVERSEAS_DRIVERS": (
             mail_sender.parse_email_list(
-                mail_sender.kv_get(raw_kv, "SEND_SHIPPING_LIST_TO_OVERSEAS")
+                mail_sender.kv_get(raw_kv, "SEND_SHIPPING_LIST_TO_OVERSEAS_DRIVERS")
+                or mail_sender.kv_get(raw_kv, "SEND_SHIPPING_LIST_TO_OVERSEAS")
+            )
+            if mail_sender is not None
+            else []
+        ),
+        # כל דוחות ההובלה (של כל הנהגים) נשלחים לכתובות האלה
+        "SEND_ALL_SHIPPING_LISTS_TO": (
+            mail_sender.parse_email_list(
+                mail_sender.kv_get(raw_kv, "SEND_ALL_SHIPPING_LISTS_TO")
             )
             if mail_sender is not None
             else []
@@ -369,7 +383,7 @@ def load_warehouse_sku_sets(
     goldbond_skus = {s.upper() for s in DEFAULT_GOLDBOND_SKUS}
 
     in_dir: pathlib.Path = cfg["INPUT_DIR_PATH"]
-    script_dir = pathlib.Path(__file__).resolve().parent
+    script_dir = pathlib.Path(__file__).resolve().parent.parent  # תיקיית הפרויקט (הקוד נמצא ב-src)
 
     for folder in (in_dir, script_dir):
         c_file = folder / cfg["COOLING_FILE_NAME"]
@@ -408,6 +422,8 @@ def load_warehouse_sku_sets(
 # שליחת דוחות ההובלה של נהגי אוברסיז במייל
 # ==============================================================================
 SHIPPING_LAUNCHER_NAME = "שליחת דוחות הובלה אוברסיז במייל.bat"
+ALL_SHIPPING_LAUNCHER_NAME = "שליחת כל דוחות ההובלה במייל.bat"
+SHIPPING_SUBJECT_PREFIX = "דוח הובלה עבור "
 FAILED_SAVES: list[str] = []  # קבצים שלא נשמרו (למשל כי הם פתוחים באקסל)
 REPORT_FILE_PREFIX = "הובלות ע״י "
 OVERSEAS_DRIVER_PATTERN = r"נהג אוברסיז\s*\d+"  # "אוברסיז" + מספר
@@ -418,11 +434,11 @@ def create_overseas_shipping_launcher(
 ) -> pathlib.Path | None:
     """
     קובץ bat ששולח במייל (כל דוח במייל נפרד) רק את דוחות ההובלה של נהגי
-    "אוברסיז <מספר>" שבתיקייה, אל SEND_SHIPPING_LIST_TO_OVERSEAS.
+    "אוברסיז <מספר>" שבתיקייה, אל SEND_SHIPPING_LIST_TO_OVERSEAS_DRIVERS.
     """
     if mail_sender is None:
         return None
-    recipients = cfg.get("SEND_SHIPPING_LIST_TO_OVERSEAS") or []
+    recipients = cfg.get("SEND_SHIPPING_LIST_TO_OVERSEAS_DRIVERS") or []
     has_overseas = any(
         re.search(OVERSEAS_DRIVER_PATTERN, f.stem) for f in day_dir.glob("*.xlsx")
     )
@@ -436,7 +452,28 @@ def create_overseas_shipping_launcher(
         default_name="Overseas drivers",
         name_filter=OVERSEAS_DRIVER_PATTERN,
         strip_prefix=REPORT_FILE_PREFIX,
-        subject_prefix="דוח הובלה עבור ",
+        subject_prefix=SHIPPING_SUBJECT_PREFIX,
+    )
+
+
+def create_all_shipping_launcher(
+    day_dir: pathlib.Path, cfg: dict[str, Any]
+) -> pathlib.Path | None:
+    """קובץ bat ששולח את כל דוחות ההובלה שבתיקייה (כל דוח במייל נפרד) אל SEND_ALL_SHIPPING_LISTS_TO."""
+    if mail_sender is None:
+        return None
+    recipients = cfg.get("SEND_ALL_SHIPPING_LISTS_TO") or []
+    if not recipients:
+        return None
+    return mail_sender.create_launcher(
+        folder=day_dir,
+        launcher_name=ALL_SHIPPING_LAUNCHER_NAME,
+        title="שליחת כל דוחות ההובלה במייל",
+        default_to=recipients,
+        default_name="All shipping lists",
+        name_filter="^" + REPORT_FILE_PREFIX,
+        strip_prefix=REPORT_FILE_PREFIX,
+        subject_prefix=SHIPPING_SUBJECT_PREFIX,
     )
 
 
@@ -1232,8 +1269,10 @@ def main() -> None:
     reports_dir = out_dir / f"דוחות הובלה {list_name}"
     # מחיקת דוחות ישנים מהרצה קודמת (שמות/מספר הנהגים יכולים להשתנות בין הרצות)
     if reports_dir.exists():
-        old_files = list(reports_dir.rglob("הובלות ע״י נהג *.xlsx")) + list(
-            reports_dir.rglob(SHIPPING_LAUNCHER_NAME)
+        old_files = (
+            list(reports_dir.rglob("הובלות ע״י נהג *.xlsx"))
+            + list(reports_dir.rglob(SHIPPING_LAUNCHER_NAME))
+            + list(reports_dir.rglob(ALL_SHIPPING_LAUNCHER_NAME))
         )
         for old in old_files:
             try:
@@ -1271,7 +1310,15 @@ def main() -> None:
         )
         for x in launchers:
             print(f"      - {x.parent.name}")
-        print("    נמענים: " + ", ".join(cfg["SEND_SHIPPING_LIST_TO_OVERSEAS"]))
+        print("    נמענים: " + ", ".join(cfg["SEND_SHIPPING_LIST_TO_OVERSEAS_DRIVERS"]))
+
+    # קובץ שליחה של כל דוחות ההובלה (בכל תיקיית תאריך)
+    all_launchers = [
+        create_all_shipping_launcher(d, cfg) for d in sorted({f.parent for f in created})
+    ]
+    if any(all_launchers):
+        print(f"\n[V] נוצר קובץ שליחה של כל דוחות ההובלה ({ALL_SHIPPING_LAUNCHER_NAME})")
+        print("    נמענים: " + ", ".join(cfg["SEND_ALL_SHIPPING_LISTS_TO"]))
 
     if FAILED_SAVES:
         # שאר הקבצים נוצרו; מדווחים על מה שלא נשמר (קוד יציאה 4 = נוצר חלקית)

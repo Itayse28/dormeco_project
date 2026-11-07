@@ -17,7 +17,7 @@ BAD = "[X]"
 
 
 def main() -> None:
-    here = pathlib.Path(__file__).resolve().parent
+    here = pathlib.Path(__file__).resolve().parent.parent / "src"  # קבצי הקוד
     print("=" * 70)
     print("בדיקת מפה - דורמקו")
     print("=" * 70)

@@ -7,5 +7,6 @@ env/
 .env
 .vs/
 output_files/
-input_files/config_parameters.txt
-geocoding_cache_v2.json
+input_files/config_local.txt
+data/geocoding_cache_v2.json
+logs/

@@ -7,7 +7,7 @@
   המפה מתחלפת אוטומטית למפה אמיתית עם זום בגלגלת וגרירה להזזה.
 - בתחתית המפה מוצגת שורת מצב שמסבירה איזו מפה מוצגת ולמה.
 התקנה חד-פעמית של המפה האמיתית:  python -m pip install tkintermapview
-בדיקת תקלות:                     python check_map.py
+בדיקת תקלות:                     tools/check_map.bat
 """
 
 from __future__ import annotations
@@ -153,7 +153,7 @@ class MapPanel(tk.Frame):
             self._set_status(
                 "מפה סכמטית - אין גישה לשרתי המפות. "
                 + (errors[0] if errors else "")
-                + "   להרצת בדיקה מלאה: python check_map.py",
+                + "   להרצת בדיקה מלאה: tools/check_map.bat",
                 warn=True,
             )
             return

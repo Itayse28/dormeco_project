@@ -2,7 +2,8 @@
 """
 מערכת אוטומטית למיון הזמנות, ניהול 4 מחסנים באשדוד ותכנון מסלולי משאיות (דורמקו)
 =================================================================================
-- קריאת כל הפרמטרים הדינמיים מקובץ: input_files\config_parameters.txt
+- קריאת כל הפרמטרים הדינמיים מקובץ: input_files/config_parameters.txt
+  (והגדרות מקומיות - BASE_DIR, SAVE_AS_PATH - מקובץ input_files/config_local.txt)
 - סיווג מוצרים אוטומטי ל-4 מחסנים באשדוד לפי מק"ט:
   1. אוברסיז (מבוא הספנים 1 אשדוד) - העמסה של 60 דקות כברירת מחדל
   2. מחסן קירור (מבוא הספנים 6 אשדוד) - מק"טים מ-Cooling_products.pdf (30 דקות כברירת מחדל)
@@ -26,6 +27,7 @@ import math
 import os
 import pathlib
 import re
+import shutil
 from urllib.parse import quote
 import subprocess
 import sys
@@ -35,6 +37,8 @@ from typing import Any, Callable
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+
+from config_files import LOCAL_CONFIG_FILE_NAME, read_local_overrides
 
 
 # ==============================================================================
@@ -123,8 +127,10 @@ DEFAULT_CONFIG_TEMPLATE = """# =================================================
 # ניתן לערוך כל ערך אחרי סימן השווה (=) ולשמור את הקובץ.
 # ==============================================================================
 
-# 1. נתיבי תיקיות ושמות קבצים (בתוך תיקיית input_files)
-BASE_DIR = C:\\Users\\itaik\\OneDrive\\מסמכים\\dormeco-sorting-script
+# הגדרות של המחשב הזה בלבד (BASE_DIR, SAVE_AS_PATH) נמצאות בקובץ config_local.txt
+# שבאותה תיקייה. כל פרמטר שמופיע שם גובר על הערך שבקובץ הזה.
+
+# 1. שמות קבצים (בתוך תיקיית input_files)
 INPUT_FILE_NAME = list.xlsx
 COOLING_FILE_NAME = Cooling_products.pdf
 HAZMAT_FILE_NAME = dangerous_products.xlsx
@@ -192,8 +198,10 @@ SEND_PICKING_LIST_TO_COOLING =
 SEND_PICKING_LIST_TO_DANGEROUS = 
 SEND_PICKING_LIST_TO_GOLDBOND_GILI = 
 # דוחות ההובלה של נהגי "אוברסיז <מספר>" יישלחו לכתובות האלה
-SEND_SHIPPING_LIST_TO_OVERSEAS = 
-GOOGLE_MAPS_API_KEY = 
+SEND_SHIPPING_LIST_TO_OVERSEAS_DRIVERS = 
+# כל דוחות ההובלה (של כל הנהגים) יישלחו לכתובות האלה
+SEND_ALL_SHIPPING_LISTS_TO =
+GOOGLE_MAPS_API_KEY =
 
 # 6. רשימת מק"טים נוספים (אופציונלי - מופרדים בפסיק, בנוסף לקבצים שבתיקיית input_files)
 EXTRA_COOLING_SKUS = 
@@ -221,7 +229,7 @@ def parse_int(val: str, default: int) -> int:
 def load_or_create_config(
     custom_config_path: pathlib.Path | None = None,
 ) -> dict[str, Any]:
-    script_dir = pathlib.Path(__file__).resolve().parent
+    script_dir = pathlib.Path(__file__).resolve().parent.parent  # תיקיית הפרויקט (הקוד נמצא ב-src)
     default_base = pathlib.Path(DEFAULT_BASE_DIR)
     base_dir = default_base if default_base.exists() else script_dir
 
@@ -258,6 +266,9 @@ def load_or_create_config(
                     raw_kv[k.strip()] = v.strip()
         except Exception as e:
             print(f"[!] אזהרה בקריאת קובץ הפרמטרים ({e}), משתמש בברירות מחדל.")
+
+    # הגדרות מקומיות (BASE_DIR, SAVE_AS_PATH...) גוברות על הקובץ הראשי
+    raw_kv.update(read_local_overrides(cfg_path, create=True))
 
     configured_base = raw_kv.get("BASE_DIR", DEFAULT_BASE_DIR).strip()
     BASE_FILE = configured_base if configured_base else DEFAULT_BASE_DIR
@@ -394,6 +405,7 @@ def load_or_create_config(
             raw_kv.get("AUTO_OPEN_OUTPUT_FOLDER", "true"), True
         ),
         **priority_cfg_values(raw_kv),
+        "SAVE_AS_PATH": str(raw_kv.get("SAVE_AS_PATH", "") or "").strip().strip('"'),
         "AMOUNT_OF_DRIVERS_ON_SCREEN": parse_int(
             raw_kv.get("AMOUNT_OF_DRIVERS_ON_SCREEN", "10"), 10
         ),
@@ -583,7 +595,7 @@ def load_warehouse_sku_sets(
     goldbond_skus = {s.upper() for s in DEFAULT_GOLDBOND_SKUS}
 
     in_dir: pathlib.Path = cfg["INPUT_DIR_PATH"]
-    script_dir = pathlib.Path(__file__).resolve().parent
+    script_dir = pathlib.Path(__file__).resolve().parent.parent  # תיקיית הפרויקט (הקוד נמצא ב-src)
 
     for folder in (in_dir, script_dir):
         c_file = folder / cfg["COOLING_FILE_NAME"]
@@ -640,7 +652,7 @@ REGION_ORDER: list[str] = [
     "דרום הארץ",
 ]
 REGION_RANK: dict[str, int] = {name: idx for idx, name in enumerate(REGION_ORDER)}
-CACHE_FILE = pathlib.Path("geocoding_cache_v2.json")
+CACHE_FILE = pathlib.Path(__file__).resolve().parent.parent / "data" / "geocoding_cache_v2.json"
 
 KNOWN_LOCALITIES: dict[str, tuple[str, float, float]] = {
     # --- 1. צפון מזרח ---
@@ -1205,6 +1217,7 @@ def load_cache() -> dict[str, Any]:
 
 def save_cache(cache: dict[str, Any]) -> None:
     try:
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         CACHE_FILE.write_text(
             json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -2024,6 +2037,61 @@ def find_client_mark(cust_name: Any, marks: list[tuple[str, str]]) -> str:
     return best[1]
 
 
+# עמודות שהסקריפט מוסיף לטבלה הממוינת (לא חלק מנתוני ההזמנה המקוריים)
+GENERATED_HEADERS = {
+    "אזור חלוקה",
+    "נהג / משאית",
+    "תחנה במסלול",
+    "מחסן העמסה למוצר",
+    "שעת הגעה ליעד",
+    "דגש מיוחד ללקוח",
+}
+
+
+def is_generated_header(h: str) -> bool:
+    return h in GENERATED_HEADERS or h.startswith("שעת יציאה (+")
+
+
+def driver_name_from_label(label: str) -> str | None:
+    """'נהג אברהם כץ - סבב 2 (אזור השרון) 02.11.2026' -> 'אברהם כץ'; 'נהג 3 (...)' -> None."""
+    m = re.match(r"^\s*נהג\s+(.+?)\s*(?:\(|$)", str(label or ""))
+    if not m:
+        return None
+    name = re.sub(r"\s*-\s*סבב\s*\d+\s*$", "", m.group(1)).strip()
+    return None if (not name or name.isdigit()) else name
+
+
+def routes_from_sorted_records(
+    records: list[dict[str, Any]],
+    stops_by_key: dict[str, dict[str, Any]],
+    drivers: list[dict[str, Any]],
+) -> list[tuple[list[str], str | None, str | None]]:
+    """משחזר מטבלה ממוינת: [(עצירות לפי הסדר, נהג, תאריך)] לפי סדר המסלולים בטבלה."""
+    known = {d["name"] for d in drivers}
+    order: list[str] = []
+    stops_of: dict[str, dict[str, float]] = {}
+    for rec in records:
+        label = rec.get("prior_label") or "ללא נהג"
+        if label not in stops_of:
+            order.append(label)
+            stops_of[label] = {}
+        try:
+            num = float(rec.get("prior_stop"))
+        except (TypeError, ValueError):
+            num = 1e9
+        key = rec["stop_key"]
+        stops_of[label][key] = min(num, stops_of[label].get(key, num))
+    routes: list[tuple[list[str], str | None, str | None]] = []
+    for label in order:
+        keys = sorted(stops_of[label], key=lambda k: stops_of[label][k])
+        name = driver_name_from_label(label)
+        driver = name if name in known else None
+        if name and not driver:
+            print(f"[!] הנהג \"{name}\" מהטבלה לא נמצא בקובץ הנהגים - המסלול יוצג בלי נהג.")
+        routes.append((keys, driver, stops_by_key[keys[0]].get("date", "")))
+    return routes
+
+
 class RouteEditCancelled(Exception):
     """המשתמש סגר/ביטל את חלון עריכת המסלולים."""
 
@@ -2114,7 +2182,9 @@ def apply_manual_route_edits(
     cfg: dict[str, Any],
     drivers: list[dict[str, Any]] | None = None,
     on_generate: Callable[[list[dict[str, Any]]], Any] | None = None,
-    send_mails: Callable[[str | None], str] | None = None,
+    send_mails: Callable[..., str] | None = None,
+    gui_extras: dict[str, Any] | None = None,
+    initial_edited: list[tuple[list[str], str | None, str | None]] | None = None,
 ) -> list[dict[str, Any]] | None:
     """
     פותח את חלון העריכה.
@@ -2143,10 +2213,16 @@ def apply_manual_route_edits(
             )
         return simulate_driver_day(rounds, matrix, cfg, keeps)
 
-    initial_routes = [
-        [s["stop_key"] for s in t["ordered_stops"]] for t in planned_trucks
-    ]
-    initial_days = [t.get("route_date", "") for t in planned_trucks]
+    if initial_edited:
+        initial_routes = [list(k) for k, _d, _day in initial_edited]
+        initial_days = [day or "" for _k, _d, day in initial_edited]
+        initial_drivers = [d for _k, d, _day in initial_edited]
+    else:
+        initial_routes = [
+            [s["stop_key"] for s in t["ordered_stops"]] for t in planned_trucks
+        ]
+        initial_days = [t.get("route_date", "") for t in planned_trucks]
+        initial_drivers = [None] * len(initial_routes)
 
     def compute_efficient() -> list[list[str]]:
         """סידור יעיל של כל העצירות בלי התחשבות בתאריך (כמו דוח יומי אחד גדול)."""
@@ -2174,6 +2250,8 @@ def apply_manual_route_edits(
         compute_efficient=compute_efficient,
         on_generate=gui_generate if on_generate else None,
         send_mails=send_mails,
+        initial_drivers=initial_drivers,
+        **(gui_extras or {}),
     )
     if edited is None:
         raise RouteEditCancelled()
@@ -2234,7 +2312,8 @@ def sort_orders_excel(
     output_path: str | pathlib.Path,
     cfg: dict[str, Any],
     after_write: Callable[[list[dict[str, Any]]], None] | None = None,
-    send_mails: Callable[[str | None], str] | None = None,
+    send_mails: Callable[..., str] | None = None,
+    gui_extras: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     wb_in = load_workbook_safe(input_path)
     ws_in = wb_in.active
@@ -2243,6 +2322,17 @@ def sort_orders_excel(
         str(ws_in.cell(1, col).value or "").strip()
         for col in range(1, ws_in.max_column + 1)
     ]
+
+    # קלט שהוא טבלה שכבר מוינה על ידי הסקריפט: משחזרים ממנה את המסלולים
+    is_sorted_input = "נהג / משאית" in raw_headers and "תחנה במסלול" in raw_headers
+    full_headers = list(raw_headers)
+    keep_idx = list(range(len(raw_headers)))
+    if is_sorted_input:
+        print("[*] הקובץ הוא טבלה ממוינת - החלון ייפתח עם המסלולים שבה.")
+        keep_idx = [i for i, h in enumerate(raw_headers) if not is_generated_header(h)]
+        raw_headers = [raw_headers[i] for i in keep_idx]
+        i_prior_label = full_headers.index("נהג / משאית")
+        i_prior_stop = full_headers.index("תחנה במסלול")
 
     def find_col(possible_names: list[str], default_idx: int) -> int:
         for name in possible_names:
@@ -2283,6 +2373,13 @@ def sort_orders_excel(
         ]
         if not any(v is not None and str(v).strip() != "" for v in row_vals):
             continue
+        prior_label, prior_stop = None, None
+        if is_sorted_input:
+            if str(row_vals[0] or "").strip().startswith('סה"כ'):
+                continue  # שורת הסיכום בתחתית הטבלה הממוינת
+            prior_label = str(row_vals[i_prior_label] or "").strip()
+            prior_stop = row_vals[i_prior_stop]
+            row_vals = [row_vals[i] if i < len(row_vals) else None for i in keep_idx]
 
         # תיקון תאריך אספקה לפורמט DD-MM-YYYY (למשל 02-11-2026)
         if 0 <= idx_date < len(row_vals) and row_vals[idx_date] is not None:
@@ -2374,6 +2471,8 @@ def sort_orders_excel(
                 "lon": lon,
                 "stop_key": stop_key,
                 "raw_values": row_vals,
+                "prior_label": prior_label,
+                "prior_stop": prior_stop,
             }
         )
 
@@ -2430,6 +2529,13 @@ def sort_orders_excel(
         for t in plan_trucks([st for st in all_stops if st["date"] == day], travel_matrix, cfg):
             t["route_date"] = day
             planned_trucks.append(t)
+
+    # טבלה ממוינת בקלט: המסלולים, הסדר והנהגים בדיוק כמו בטבלה
+    initial_edited = (
+        routes_from_sorted_records(records, unique_stops_by_key, drivers)
+        if is_sorted_input
+        else None
+    )
 
     def write_output(planned_trucks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """כתיבת קובץ האקסל הממוין לפי המסלולים שנקבעו (נקרא שוב בכל אישור בחלון)."""
@@ -2832,6 +2938,8 @@ def sort_orders_excel(
             planned_trucks, unique_stops_by_key, travel_matrix, cfg, drivers,
             on_generate=on_generate,
             send_mails=send_mails,
+            gui_extras=gui_extras,
+            initial_edited=initial_edited,
         )
         if result is None:
             return last_written.get("drivers", [])
@@ -2949,10 +3057,14 @@ def main() -> None:
 
     out_dir: pathlib.Path = cfg["OUTPUT_DIR_PATH"]
     out_dir.mkdir(parents=True, exist_ok=True)
+    # קלט שהוא טבלה ממוינת (list_sorted.xlsx) => שם הרשימה הוא list
+    list_stem = input_path.stem
+    if list_stem.endswith("_sorted"):
+        list_stem = list_stem[: -len("_sorted")]
     output_path = (
         pathlib.Path(args.output)
         if args.output
-        else (out_dir / f"{input_path.stem}_sorted.xlsx")
+        else (out_dir / f"{list_stem}_sorted.xlsx")
     )
 
     print("=" * 75)
@@ -2968,7 +3080,10 @@ def main() -> None:
     def run_downstream(_drivers: list[dict[str, Any]]) -> None:
         here = pathlib.Path(__file__).resolve().parent
         problems: list[str] = []
-        passthrough = [a for a in sys.argv[1:] if a != "--no-open"]
+        # הסקריפטים הבאים קוראים בדיוק את הקובץ הממוין שנוצר עכשיו
+        passthrough = ["-i", str(output_path)]
+        if args.config:
+            passthrough += ["--config", args.config]
         for script in (
             "generate_regional_picking_lists.py",
             "generate_driver_delivery_reports.py",
@@ -2993,48 +3108,128 @@ def main() -> None:
         if problems:
             raise RuntimeError("\n\n".join(problems))
 
-    def send_day_mails(day: str | None) -> str:
-        """כפתור "שלח מיילים" בחלון: שולח את קבצי היום דרך Outlook ומחזיר סיכום."""
-        import mail_sender
-        import generate_regional_picking_lists as picking_mod
-        import generate_driver_delivery_reports as reports_mod
+    def mail_groups(day: str | None) -> list[dict[str, Any]]:
+        """קבוצות המיילים (קבוצה לכל פרמטר נמענים) של יום מסוים."""
+        import generate_regional_picking_lists as pk
+        import generate_driver_delivery_reports as rp
 
-        dm = picking_mod.date_folder_suffix(day)
-        stem = input_path.stem
-        targets = [
-            (
-                "רשימות ליקוט",
-                out_dir / f"רשימות ליקוט {stem}" / f"רשימות ליקוט {dm}"
-                / picking_mod.MAIL_LAUNCHER_NAME,
-            ),
-            (
-                "דוחות הובלה לנהגי אוברסיז",
-                out_dir / f"דוחות הובלה {stem}" / f"דוחות הובלה {dm}"
-                / reports_mod.SHIPPING_LAUNCHER_NAME,
-            ),
+        pk_cfg = pk.load_picking_config(cfg_path)
+        rp_cfg = rp.load_config(cfg_path)
+        rc = pk.recipients_by_warehouse(pk_cfg)
+        dm = pk.date_folder_suffix(day)
+        pick_dir = out_dir / f"רשימות ליקוט {list_stem}" / f"רשימות ליקוט {dm}"
+        ship_dir = out_dir / f"דוחות הובלה {list_stem}" / f"דוחות הובלה {dm}"
+        wh_suffixes = [
+            (pk.GOLDBOND_FILE_SUFFIX, "goldbond", "Gold Bond Gili"),
+            (pk.COOLING_FILE_SUFFIX, "cooling", "Cooling"),
+            (pk.HAZMAT_FILE_SUFFIX, "hazmat", "Dangerous"),
         ]
+        any_suffix = "|".join(re.escape(suf) for suf, _k, _n in wh_suffixes)
+
+        def picking_group(key: str, title: str, param: str, name_filter: str) -> dict[str, Any]:
+            to = rc[key]
+            return {
+                "key": f"pick_{key}", "title": title, "param": param,
+                "folder": pick_dir, "default_to": to, "default_name": title,
+                # כל הסיומות עם אותם נמענים - כדי שהסיומת תוסר מנושא המייל
+                "rules": [(suf, to, n) for suf, _k, n in wh_suffixes],
+                "name_filter": name_filter,
+                "strip_prefix": pk.PICKING_FILE_PREFIX,
+                "subject_prefix": pk.MAIL_SUBJECT_PREFIX,
+            }
+
+        groups = [
+            picking_group(
+                "overseas", f"רשימות ליקוט - {pk_cfg['MAIN_WAREHOUSE_NAME']}",
+                "SEND_PICKING_LIST_TO_OVERSEAS", f"^(?!.*({any_suffix})$)",
+            ),
+            picking_group(
+                "cooling", f"רשימות ליקוט - {pk_cfg['COOLING_WAREHOUSE_NAME']}",
+                "SEND_PICKING_LIST_TO_COOLING", re.escape(pk.COOLING_FILE_SUFFIX) + "$",
+            ),
+            picking_group(
+                "hazmat", f"רשימות ליקוט - {pk_cfg['HAZMAT_WAREHOUSE_NAME']}",
+                "SEND_PICKING_LIST_TO_DANGEROUS", re.escape(pk.HAZMAT_FILE_SUFFIX) + "$",
+            ),
+            picking_group(
+                "goldbond", f"רשימות ליקוט - {pk_cfg['GOLDBOND_WAREHOUSE_NAME']}",
+                "SEND_PICKING_LIST_TO_GOLDBOND_GILI", re.escape(pk.GOLDBOND_FILE_SUFFIX) + "$",
+            ),
+            {
+                "key": "ship_overseas_drivers", "title": "דוחות הובלה - נהגי אוברסיז",
+                "param": "SEND_SHIPPING_LIST_TO_OVERSEAS_DRIVERS", "folder": ship_dir,
+                "default_to": rp_cfg.get("SEND_SHIPPING_LIST_TO_OVERSEAS_DRIVERS") or [],
+                "default_name": "Overseas drivers", "rules": [],
+                "name_filter": rp.OVERSEAS_DRIVER_PATTERN,
+                "strip_prefix": rp.REPORT_FILE_PREFIX,
+                "subject_prefix": rp.SHIPPING_SUBJECT_PREFIX,
+            },
+            {
+                "key": "ship_all", "title": "כל דוחות ההובלה",
+                "param": "SEND_ALL_SHIPPING_LISTS_TO", "folder": ship_dir,
+                "default_to": rp_cfg.get("SEND_ALL_SHIPPING_LISTS_TO") or [],
+                "default_name": "All shipping lists", "rules": [],
+                "name_filter": "^" + rp.REPORT_FILE_PREFIX,
+                "strip_prefix": rp.REPORT_FILE_PREFIX,
+                "subject_prefix": rp.SHIPPING_SUBJECT_PREFIX,
+            },
+        ]
+        return groups
+
+    def list_mail_groups() -> list[tuple[str, str, bool]]:
+        """לתפריט "שלח חלקית": (מפתח, כותרת, האם הוגדרו נמענים)."""
+        return [
+            (g["key"], f"{g['title']}  ({g['param']})", bool(g["default_to"]))
+            for g in mail_groups(None)
+        ]
+
+    def send_day_mails(day: str | None, group_key: str | None = None) -> str:
+        """שולח את מיילי היום: כל הקבוצות, או רק group_key ("שלח חלקית")."""
+        import mail_sender
+
         lines: list[str] = []
-        for title, launcher in targets:
-            if not launcher.exists():
+        for g in mail_groups(day):
+            if group_key and g["key"] != group_key:
                 continue
-            print(f"\n[*] שולח במייל: {title} ({dm})")
-            sent, total, out = mail_sender.run_launcher(launcher)
-            if "Could not open Outlook" in out:
-                lines.append(
-                    f"{title}: לא ניתן לפתוח את Outlook (נדרש Outlook הקלאסי, מחובר לחשבון)."
-                )
+            if not g["default_to"]:
+                if group_key:
+                    lines.append(f"{g['title']}: לא הוגדרו נמענים ({g['param']}).")
                 continue
-            line = f"{title}: נשלחו {sent} מתוך {total} מיילים"
-            skipped = out.count("[!] Skipped")
-            if skipped:
-                line += f" ({skipped} דולגו - אין נמענים למחסן)"
-            lines.append(line)
-        if not lines:
-            return (
-                "אין מה לשלוח ליום הזה.\n"
-                "בדקו שהוגדרו נמענים בקובץ ההגדרות (SEND_PICKING_LIST_TO_...)."
+            if not g["folder"].exists():
+                lines.append(f"{g['title']}: לא נמצאה התיקייה {g['folder'].name}.")
+                continue
+            print(f"\n[*] שולח במייל: {g['title']} ({g['folder'].name})")
+            sent, total, out = mail_sender.run_inline(
+                g["folder"], g["default_to"], g["default_name"], g["rules"],
+                g["name_filter"], g["strip_prefix"], g["subject_prefix"],
             )
-        return "\n".join(lines)
+            if "Could not open Outlook" in out:
+                lines.append(f"{g['title']}: לא ניתן לפתוח את Outlook (נדרש Outlook הקלאסי).")
+            elif total == 0:
+                lines.append(f"{g['title']}: אין קבצים לשליחה ביום הזה.")
+            else:
+                lines.append(f"{g['title']}: נשלחו {sent} מתוך {total} מיילים.")
+        return "\n".join(lines) or "לא הוגדרו נמענים לאף קבוצת מיילים בקובץ ההגדרות."
+
+    def save_copy() -> str:
+        """כפתור "שמור בשם": מעתיק את כל הקבצים שנוצרו לתיקייה SAVE_AS_PATH."""
+        dest_raw = cfg.get("SAVE_AS_PATH", "")
+        if not dest_raw:
+            raise RuntimeError(f"לא הוגדר SAVE_AS_PATH בקובץ {LOCAL_CONFIG_FILE_NAME}.")
+        dest = pathlib.Path(dest_raw).expanduser()
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(output_path, dest / output_path.name)
+        for folder in (
+            out_dir / f"רשימות ליקוט {list_stem}",
+            out_dir / f"דוחות הובלה {list_stem}",
+        ):
+            if folder.exists():
+                target = dest / folder.name
+                if target.exists():
+                    shutil.rmtree(target)  # בלי שאריות משמירה קודמת
+                shutil.copytree(folder, target)
+        print(f"\n[V] נשמר עותק של כל הקבצים ב: {dest}")
+        return str(dest)
 
     try:
         drivers = sort_orders_excel(
@@ -3043,6 +3238,11 @@ def main() -> None:
             cfg=cfg,
             after_write=run_downstream,
             send_mails=send_day_mails,
+            gui_extras={
+                "list_mail_groups": list_mail_groups,
+                "save_copy": save_copy if cfg.get("SAVE_AS_PATH") else None,
+                "save_as_path": cfg.get("SAVE_AS_PATH", ""),
+            },
         )
     except RouteEditCancelled:
         print("\n[X] עריכת המסלולים בוטלה על ידי המשתמש. לא נוצרו קבצים.")
