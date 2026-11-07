@@ -10,3 +10,4 @@ output_files/
 input_files/config_local.txt
 data/geocoding_cache_v2.json
 logs/
+data/manual_locations.json

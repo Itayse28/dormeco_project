@@ -42,8 +42,10 @@ import datetime
 import re
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import messagebox, ttk
+import webbrowser
+from tkinter import messagebox, simpledialog, ttk
 from typing import Any, Callable
+from urllib.parse import quote
 
 MAP_PANEL_ERROR: str | None = None
 try:
@@ -93,6 +95,43 @@ MAP_MIN_WIDTH = 150
 
 
 HEB_WEEKDAYS = {6: "א'", 0: "ב'", 1: "ג'", 2: "ד'", 3: "ה'", 4: "ו'", 5: "ש'"}
+
+# רמת הדיוק של מיקום עצירה (נקבעת בסקריפט הראשי - loc_quality)
+LOCATION_QUALITY_LABELS = {
+    "manual": "נקבע ידנית",
+    "street": "כתובת מדויקת",
+    "geocoded": "נמצא בחיפוש מפות",
+    "locality": "מרכז היישוב",
+    "region_only": "משוער - רק מרכז הנפה",
+    "guess": "לא אותר - ניחוש",
+}
+APPROX_QUALITIES = {"region_only", "guess"}
+WARN_MARK = "⚠ "
+
+
+def parse_location_text(text: str) -> tuple[float, float] | None:
+    """
+    קואורדינטות מטקסט שהמשתמש הדביק: "31.25, 34.79" או קישור Google Maps
+    (@lat,lon / q=lat,lon / !3dlat!4dlon). מחזיר None אם לא נמצא מיקום בישראל.
+    """
+    s = str(text or "").strip()
+    num = r"(-?\d{1,2}\.\d+)"
+    patterns = [
+        rf"!3d{num}!4d{num}",
+        rf"@{num},\s*{num}",
+        rf"[?&](?:q|query|ll|destination)=(?:loc:)?{num}(?:,|%2C)\s*{num}",
+        rf"^{num}\s*[,\s]\s*{num}$",
+        rf"{num}\s*,\s*{num}",
+    ]
+    for pat in patterns:
+        m = re.search(pat, s)
+        if m:
+            lat, lon = float(m.group(1)), float(m.group(2))
+            if 29.4 <= lon <= 33.4 and 34.2 <= lat <= 35.95:
+                lat, lon = lon, lat  # הודבק בסדר הפוך (lon, lat)
+            if 29.4 <= lat <= 33.4 and 34.2 <= lon <= 35.95:
+                return lat, lon
+    return None
 
 
 def parse_date(d: str | None) -> datetime.date | None:
@@ -151,10 +190,13 @@ class RouteEditor:
         save_copy: Callable[[], str] | None = None,
         save_as_path: str = "",
         apply_address: Callable[[dict[str, Any], int], None] | None = None,
+        set_location: Callable[[dict[str, Any], float, float], int] | None = None,
     ) -> None:
         self.root = root
         # בחירת כתובת אספקה לעצירה (מעדכן מיקום ואינדקס במטריצה - מהסקריפט הראשי)
         self.apply_address = apply_address
+        # קביעת מיקום ידנית (נשמר לקובץ ונטען בהרצות הבאות - מהסקריפט הראשי)
+        self.set_location = set_location
         self._tip: tk.Toplevel | None = None
         self._tip_job: str | None = None
         self._tip_key: str | None = None
@@ -348,10 +390,15 @@ class RouteEditor:
             st.get("display_city") or st.get("effective_dest") or st.get("address") or "-"
         ).strip()
 
+    def _is_approx(self, key: str) -> bool:
+        """המיקום של העצירה לא אותר באמת (ניחוש / רק מרכז הנפה)."""
+        return self.stops[key].get("loc_quality") in APPROX_QUALITIES
+
     def _stop_text(self, key: str) -> str:
-        """שורת עצירה ברשימה: עיר/יישוב ומשקל בלבד."""
+        """שורת עצירה ברשימה: עיר/יישוב ומשקל בלבד (⚠ = מיקום לא אותר)."""
         st = self.stops[key]
-        return f'{self._stop_city(key)}  |  {st.get("weight", 0):,.0f} ק"ג'
+        mark = WARN_MARK if self._is_approx(key) else ""
+        return f'{mark}{self._stop_city(key)}  |  {st.get("weight", 0):,.0f} ק"ג'
 
     # ------------------------------------------------------------------
     # בניית החלון
@@ -914,6 +961,8 @@ class RouteEditor:
         lb.pack(side="right", fill="both", expand=True)
         for key in keys:
             lb.insert("end", self._stop_text(key))
+            if self._is_approx(key):
+                lb.itemconfigure("end", fg=FG_BAD)
         self._listboxes[col] = lb
         self._register_drop(lb, col)
 
@@ -1032,6 +1081,10 @@ class RouteEditor:
         if self.pool:
             parts.append(f"{len(self.pool)} ממתינות לשיבוץ")
             color = FG_BAD
+        approx = sum(1 for k in self.stops if self._is_approx(k))
+        if approx:
+            parts.append(f"⚠ {approx} מיקומים לא אותרו (קליק ימני על העצירה)")
+            color = FG_BAD
         if self._generated_sig is not None:
             if self._state_signature() == self._generated_sig:
                 parts.append(f"הקבצים נוצרו ({self._generated_time})")
@@ -1051,7 +1104,10 @@ class RouteEditor:
                     if self.routes[c]
                 ],
                 # גם שינוי כתובת אספקה מחייב יצירה מחדש של הקבצים
-                sorted((k, s.get("address_choice")) for k, s in self.stops.items()),
+                sorted(
+                    (k, s.get("address_choice"), tuple(s.get("coords") or ()))
+                    for k, s in self.stops.items()
+                ),
             )
         )
 
@@ -1185,6 +1241,18 @@ class RouteEditor:
                     )
                 )
 
+        quality = st.get("loc_quality")
+        if quality:
+            approx = quality in APPROX_QUALITIES
+            lines.append(
+                (
+                    ("⚠ " if approx else "")
+                    + f"דיוק המיקום: {LOCATION_QUALITY_LABELS.get(quality, quality)}"
+                    + ("  -  קליק ימני > קביעת מיקום ידנית" if approx else ""),
+                    "bad" if approx else "muted",
+                )
+            )
+
         opts = st.get("address_options") or []
         choice = st.get("address_choice", 0)
         if opts:
@@ -1268,11 +1336,90 @@ class RouteEditor:
                     label=label, variable=self._menu_var, value=i,
                     command=lambda k=key, i=i: self.set_stop_address(k, i),
                 )
+        if self.set_location is not None:
+            menu.add_separator()
+            menu.add_command(
+                label="קביעת מיקום ידנית - הדבקת קישור Google Maps / קואורדינטות...",
+                command=lambda k=key: self.ask_stop_location(k),
+            )
+            if self.map_panel is not None and self.map_panel.can_pick():
+                menu.add_command(
+                    label="קביעת מיקום ידנית - לחיצה על המפה",
+                    command=lambda k=key: self.pick_stop_location_on_map(k),
+                )
+            menu.add_command(
+                label="חיפוש הכתובת ב-Google Maps (בדפדפן)",
+                command=lambda k=key: self.open_in_google_maps(k),
+            )
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
         return "break"
+
+    def _current_address(self, key: str) -> str:
+        st = self.stops[key]
+        opts = st.get("address_options") or []
+        if opts:
+            return str(opts[st.get("address_choice", 0)]["address"])
+        return str(st.get("address") or st.get("effective_dest") or "")
+
+    def open_in_google_maps(self, key: str) -> None:
+        address = self._current_address(key)
+        webbrowser.open(
+            "https://www.google.com/maps/search/?api=1&query=" + quote(f"{address}, ישראל")
+        )
+
+    def ask_stop_location(self, key: str) -> None:
+        """חלון להדבקת קישור Google Maps או קואורדינטות עבור העצירה."""
+        address = self._current_address(key)
+        prompt = (
+            f"{self.stops[key].get('cust_name', '')}\n{address}\n\n"
+            "הדביקו קישור מ-Google Maps או קואורדינטות (למשל 31.2530, 34.7915).\n"
+            "טיפ: ב-Google Maps לחיצה ימנית על המקום מעתיקה את הקואורדינטות.\n"
+            "המיקום יישמר וישמש אוטומטית בכל הפעמים הבאות."
+        )
+        while True:
+            text = simpledialog.askstring("קביעת מיקום ידנית", prompt, parent=self.root)
+            if not text:
+                return
+            loc = parse_location_text(text)
+            if loc:
+                self.set_stop_location(key, *loc)
+                return
+            messagebox.showerror(
+                "קביעת מיקום ידנית",
+                "לא נמצאו קואורדינטות בישראל בטקסט שהודבק. נסו שוב.",
+                parent=self.root,
+            )
+
+    def pick_stop_location_on_map(self, key: str) -> None:
+        """הלחיצה הבאה על המפה קובעת את מיקום העצירה."""
+        if self.map_panel is None:
+            return
+        if not self._map_visible:
+            self.toggle_map()
+        lat, lon = self.stops[key]["coords"]
+        self.map_panel.focus(lat, lon)
+        self.map_panel.start_pick(
+            lambda la, lo, k=key: self.set_stop_location(k, la, lo),
+            f"לחצו על המפה במיקום של: {self.stops[key].get('cust_name', '')} "
+            f"({self._current_address(key)})",
+        )
+
+    def set_stop_location(self, key: str, lat: float, lon: float) -> None:
+        st = self.stops.get(key)
+        if st is None or self.set_location is None:
+            return
+        updated = self.set_location(st, lat, lon)
+        self._sim_cache.clear()
+        self.render()
+        messagebox.showinfo(
+            "קביעת מיקום ידנית",
+            f"המיקום נשמר ({lat:.5f}, {lon:.5f}) ויישמש גם בהרצות הבאות."
+            + (f"\nעודכנו {updated} עצירות עם אותה כתובת." if updated > 1 else ""),
+            parent=self.root,
+        )
 
     def set_stop_address(self, key: str, idx: int) -> None:
         """בחירת כתובת אספקה לעצירה: המיקום וזמני הנסיעה מחושבים מחדש."""
@@ -1761,6 +1908,7 @@ def run_route_editor(
     save_copy: Callable[[], str] | None = None,
     save_as_path: str = "",
     apply_address: Callable[[dict[str, Any], int], None] | None = None,
+    set_location: Callable[[dict[str, Any], float, float], int] | None = None,
 ) -> list[tuple[list[str], str | None, str | None]] | None:
     """
     פותח את חלון העריכה וממתין עד שהמשתמש יאשר או יבטל.
@@ -1772,7 +1920,7 @@ def run_route_editor(
         root, initial_routes, stops_by_key, simulate, cfg, region_order, drivers,
         initial_days, compute_efficient, on_generate, send_mails,
         initial_drivers, list_mail_groups, save_copy, save_as_path,
-        apply_address,
+        apply_address, set_location,
     )
     root.lift()
     try:

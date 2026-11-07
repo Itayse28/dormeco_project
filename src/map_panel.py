@@ -99,6 +99,9 @@ class MapPanel(tk.Frame):
         super().__init__(master, bg="#F3F5F8")
         self.on_stop_click = on_stop_click
         self._last: tuple | None = None
+        # מצב "סימון מיקום": הלחיצה הבאה על המפה מחזירה קואורדינטות
+        self._pick_cb: Callable[[float, float], None] | None = None
+        self._status_before_pick: tuple[str, str] | None = None
 
         bar = tk.Frame(self, bg="#F3F5F8")
         bar.pack(side="top", fill="x", pady=(0, 4))
@@ -158,7 +161,7 @@ class MapPanel(tk.Frame):
             )
             return
         try:
-            new_backend = _OsmBackend(self, self._clicked, server)
+            new_backend = _OsmBackend(self, self._clicked, server, self._map_clicked)
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"מפה סכמטית - שגיאה ביצירת המפה: {exc}", warn=True)
             return
@@ -173,6 +176,45 @@ class MapPanel(tk.Frame):
 
     def _clicked(self, key: str) -> None:
         self.on_stop_click(key)
+
+    def can_pick(self) -> bool:
+        """אפשר לסמן מיקום בלחיצה רק על מפת OpenStreetMap האמיתית."""
+        return isinstance(self.backend, _OsmBackend)
+
+    def start_pick(self, callback: Callable[[float, float], None], hint: str) -> None:
+        """הלחיצה הבאה על המפה קוראת ל-callback(lat, lon). Esc מבטל."""
+        if not self.can_pick():
+            return
+        if self._pick_cb is None:
+            self._status_before_pick = (self.status.cget("text"), self.status.cget("fg"))
+        self._pick_cb = callback
+        self.status.configure(text=f"{hint}   (Esc לביטול)", fg="#0B57D0")
+        self._set_cursor("crosshair")
+        self.winfo_toplevel().bind("<Escape>", lambda _e: self.cancel_pick())
+
+    def cancel_pick(self) -> None:
+        self._pick_cb = None
+        self._set_cursor("")
+        self.winfo_toplevel().unbind("<Escape>")
+        if self._status_before_pick is not None:
+            text, fg = self._status_before_pick
+            self.status.configure(text=text, fg=fg)
+            self._status_before_pick = None
+
+    def _set_cursor(self, cursor: str) -> None:
+        for w in (self.backend.widget, getattr(self.backend.widget, "canvas", None)):
+            if w is not None:
+                try:
+                    w.configure(cursor=cursor)
+                except tk.TclError:
+                    pass
+
+    def _map_clicked(self, coords: tuple[float, float]) -> None:
+        cb = self._pick_cb
+        if cb is None:
+            return
+        self.cancel_pick()
+        cb(float(coords[0]), float(coords[1]))
 
     def draw(
         self,
@@ -242,11 +284,14 @@ class _OsmBackend(_BaseBackend):
         master: tk.Misc,
         on_click: Callable[[str], None],
         server: tuple[str, str, int],
+        on_map_click: Callable[[tuple[float, float]], None] | None = None,
     ) -> None:
         self.on_click = on_click
         self.widget = tkintermapview.TkinterMapView(master, corner_radius=0)
         self.map = self.widget
         self.map.set_tile_server(server[1], max_zoom=server[2])
+        if on_map_click is not None:
+            self.map.add_left_click_map_command(on_map_click)
         self.map.set_position(31.9, 34.9)
         self.map.set_zoom(8)
 

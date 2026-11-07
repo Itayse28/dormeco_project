@@ -660,6 +660,29 @@ REGION_ORDER: list[str] = [
 ]
 REGION_RANK: dict[str, int] = {name: idx for idx, name in enumerate(REGION_ORDER)}
 CACHE_FILE = pathlib.Path(__file__).resolve().parent.parent / "data" / "geocoding_cache_v2.json"
+# מיקומים שנקבעו ידנית בחלון העריכה (גוברים על כל חיפוש אוטומטי)
+MANUAL_LOCATIONS_FILE = CACHE_FILE.parent / "manual_locations.json"
+
+# רמת הדיוק של מיקום עצירה
+Q_MANUAL = "manual"            # נקבע ידנית
+Q_STREET = "street"            # כתובת מדויקת (רחוב)
+Q_GEOCODED = "geocoded"        # נמצא בחיפוש באינטרנט (Google / OpenStreetMap)
+Q_LOCALITY = "locality"        # מרכז היישוב
+Q_REGION_ONLY = "region_only"  # רק מרכז הנפה - המיקום לא ידוע באמת
+Q_GUESS = "guess"              # ניחוש לפי קידומת הטלפון / ברירת מחדל
+LOCATION_QUALITY_LABELS = {
+    Q_MANUAL: "נקבע ידנית",
+    Q_STREET: "כתובת מדויקת",
+    Q_GEOCODED: "נמצא בחיפוש מפות",
+    Q_LOCALITY: "מרכז היישוב",
+    Q_REGION_ONLY: "משוער - רק מרכז הנפה",
+    Q_GUESS: "לא אותר - ניחוש",
+}
+# מיקומים שלא באמת ידועים - מסומנים באזהרה בחלון ובדוח הנהג
+APPROX_QUALITIES = {Q_REGION_ONLY, Q_GUESS}
+# גבולות ישראל (כולל יהודה ושומרון והגולן) - תוצאת חיפוש מחוץ להם נדחית
+ISRAEL_BOUNDS = (29.4, 33.4, 34.2, 35.95)
+MAX_KM_FROM_LOCALITY = 15.0
 
 KNOWN_LOCALITIES: dict[str, tuple[str, float, float]] = {
     # --- 1. צפון מזרח ---
@@ -1232,9 +1255,68 @@ def save_cache(cache: dict[str, Any]) -> None:
         pass
 
 
+def manual_location_key(text: Any) -> str:
+    """מפתח לקובץ המיקומים הידניים: הכתובת בלי רווחים כפולים וסימני פיסוק בקצוות."""
+    return re.sub(r"\s+", " ", str(text or "")).strip(" ,.-\"'")
+
+
+def load_manual_locations() -> dict[str, list[Any]]:
+    if MANUAL_LOCATIONS_FILE.exists():
+        try:
+            data = json.loads(MANUAL_LOCATIONS_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def save_manual_location(address: Any, lat: float, lon: float) -> tuple[str, float, float]:
+    """שומר מיקום ידני לכתובת (ייטען אוטומטית בכל ההרצות הבאות). מחזיר (אזור, lat, lon)."""
+    region = classify_coordinates_to_region(lat, lon)
+    key = manual_location_key(address)
+    if key:
+        data = load_manual_locations()
+        data[key] = [region, round(lat, 6), round(lon, 6)]
+        try:
+            MANUAL_LOCATIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            MANUAL_LOCATIONS_FILE.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as exc:
+            print(f"[!] לא ניתן לשמור את המיקום הידני: {exc}")
+    return region, lat, lon
+
+
+def find_manual_location(
+    manual: dict[str, list[Any]], *texts: Any
+) -> tuple[str, float, float] | None:
+    for t in texts:
+        v = manual.get(manual_location_key(t))
+        if isinstance(v, list) and len(v) == 3:
+            return str(v[0]), float(v[1]), float(v[2])
+    return None
+
+
+def in_israel(lat: float, lon: float) -> bool:
+    lat_min, lat_max, lon_min, lon_max = ISRAEL_BOUNDS
+    return lat_min <= lat <= lat_max and lon_min <= lon <= lon_max
+
+
 def query_external_geocoding_coords(
     query: str, api_key: str = "", timeout: int = 5
 ) -> tuple[str, float, float] | None:
+    res = query_external_geocoding(query, api_key=api_key, timeout=timeout)
+    return res[:3] if res else None
+
+
+def query_external_geocoding(
+    query: str, api_key: str = "", timeout: int = 5
+) -> tuple[str, float, float, str] | None:
+    """
+    חיפוש מיקום באינטרנט: Google (אם יש מפתח), OpenStreetMap, ואז data.gov (רק נפה).
+    מחזיר (אזור, lat, lon, רמת דיוק). תוצאה מחוץ לישראל, או רחוקה מהיישוב שכתוב
+    בכתובת, נדחית - ואז מוחזר מרכז היישוב.
+    """
     clean_q = normalize_locality_text(query, remove_parens=True)
     if not clean_q or len(clean_q) < 2:
         return None
@@ -1243,6 +1325,19 @@ def query_external_geocoding_coords(
     raw_no_parens = re.sub(r"\([^)]*\)", " ", str(query)).strip(" ,.-")
     if raw_no_parens and raw_no_parens not in queries_to_try:
         queries_to_try.insert(0, raw_no_parens)
+
+    town = locality_name_in(query)
+    town_info = KNOWN_LOCALITIES.get(town) if town else None
+    # בלי מספר בית זה שם של מקום (יישוב / קיבוץ / אזור תעשייה) - תוצאה שהיא רק
+    # רחוב באותו שם במקום אחר בארץ נדחית (למשל רחוב "גילגל" במקום קיבוץ גילגל)
+    is_place_name = not re.search(r"\d", clean_q)
+
+    def accept(lat: float, lon: float) -> bool:
+        if not in_israel(lat, lon):
+            return False
+        if town_info and haversine_air_km((lat, lon), town_info[1:]) > MAX_KM_FROM_LOCALITY:
+            return False
+        return True
 
     if api_key:
         for q in queries_to_try:
@@ -1257,11 +1352,13 @@ def query_external_geocoding_coords(
                     timeout=timeout,
                 )
                 if resp.status_code == 200:
-                    results = resp.json().get("results", [])
-                    if results:
-                        loc = results[0]["geometry"]["location"]
+                    for result in resp.json().get("results", []):
+                        loc = result["geometry"]["location"]
                         lat, lon = float(loc["lat"]), float(loc["lng"])
-                        return classify_coordinates_to_region(lat, lon), lat, lon
+                        if is_place_name and "route" in result.get("types", []):
+                            continue
+                        if accept(lat, lon):
+                            return classify_coordinates_to_region(lat, lon), lat, lon, Q_GEOCODED
             except Exception:
                 pass
 
@@ -1272,20 +1369,24 @@ def query_external_geocoding_coords(
                 params={
                     "q": f"{q}, ישראל",
                     "format": "json",
-                    "limit": 1,
+                    "limit": 5,
                     "countrycodes": "il",
                 },
                 headers={"User-Agent": "DormacoOrderRouter/4.1"},
                 timeout=timeout,
             )
             if resp.status_code == 200:
-                data = resp.json()
-                if data:
-                    lat = float(data[0]["lat"])
-                    lon = float(data[0]["lon"])
-                    return classify_coordinates_to_region(lat, lon), lat, lon
+                for item in resp.json() or []:
+                    lat, lon = float(item["lat"]), float(item["lon"])
+                    if is_place_name and item.get("class") == "highway":
+                        continue
+                    if accept(lat, lon):
+                        return classify_coordinates_to_region(lat, lon), lat, lon, Q_GEOCODED
         except Exception:
             pass
+
+    if town_info:
+        return (*town_info, Q_LOCALITY)
 
     for q in queries_to_try:
         try:
@@ -1304,11 +1405,32 @@ def query_external_geocoding_coords(
                     nafa = str(rec.get("שם_נפה", "")).strip()
                     for key, info in CBS_SUBDISTRICT_TO_REGION.items():
                         if key in nafa:
-                            return info
+                            return (*info, Q_REGION_ONLY)
         except Exception:
             pass
 
     return None
+
+
+_SUBDISTRICT_POINTS = {(round(v[1], 4), round(v[2], 4)) for v in CBS_SUBDISTRICT_TO_REGION.values()}
+
+
+def cached_location(cache: dict[str, Any], key: str) -> tuple[str, float, float, str] | None:
+    """תוצאת חיפוש שמורה. רשומות ישנות (בלי רמת דיוק): מרכז נפה = region_only."""
+    v = cache.get(key)
+    if not isinstance(v, list) or len(v) not in (3, 4):
+        return None
+    reg, lat, lon = str(v[0]), float(v[1]), float(v[2])
+    # תוצאה ישנה רחוקה מהיישוב שכתוב בכתובת - כנראה שגויה, מחפשים מחדש
+    town = locality_name_in(key)
+    if town and town in KNOWN_LOCALITIES and haversine_air_km(
+        (lat, lon), KNOWN_LOCALITIES[town][1:]
+    ) > MAX_KM_FROM_LOCALITY:
+        return None
+    if len(v) == 4:
+        return reg, lat, lon, str(v[3])
+    quality = Q_REGION_ONLY if (round(lat, 4), round(lon, 4)) in _SUBDISTRICT_POINTS else Q_GEOCODED
+    return reg, lat, lon, quality
 
 
 def resolve_region_and_coords(
@@ -1319,14 +1441,37 @@ def resolve_region_and_coords(
     cache: dict[str, Any],
     cfg: dict[str, Any],
 ) -> tuple[str, float, float]:
+    return resolve_location_with_quality(
+        destination, address, site_name, phone, cache, cfg
+    )[:3]
+
+
+def resolve_location_with_quality(
+    destination: str | None,
+    address: str | None,
+    site_name: str | None,
+    phone: str | None,
+    cache: dict[str, Any],
+    cfg: dict[str, Any],
+    manual: dict[str, list[Any]] | None = None,
+) -> tuple[str, float, float, str]:
+    """מיקום העצירה + רמת הדיוק שלו (Q_...)."""
     dest_str = str(destination or "").strip()
     addr_str = str(address or "").strip()
     site_str = str(site_name or "").strip()
 
+    if manual:
+        res = find_manual_location(
+            manual, ", ".join(dict.fromkeys(t for t in (addr_str, dest_str) if t)),
+            addr_str, dest_str,
+        )
+        if res:
+            return (*res, Q_MANUAL)
+
     for city_kw, street_kw, s_lat, s_lon in SPECIFIC_ADDRESS_COORDS:
         if (city_kw in dest_str or city_kw in addr_str) and street_kw in addr_str:
             reg = KNOWN_LOCALITIES[city_kw][0]
-            return reg, s_lat, s_lon
+            return reg, s_lat, s_lon, Q_STREET
 
     is_dn_postal = bool(
         re.match(r"^(?:ד\.?נ\.?|דואר נע|מועצה אזורית|מ\.?א\.?)\b", dest_str)
@@ -1335,67 +1480,72 @@ def resolve_region_and_coords(
     if cfg.get("PREFER_SITE_NAME_CITY") and site_str:
         res = match_in_known_localities(site_str, is_address_field=False)
         if res:
-            return res
+            return (*res, Q_LOCALITY)
 
     if is_dn_postal and addr_str:
         res = match_in_known_localities(addr_str, is_address_field=True)
         if res:
-            return res
+            return (*res, Q_LOCALITY)
 
+    region_only: tuple[str, float, float, str] | None = None
     if dest_str:
         res = match_in_known_localities(dest_str, is_address_field=False)
         if res:
-            return res
+            return (*res, Q_LOCALITY)
 
-        if (
-            dest_str in cache
-            and isinstance(cache[dest_str], list)
-            and len(cache[dest_str]) == 3
-        ):
-            reg, lat, lon = cache[dest_str]
-            return str(reg), float(lat), float(lon)
-
-        if cfg.get("USE_EXTERNAL_ROUTING_API", True):
-            ext_res = query_external_geocoding_coords(
+        ext_res = cached_location(cache, dest_str)
+        if ext_res is None and cfg.get("USE_EXTERNAL_ROUTING_API", True):
+            ext_res = query_external_geocoding(
                 dest_str, api_key=cfg.get("GOOGLE_MAPS_API_KEY", "")
             )
             if ext_res:
                 cache[dest_str] = list(ext_res)
                 save_cache(cache)
+        if ext_res:
+            if ext_res[3] != Q_REGION_ONLY:
                 return ext_res
+            region_only = ext_res  # אולי הכתובת עצמה תיתן מיקום טוב יותר
 
     if addr_str:
         res = match_in_known_localities(addr_str, is_address_field=True)
         if res:
-            return res
+            return (*res, Q_LOCALITY)
 
-        if cfg.get("USE_EXTERNAL_ROUTING_API", True) and not dest_str:
-            ext_res = query_external_geocoding_coords(
-                addr_str, api_key=cfg.get("GOOGLE_MAPS_API_KEY", "")
-            )
+        if addr_str != dest_str:
+            ext_res = cached_location(cache, addr_str)
+            if ext_res is None and cfg.get("USE_EXTERNAL_ROUTING_API", True):
+                ext_res = query_external_geocoding(
+                    addr_str, api_key=cfg.get("GOOGLE_MAPS_API_KEY", "")
+                )
+                if ext_res:
+                    cache[addr_str] = list(ext_res)
+                    save_cache(cache)
             if ext_res:
-                cache[addr_str] = list(ext_res)
-                save_cache(cache)
-                return ext_res
+                if ext_res[3] != Q_REGION_ONLY:
+                    return ext_res
+                region_only = region_only or ext_res
 
     if site_str:
         res = match_in_known_localities(site_str, is_address_field=True)
         if res:
-            return res
+            return (*res, Q_LOCALITY)
+
+    if region_only:
+        return region_only
 
     phone_str = re.sub(r"\D", "", str(phone or ""))
     if phone_str.startswith("02"):
-        return ("איזור ירושלים", 31.7683, 35.2137)
+        return ("איזור ירושלים", 31.7683, 35.2137, Q_GUESS)
     if phone_str.startswith("09"):
-        return ("אזור השרון", 32.2770, 34.8640)
+        return ("אזור השרון", 32.2770, 34.8640, Q_GUESS)
     if phone_str.startswith("08"):
-        return ("דרום הארץ", 31.6440, 34.5800)
+        return ("דרום הארץ", 31.6440, 34.5800, Q_GUESS)
     if phone_str.startswith("04"):
-        return ("צפון מערב", 32.7940, 34.9896)
+        return ("צפון מערב", 32.7940, 34.9896, Q_GUESS)
     if phone_str.startswith("03"):
-        return ("איזור גוש דן", 32.0158, 34.7874)
+        return ("איזור גוש דן", 32.0158, 34.7874, Q_GUESS)
 
-    return ("איזור גוש דן", 32.0853, 34.8500)
+    return ("איזור גוש דן", 32.0853, 34.8500, Q_GUESS)
 
 
 # ==============================================================================
@@ -2053,6 +2203,7 @@ def find_client_mark(cust_name: Any, marks: list[tuple[str, str]]) -> str:
 # ואם אף אחת לא מתאימה - הכתובת הראשונה של הלקוח בקובץ הכתובות.
 # בחלון העריכה אפשר לבחור כתובת אחרת (קליק ימני על העצירה).
 CHOSEN_ADDRESS_HEADER = "כתובת אספקה נבחרת"
+LOCATION_QUALITY_HEADER = "דיוק מיקום"
 SOURCE_CLIENTS_FILE = "קובץ כתובות"
 SOURCE_ORDERS_FILE = "קובץ ההזמנות"
 
@@ -2168,27 +2319,46 @@ def locality_name_in(text: Any) -> str:
 
 
 def resolve_address_coords(
-    address: str, cache: dict[str, Any], cfg: dict[str, Any]
-) -> tuple[str, float, float] | None:
-    """מיקום של כתובת מלאה מקובץ הכתובות: מילון היישובים, המטמון, ואז חיפוש באינטרנט."""
+    address: str,
+    cache: dict[str, Any],
+    cfg: dict[str, Any],
+    manual: dict[str, list[Any]] | None = None,
+) -> tuple[str, float, float, str] | None:
+    """
+    מיקום של כתובת מלאה מקובץ הכתובות + רמת הדיוק: מיקום ידני, כתובות מוכרות,
+    ואז מילון היישובים / המטמון / חיפוש באינטרנט. עם מפתח Google הכתובת המלאה
+    נבדקת ב-Google לפני מרכז היישוב (כדי למצוא את המקום המדויק, למשל באזור תעשייה).
+    """
+    if manual:
+        res = find_manual_location(manual, address)
+        if res:
+            return (*res, Q_MANUAL)
     for city_kw, street_kw, s_lat, s_lon in SPECIFIC_ADDRESS_COORDS:
         if city_kw in address and street_kw in address:
-            return KNOWN_LOCALITIES[city_kw][0], s_lat, s_lon
+            return KNOWN_LOCALITIES[city_kw][0], s_lat, s_lon, Q_STREET
+    api_key = str(cfg.get("GOOGLE_MAPS_API_KEY", "") or "").strip()
+    use_ext = bool(cfg.get("USE_EXTERNAL_ROUTING_API", True))
+
+    def external() -> tuple[str, float, float, str] | None:
+        ext = cached_location(cache, address)
+        # תוצאה ישנה לא מדויקת (מלפני שהוגדר מפתח Google) - מנסים שוב
+        stale = ext is not None and api_key and ext[3] in (Q_LOCALITY, Q_REGION_ONLY)
+        if (ext is None or stale) and use_ext:
+            new = query_external_geocoding(address, api_key=api_key)
+            if new:
+                ext = new
+                cache[address] = list(new)
+                save_cache(cache)
+        return ext
+
+    if api_key:
+        ext = external()
+        if ext and ext[3] in (Q_GEOCODED, Q_STREET):
+            return ext
     res = match_in_known_localities(address, is_address_field=True)
     if res:
-        return res
-    cached = cache.get(address)
-    if isinstance(cached, list) and len(cached) == 3:
-        return str(cached[0]), float(cached[1]), float(cached[2])
-    if cfg.get("USE_EXTERNAL_ROUTING_API", True):
-        ext = query_external_geocoding_coords(
-            address, api_key=cfg.get("GOOGLE_MAPS_API_KEY", "")
-        )
-        if ext:
-            cache[address] = list(ext)
-            save_cache(cache)
-            return ext
-    return None
+        return (*res, Q_LOCALITY)
+    return external()
 
 
 def build_address_options(
@@ -2198,6 +2368,7 @@ def build_address_options(
     preferred: str,
     cache: dict[str, Any],
     cfg: dict[str, Any],
+    manual: dict[str, list[Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """
     רשימת הכתובות האפשריות לעצירה + האינדקס של ברירת המחדל.
@@ -2206,9 +2377,9 @@ def build_address_options(
     """
     options: list[dict[str, Any]] = []
     for o in client_opts:
-        loc = resolve_address_coords(o["address"], cache, cfg)
+        loc = resolve_address_coords(o["address"], cache, cfg, manual)
         found = loc is not None
-        region, lat, lon = loc if loc else (stop["region"], *stop["coords"])
+        region, lat, lon, quality = loc if loc else (stop["region"], *stop["coords"], Q_GUESS)
         options.append({
             "address": o["address"],
             "source": SOURCE_CLIENTS_FILE,
@@ -2217,6 +2388,7 @@ def build_address_options(
             "region": region,
             "coords": (lat, lon),
             "located": found,
+            "quality": quality,
             "city": locality_name_in(o["address"]) or o["address"],
         })
     raw_address = ", ".join(dict.fromkeys(
@@ -2230,6 +2402,7 @@ def build_address_options(
         "region": stop["region"],
         "coords": tuple(stop["coords"]),
         "located": True,
+        "quality": stop.get("loc_quality", Q_LOCALITY),
         "city": stop["effective_dest"] or raw_address,
     })
 
@@ -2256,6 +2429,7 @@ def apply_address_choice(stop: dict[str, Any], idx: int) -> None:
     stop["matrix_idx"] = opt["matrix_idx"]
     stop["chosen_address"] = opt["address"]
     stop["display_city"] = opt["city"]
+    stop["loc_quality"] = opt.get("quality", Q_LOCALITY)
 
 
 # עמודות שהסקריפט מוסיף לטבלה הממוינת (לא חלק מנתוני ההזמנה המקוריים)
@@ -2267,6 +2441,7 @@ GENERATED_HEADERS = {
     "שעת הגעה ליעד",
     "דגש מיוחד ללקוח",
     CHOSEN_ADDRESS_HEADER,
+    LOCATION_QUALITY_HEADER,
 }
 
 
@@ -2407,6 +2582,7 @@ def apply_manual_route_edits(
     send_mails: Callable[..., str] | None = None,
     gui_extras: dict[str, Any] | None = None,
     initial_edited: list[tuple[list[str], str | None, str | None]] | None = None,
+    set_location: Callable[[dict[str, Any], float, float], int] | None = None,
 ) -> list[dict[str, Any]] | None:
     """
     פותח את חלון העריכה.
@@ -2474,6 +2650,7 @@ def apply_manual_route_edits(
         send_mails=send_mails,
         initial_drivers=initial_drivers,
         apply_address=apply_address_choice,
+        set_location=set_location,
         **(gui_extras or {}),
     )
     if edited is None:
@@ -2594,6 +2771,7 @@ def sort_orders_excel(
 
     cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
     cache = load_cache()
+    manual_locations = load_manual_locations()
     records: list[dict[str, Any]] = []
 
     for r in range(2, ws_in.max_row + 1):
@@ -2650,13 +2828,14 @@ def sort_orders_excel(
             )
         warehouse_label = " + ".join(wh_tags)
 
-        region, lat, lon = resolve_region_and_coords(
+        region, lat, lon, loc_quality = resolve_location_with_quality(
             destination=dest_val,
             address=addr_val,
             site_name=site_val,
             phone=phone_val,
             cache=cache,
             cfg=cfg,
+            manual=manual_locations,
         )
 
         effective_dest = str(dest_val or "").strip()
@@ -2700,6 +2879,7 @@ def sort_orders_excel(
                 "qty": qty_val,
                 "lat": lat,
                 "lon": lon,
+                "loc_quality": loc_quality,
                 "stop_key": stop_key,
                 "raw_values": row_vals,
                 "prior_label": prior_label,
@@ -2735,6 +2915,7 @@ def sort_orders_excel(
                 "cust_no": rec["cust_no"],
                 "date": rec["date"],
                 "coords": (rec["lat"], rec["lon"]),
+                "loc_quality": rec["loc_quality"],
                 "matrix_idx": m_idx,
                 "raw_address_texts": rec["raw_address_texts"],
                 "prior_chosen": rec["prior_chosen"],
@@ -2771,6 +2952,7 @@ def sort_orders_excel(
             st["prior_chosen"],
             cache,
             cfg,
+            manual_locations,
         )
         for opt in options:
             c = point_key(opt["coords"])
@@ -2808,6 +2990,57 @@ def sort_orders_excel(
         pos_of.append(unique_pos[k])
     unique_matrix = build_travel_minutes_matrix(unique_points, cfg)
     travel_matrix = [[unique_matrix[a][b] for b in pos_of] for a in pos_of]
+
+    approx_stops = [
+        st for st in unique_stops_by_key.values() if st.get("loc_quality") in APPROX_QUALITIES
+    ]
+    if approx_stops:
+        print(
+            f"[!] {len(approx_stops)} עצירות שהמיקום שלהן לא אותר במדויק "
+            "(מסומנות ב-⚠ בחלון - קליק ימני > קביעת מיקום ידנית):"
+        )
+        for st in approx_stops:
+            print(
+                f"    - {st['cust_name']} | {st.get('chosen_address') or st['effective_dest']}"
+                f" ({LOCATION_QUALITY_LABELS.get(st['loc_quality'], '')})"
+            )
+
+    def set_manual_location(stop: dict[str, Any], lat: float, lon: float) -> int:
+        """
+        קביעת מיקום ידנית לכתובת שנבחרה בעצירה (מתוך החלון). המיקום נשמר לקובץ
+        ונטען אוטומטית בהרצות הבאות. מתעדכנות כל העצירות עם אותה כתובת.
+        כל אחת מקבלת נקודה חדשה משלה במטריצה (שתי עצירות לא חולקות אינדקס);
+        זמני הנסיעה אליה מוערכים לפי מרחק (בהרצה הבאה - זמנים אמיתיים).
+        מחזיר את מספר העצירות שעודכנו.
+        """
+        address = stop["address_options"][stop["address_choice"]]["address"]
+        region, lat, lon = save_manual_location(address, lat, lon)
+        key = manual_location_key(address)
+        updated = 0
+        for st in unique_stops_by_key.values():
+            hit = False
+            for opt in st.get("address_options") or []:
+                if manual_location_key(opt["address"]) != key:
+                    continue
+                new_idx = len(fixed_points)
+                new_pt = (lat, lon)
+                for i, row in enumerate(travel_matrix):
+                    row.append(estimate_israel_truck_travel_minutes(fixed_points[i], new_pt))
+                travel_matrix.append(
+                    [estimate_israel_truck_travel_minutes(new_pt, p) for p in fixed_points]
+                    + [0.0]
+                )
+                fixed_points.append(new_pt)
+                opt.update(
+                    coords=new_pt, region=region, quality=Q_MANUAL,
+                    located=True, matrix_idx=new_idx,
+                )
+                hit = True
+            if hit:
+                apply_address_choice(st, st["address_choice"])
+                updated += 1
+        print(f"[V] מיקום ידני נשמר: {address} -> {lat:.5f}, {lon:.5f} ({updated} עצירות)")
+        return updated
 
     # תכנון אוטומטי בנפרד לכל יום (בדוח יומי יש יום אחד בלבד)
     all_stops = list(unique_stops_by_key.values())
@@ -2921,6 +3154,8 @@ def sort_orders_excel(
         col_mark_out = len(out_headers)
         # בסוף הטבלה, כדי לא לבלבל את זיהוי העמודה "כתובת" המקורית
         out_headers.append(CHOSEN_ADDRESS_HEADER)
+        out_headers.append(LOCATION_QUALITY_HEADER)
+        col_quality_out = len(out_headers)
         mark_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
         mark_font = Font(name="Arial", size=10, bold=True, color="9C0006")
 
@@ -3026,6 +3261,8 @@ def sort_orders_excel(
 
             row_out.append(rec.get("client_mark") or None)
             row_out.append(stop.get("chosen_address") or None)
+            stop_quality = stop.get("loc_quality", "")
+            row_out.append(LOCATION_QUALITY_LABELS.get(stop_quality) or None)
             for col_idx, val in enumerate(row_out, start=1):
                 cell = ws_orders.cell(row_offset, col_idx, val)
                 cell.fill = row_fill
@@ -3036,6 +3273,10 @@ def sort_orders_excel(
                     rec["is_cooling"] or rec["is_hazmat"] or rec["is_goldbond"]
                 ):
                     cell.font = wh_special_font
+
+                if col_idx == col_quality_out and stop_quality in APPROX_QUALITIES:
+                    cell.fill = mark_fill
+                    cell.font = mark_font
 
                 if col_idx == col_qty_out and isinstance(val, (int, float)):
                     cell.number_format = "#,##0.##"
@@ -3234,6 +3475,7 @@ def sort_orders_excel(
             send_mails=send_mails,
             gui_extras=gui_extras,
             initial_edited=initial_edited,
+            set_location=set_manual_location,
         )
         if result is None:
             return last_written.get("drivers", [])

@@ -812,6 +812,9 @@ def create_single_driver_report(
                 f"תחנה {stop_num}: {dest}  |  שם הלקוח: {cust_name}  |  "
                 f"כתובת מדויקת: {full_address}{arr_txt}{phone_txt}"
             )
+        # מיקום שלא אותר במדויק (ניחוש / רק מרכז הנפה) - הנהג צריך לוודא
+        if first_it.get("loc_quality", "").startswith(("לא אותר", "משוער")):
+            stop_banner_text += "  |  ⚠ מיקום משוער - לוודא מול הלקוח"
 
         ws.merge_cells(
             start_row=curr_row,
@@ -985,6 +988,7 @@ def generate_driver_reports_from_sorted_excel(
     idx_mark = find_col(["דגש מיוחד ללקוח"], -1)
     # הכתובת שנבחרה בחלון העריכה (מקובץ הכתובות הנכונות) - גוברת על הכתובת מההזמנה
     idx_chosen = find_col(["כתובת אספקה נבחרת"], -1)
+    idx_quality = find_col(["דיוק מיקום"], -1)
 
     cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
 
@@ -1109,6 +1113,9 @@ def generate_driver_reports_from_sorted_excel(
             "combined_notes": combined_notes,
             "chosen_address": str(row_vals[idx_chosen] or "").strip()
             if 0 <= idx_chosen < len(row_vals)
+            else "",
+            "loc_quality": str(row_vals[idx_quality] or "").strip()
+            if 0 <= idx_quality < len(row_vals)
             else "",
         }
 
