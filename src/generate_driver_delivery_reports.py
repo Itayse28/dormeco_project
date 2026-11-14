@@ -378,9 +378,11 @@ def load_cooling_skus_from_file(file_path: pathlib.Path) -> set[str]:
 def load_warehouse_sku_sets(
     cfg: dict[str, Any],
 ) -> tuple[set[str], set[str], set[str]]:
-    cooling_skus = {s.upper() for s in DEFAULT_COOLING_SKUS}
-    hazmat_skus = {s.upper() for s in DEFAULT_HAZMAT_SKUS}
-    goldbond_skus = {s.upper() for s in DEFAULT_GOLDBOND_SKUS}
+    # הקבצים במחסנים הם המקור היחיד, והם נקראים מחדש בכל הרצה: מק"ט שנמחק
+    # מקובץ כבר לא שייך למחסן. הרשימות המובנות משמשות רק כשקובץ חסר או ריק.
+    cooling_skus: set[str] = set()
+    hazmat_skus: set[str] = set()
+    goldbond_skus: set[str] = set()
 
     in_dir: pathlib.Path = cfg["INPUT_DIR_PATH"]
     script_dir = pathlib.Path(__file__).resolve().parent.parent  # תיקיית הפרויקט (הקוד נמצא ב-src)
@@ -401,6 +403,15 @@ def load_warehouse_sku_sets(
                     break
         if g_file.exists():
             goldbond_skus.update(load_skus_from_excel(g_file))
+
+    for label, skus, defaults in (
+        (cfg["COOLING_FILE_NAME"], cooling_skus, DEFAULT_COOLING_SKUS),
+        (cfg["HAZMAT_FILE_NAME"], hazmat_skus, DEFAULT_HAZMAT_SKUS),
+        (cfg["GOLDBOND_FILE_NAME"], goldbond_skus, DEFAULT_GOLDBOND_SKUS),
+    ):
+        if not skus:
+            print(f"[!] קובץ המחסן {label} לא נמצא או ריק - משתמשים ברשימה המובנית בקוד.")
+            skus.update(s.upper() for s in defaults)
 
     for extra_c in str(cfg.get("EXTRA_COOLING_SKUS", "")).split(","):
         tok = clean_sku_token(extra_c)
