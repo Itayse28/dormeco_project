@@ -6,7 +6,7 @@
 
 # --- 1. נתיבי תיקיות ושמות קבצים ---
 INPUT_FILE_NAME = list.xlsx
-COOLING_FILE_NAME = Cooling_products.pdf
+COOLING_FILE_NAME = Cooling_products.xlsx
 HAZMAT_FILE_NAME = dangerous_products.xlsx
 GOLDBOND_FILE_NAME = Gold_bond.xlsx
 

@@ -221,7 +221,7 @@ def load_config(custom_config_path: pathlib.Path | None = None) -> dict[str, Any
         "OUTPUT_DIR_PATH": out_dir_obj,
         "INPUT_FILE_NAME": raw_kv.get("INPUT_FILE_NAME", "list.xlsx"),
         "COOLING_FILE_NAME": raw_kv.get(
-            "COOLING_FILE_NAME", "Cooling_products.pdf"
+            "COOLING_FILE_NAME", "Cooling_products.xlsx"
         ),
         "HAZMAT_FILE_NAME": raw_kv.get(
             "HAZMAT_FILE_NAME", "dangerous_products.xlsx"
@@ -383,16 +383,25 @@ def load_warehouse_sku_sets(
     cooling_skus: set[str] = set()
     hazmat_skus: set[str] = set()
     goldbond_skus: set[str] = set()
+    files_found: set[str] = set()
 
     in_dir: pathlib.Path = cfg["INPUT_DIR_PATH"]
     script_dir = pathlib.Path(__file__).resolve().parent.parent  # תיקיית הפרויקט (הקוד נמצא ב-src)
 
     for folder in (in_dir, script_dir):
         c_file = folder / cfg["COOLING_FILE_NAME"]
+        if not c_file.exists():
+            # מחסן קירור: הקובץ הוחלף מ-PDF לאקסל - מחפשים גם בסיומת השנייה
+            for alt in ("Cooling_products.xlsx", "Cooling_products.pdf"):
+                if (folder / alt).exists():
+                    c_file = folder / alt
+                    break
         if c_file.exists():
+            files_found.add("cooling")
             cooling_skus.update(load_cooling_skus_from_file(c_file))
         h_file = folder / cfg["HAZMAT_FILE_NAME"]
         if h_file.exists():
+            files_found.add("hazmat")
             hazmat_skus.update(load_skus_from_excel(h_file))
         g_file = folder / cfg["GOLDBOND_FILE_NAME"]
         if not g_file.exists():
@@ -402,15 +411,17 @@ def load_warehouse_sku_sets(
                     g_file = folder / alt
                     break
         if g_file.exists():
+            files_found.add("goldbond")
             goldbond_skus.update(load_skus_from_excel(g_file))
 
-    for label, skus, defaults in (
-        (cfg["COOLING_FILE_NAME"], cooling_skus, DEFAULT_COOLING_SKUS),
-        (cfg["HAZMAT_FILE_NAME"], hazmat_skus, DEFAULT_HAZMAT_SKUS),
-        (cfg["GOLDBOND_FILE_NAME"], goldbond_skus, DEFAULT_GOLDBOND_SKUS),
+    # קובץ ריק = אין מק"טים במחסן הזה. רק קובץ שלא קיים בכלל -> הרשימה המובנית
+    for key, label, skus, defaults in (
+        ("cooling", cfg["COOLING_FILE_NAME"], cooling_skus, DEFAULT_COOLING_SKUS),
+        ("hazmat", cfg["HAZMAT_FILE_NAME"], hazmat_skus, DEFAULT_HAZMAT_SKUS),
+        ("goldbond", cfg["GOLDBOND_FILE_NAME"], goldbond_skus, DEFAULT_GOLDBOND_SKUS),
     ):
-        if not skus:
-            print(f"[!] קובץ המחסן {label} לא נמצא או ריק - משתמשים ברשימה המובנית בקוד.")
+        if key not in files_found:
+            print(f"[!] קובץ המחסן {label} לא נמצא - משתמשים ברשימה המובנית בקוד.")
             skus.update(s.upper() for s in defaults)
 
     for extra_c in str(cfg.get("EXTRA_COOLING_SKUS", "")).split(","):
