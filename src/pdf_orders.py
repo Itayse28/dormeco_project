@@ -421,6 +421,10 @@ def read_orders_pdf(path: str | pathlib.Path) -> tuple[list[str], list[list[Any]
 
     out_rows = []
     for row in rows:
+        # בלי "כמות במשטח" פריוריטי כותב במספר המשטחים את הכמות עצמה
+        # (1,100 ק"ג -> "1,100 משטחים") - זה לא מספר משטחים אמיתי
+        if not str(row.get("כמות במשטח") or "").strip():
+            row["מספר משטחים"] = None
         vals = []
         for h in headers:
             v = row.get(h)

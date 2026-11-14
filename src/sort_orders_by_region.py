@@ -1828,8 +1828,10 @@ def simulate_driver_shift(
     start_time_min: float | None = None,
     end_node: int | None = None,
     day_start_min: float | None = None,
+    max_weight_kg: float | None = None,
 ) -> dict[str, Any]:
     """
+    max_weight_kg: מגבלת המשקל של הנהג (מקובץ הנהגים); None = MAX_TRUCK_WEIGHT_KG.
     keep_order=True: שומר בדיוק על סדר העצירות שהתקבל (עריכה ידנית), בלי אופטימיזציה.
     home_idx/home_name: נקודת היציאה והחזרה של הנהג (ברירת מחדל: הבית הכללי מההגדרות).
     start_node/start_time_min: נקודה ושעה שמהן הסבב מתחיל (לסבב שני של אותו נהג).
@@ -1932,9 +1934,10 @@ def simulate_driver_shift(
 
     total_weight = sum(s["weight"] for s in stops)
     max_shift_min = float(cfg["MAX_DRIVER_SHIFT_HOURS"]) * 60.0
-    max_weight = float(cfg["MAX_TRUCK_WEIGHT_KG"])
+    max_weight = float(max_weight_kg if max_weight_kg else cfg["MAX_TRUCK_WEIGHT_KG"])
 
     return {
+        "max_weight": max_weight,
         "ordered_stops": ordered_stops,
         "schedule_by_stop": {d["stop_key"]: d for d in schedule_details},
         "warehouses_summary": " -> ".join(wh_logs),
@@ -1958,9 +1961,10 @@ def simulate_driver_day(
     keeps: list[bool],
     home_idx: int = 0,
     home_name: str | None = None,
+    max_weight_kg: float | None = None,
 ) -> list[dict[str, Any]]:
     """
-    יום עבודה של נהג עם כמה סבבים ברצף:
+    יום עבודה של נהג עם כמה סבבים ברצף (מגבלת המשקל חלה על כל סבב בנפרד):
     בית -> סבב 1 -> חזרה למחסן והעמסה -> סבב 2 -> ... -> חזרה הביתה.
     """
     day_start = parse_hhmm_to_minutes(cfg["DRIVER_DEPARTURE_TIME"])
@@ -1979,6 +1983,7 @@ def simulate_driver_day(
             start_time_min=t,
             end_node=end,
             day_start_min=day_start,
+            max_weight_kg=max_weight_kg,
         )
         sims.append(sim)
         node, t = end, sim["end_time_min"]
@@ -2091,6 +2096,23 @@ def geocode_driver_home(
     return result
 
 
+DEFAULT_DRIVER_WEIGHT_TONS = 7.5
+DRIVER_WEIGHT_HEADER = "הגבלת משקל (טון)"
+
+
+def parse_driver_weight_limit(val: Any) -> float | None:
+    """הגבלת משקל מקובץ הנהגים -> ק"ג. מספר עד 100 = טון (7.5), יותר = ק"ג (7500)."""
+    if val is None or str(val).strip() == "":
+        return None
+    try:
+        num = float(str(val).replace(",", "").replace("טון", "").strip())
+    except ValueError:
+        return None
+    if num <= 0:
+        return None
+    return num * 1000.0 if num <= 100 else num
+
+
 def load_drivers(cfg: dict[str, Any], cache: dict[str, Any]) -> list[dict[str, Any]]:
     """קורא את קובץ הנהגים (שם נהג + כתובת) ומאתר לכל נהג את מיקום הבית."""
     in_dir: pathlib.Path = cfg["INPUT_DIR_PATH"]
@@ -2107,6 +2129,8 @@ def load_drivers(cfg: dict[str, Any], cache: dict[str, Any]) -> list[dict[str, A
     headers = [str(ws.cell(1, c).value or "").strip() for c in range(1, ws.max_column + 1)]
     idx_name = next((i for i, h in enumerate(headers) if "שם" in h), 0)
     idx_addr = next((i for i, h in enumerate(headers) if "כתובת" in h), 1)
+    # הגבלת משקל לנהג בטון (ריק = ברירת מחדל 7.5 טון)
+    idx_weight = next((i for i, h in enumerate(headers) if "משקל" in h), -1)
 
     drivers: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -2132,6 +2156,12 @@ def load_drivers(cfg: dict[str, Any], cache: dict[str, Any]) -> list[dict[str, A
             lat, lon, approx = loc
             note = " (מיקום משוער - מרכז העיר)" if approx else ""
             print(f"    [V] {name}: {addr}{note}")
+        raw_w = vals[idx_weight] if 0 <= idx_weight < len(vals) else None
+        max_weight_kg = parse_driver_weight_limit(raw_w)
+        if max_weight_kg is None:
+            if raw_w not in (None, ""):
+                print(f"    [!] {name}: הגבלת משקל \"{raw_w}\" לא מובנת - משתמשים ב-{DEFAULT_DRIVER_WEIGHT_TONS:g} טון.")
+            max_weight_kg = DEFAULT_DRIVER_WEIGHT_TONS * 1000.0
         drivers.append(
             {
                 "name": name,
@@ -2139,6 +2169,7 @@ def load_drivers(cfg: dict[str, Any], cache: dict[str, Any]) -> list[dict[str, A
                 "coords": (lat, lon),
                 "approx": approx,
                 "not_found": not_found,
+                "max_weight_kg": max_weight_kg,
             }
         )
     return drivers
@@ -2633,6 +2664,7 @@ def apply_manual_route_edits(
             return simulate_driver_day(
                 rounds, matrix, cfg, keeps,
                 home_idx=drv["matrix_idx"], home_name=f"בית ({drv['address']})",
+                max_weight_kg=drv.get("max_weight_kg"),
             )
         return simulate_driver_day(rounds, matrix, cfg, keeps)
 

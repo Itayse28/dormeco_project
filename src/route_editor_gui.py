@@ -351,8 +351,10 @@ class RouteEditor:
 
     def _problems(self, sim: dict[str, Any]) -> list[str]:
         out = []
-        if sim["total_weight"] > self.max_weight + 1e-6:
-            out.append(f'חריגת משקל (מקס\' {self.max_weight:,.0f})')
+        # מגבלת המשקל של הנהג שנבחר (מקובץ הנהגים), אחרת המגבלה הכללית
+        max_w = float(sim.get("max_weight") or self.max_weight)
+        if sim["total_weight"] > max_w + 1e-6:
+            out.append(f'חריגת משקל (מקס\' {max_w:,.0f})')
         if sim["total_shift_min"] > self.max_shift_min + 1e-6:
             out.append(f"חריגת שעות (מקס' {self.max_shift_min / 60:g})")
         return out
@@ -910,7 +912,8 @@ class RouteEditor:
             ]
             info_lines.append(
                 (
-                    f'{len(keys)} עצירות | {sim["total_weight"]:,.0f} ק"ג | '
+                    f'{len(keys)} עצירות | {sim["total_weight"]:,.0f}'
+                    f'/{float(sim.get("max_weight") or self.max_weight):,.0f} ק"ג | '
                     f'משמרת {sim["total_shift_hhmm"]}',
                     "black",
                 )

@@ -491,6 +491,15 @@ def safe_file_part(text: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', " ", str(text)).strip() or "1"
 
 
+def _num_or_none(row_vals: list[Any], idx: int) -> float | None:
+    if not 0 <= idx < len(row_vals) or row_vals[idx] in (None, ""):
+        return None
+    try:
+        return float(str(row_vals[idx]).replace(",", ""))
+    except ValueError:
+        return None
+
+
 def create_single_driver_report(
     driver_num: str,
     driver_label: str,
@@ -557,7 +566,12 @@ def create_single_driver_report(
         left=med_red, right=med_red, top=thin_side, bottom=thin_side
     )
 
-    num_cols = 8
+    # כמות במשטח + מספר משטחים: רק כשיש נתונים (דוח PDF מפריוריטי)
+    has_pallets = any(
+        r.get("pallets") is not None or r.get("per_pallet") is not None for r in driver_rows
+    )
+    pallet_headers = ["כמות במשטח", "מספר משטחים"] if has_pallets else []
+    num_cols = 8 + len(pallet_headers)
     mark_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     mark_font = Font(name=font_family, size=9, bold=True, color="9C0006")
 
@@ -636,8 +650,13 @@ def create_single_driver_report(
         "תיאור החומר",
         "כמות",
         "יח'",
+        *pallet_headers,  # עמודות 8-9 (כשיש משטחים)
         "דגש מיוחד ללקוח",
     ]
+    PAL_COL = 9  # עמודת "מספר משטחים" בטבלת ההעמסה (I)
+
+    def pallet_vals(item: dict[str, Any]) -> list[Any]:
+        return [item.get("per_pallet"), item.get("pallets")] if has_pallets else []
 
     wh_total_rows: list[int] = []
     for wh_key, wh_name, wh_addr, wh_fill in warehouses_order:
@@ -684,13 +703,14 @@ def create_single_driver_report(
                 item["prod_desc"],
                 item["qty"],
                 item["unit"],
+                *pallet_vals(item),
                 item.get("client_mark") or None,
             ]
             for c_i, v in enumerate(vals, start=1):
                 c = ws.cell(curr_row, c_i, v)
                 c.font = bold_font if c_i in (4, 6) else data_font
                 c.border = grid_border
-                if c_i == 6 and isinstance(v, (int, float)):
+                if (c_i == 6 or (has_pallets and c_i in (8, 9))) and isinstance(v, (int, float)):
                     c.number_format = "#,##0.##"
                     c.alignment = Alignment(
                         horizontal="center", vertical="center", wrap_text=True
@@ -703,7 +723,7 @@ def create_single_driver_report(
                     c.alignment = Alignment(
                         horizontal="right", vertical="center", wrap_text=True
                     )
-            style_mark(ws.cell(curr_row, 8))
+            style_mark(ws.cell(curr_row, num_cols))
             set_link(ws.cell(curr_row, 1), order_link(cfg, item["order_no"]))
             set_link(ws.cell(curr_row, 2), customer_link(cfg, item.get("cust_no")))
             ws.row_dimensions[curr_row].height = 20
@@ -718,6 +738,13 @@ def create_single_driver_report(
         tv = ws.cell(curr_row, 6, f"=SUM(F{first_item_row}:F{curr_row - 1})")
         tv.number_format = "#,##0.##"
         tv.alignment = Alignment(horizontal="center", vertical="center")
+        if has_pallets:
+            # סה"כ משטחים להעמסה במחסן הזה (מתחת לעמודת מספר המשטחים)
+            pl = ws.cell(curr_row, PAL_COL - 1, 'סה"כ משטחים')
+            pl.alignment = Alignment(horizontal="center", vertical="center")
+            pv = ws.cell(curr_row, PAL_COL, f"=SUM(I{first_item_row}:I{curr_row - 1})")
+            pv.number_format = "#,##0.##"
+            pv.alignment = Alignment(horizontal="center", vertical="center")
         for c in range(1, num_cols + 1):
             cc = ws.cell(curr_row, c)
             cc.font = bold_font
@@ -734,6 +761,12 @@ def create_single_driver_report(
         gv = ws.cell(curr_row, 6, "=" + "+".join(f"F{r}" for r in wh_total_rows))
         gv.number_format = "#,##0.##"
         gv.alignment = Alignment(horizontal="center", vertical="center")
+        if has_pallets:
+            gpl = ws.cell(curr_row, PAL_COL - 1, 'סה"כ משטחים')
+            gpl.alignment = Alignment(horizontal="center", vertical="center")
+            gpv = ws.cell(curr_row, PAL_COL, "=" + "+".join(f"I{r}" for r in wh_total_rows))
+            gpv.number_format = "#,##0.##"
+            gpv.alignment = Alignment(horizontal="center", vertical="center")
         for c in range(1, num_cols + 1):
             cc = ws.cell(curr_row, c)
             cc.font = Font(name=font_family, size=10, bold=True, color="FFFFFF")
@@ -777,6 +810,7 @@ def create_single_driver_report(
         "תיאור החומר",
         "כמות לפריקה",
         "יח'",
+        *pallet_headers,  # עמודות 6-7 (כשיש משטחים)
         "מחסן העמסה",
         "הערות למוצר / הערות לאספקה",
         "דגש מיוחד ללקוח",
@@ -818,6 +852,10 @@ def create_single_driver_report(
                 f"תחנה {stop_num}: {dest}  |  שם הלקוח: {cust_name}  |  "
                 f"כתובת מדויקת: {full_address}{arr_txt}{phone_txt}"
             )
+        # סה"כ משטחים לפריקה בתחנה
+        stop_pallets = [it["pallets"] for it in stop_items if it.get("pallets") is not None]
+        if stop_pallets:
+            stop_banner_text += f"  |  משטחים: {round(sum(stop_pallets), 2):g}"
         # מיקום שלא אותר במדויק (ניחוש / רק מרכז הנפה) - הנהג צריך לוודא
         if first_it.get("loc_quality", "").startswith(("לא אותר", "משוער")):
             stop_banner_text += "  |  ⚠ מיקום משוער - לוודא מול הלקוח"
@@ -859,18 +897,20 @@ def create_single_driver_report(
                 item["prod_desc"],
                 item["qty"],
                 item["unit"],
+                *pallet_vals(item),
                 item["wh_short"],
                 item["combined_notes"],
                 item.get("client_mark") or None,
             ]
+            notes_col = 7 + len(pallet_headers)
             for c_i, v in enumerate(vals, start=1):
                 c = ws.cell(curr_row, c_i, v)
-                c.font = bold_font if c_i in (2, 4, 7) else data_font
+                c.font = bold_font if c_i in (2, 4, notes_col) else data_font
                 if c_i == 1:
                     c.border = grid_border
                     set_link(c, order_link(cfg, v))
                 c.border = grid_border
-                if c_i == 4 and isinstance(v, (int, float)):
+                if (c_i == 4 or (has_pallets and c_i in (6, 7))) and isinstance(v, (int, float)):
                     c.number_format = "#,##0.##"
                     c.alignment = Alignment(
                         horizontal="center", vertical="center", wrap_text=True
@@ -883,7 +923,7 @@ def create_single_driver_report(
                     c.alignment = Alignment(
                         horizontal="right", vertical="center", wrap_text=True
                     )
-            style_mark(ws.cell(curr_row, 8))
+            style_mark(ws.cell(curr_row, num_cols))
             ws.row_dimensions[curr_row].height = 22
             curr_row += 1
 
@@ -935,6 +975,11 @@ def create_single_driver_report(
         7: 26.0,
         8: 24.0,
     }
+    if has_pallets:
+        col_widths = {
+            1: 11.0, 2: 16.0, 3: 22.0, 4: 13.0, 5: 18.0,
+            6: 11.0, 7: 11.0, 8: 14.0, 9: 24.0, 10: 22.0,
+        }
     for col_i, w in col_widths.items():
         ws.column_dimensions[get_column_letter(col_i)].width = w
 
@@ -996,6 +1041,9 @@ def generate_driver_reports_from_sorted_excel(
     idx_chosen = find_col(["כתובת אספקה נבחרת"], -1)
     idx_quality = find_col(["דיוק מיקום"], -1)
     idx_contact = find_col(["איש קשר לאספקה"], -1)
+    # משטחים (רק בדוח PDF): התאמה מדויקת, כי "כמות" כבר תופס את עמודת הכמות
+    idx_per_pallet = headers.index("כמות במשטח") if "כמות במשטח" in headers else -1
+    idx_pallets = headers.index("מספר משטחים") if "מספר משטחים" in headers else -1
 
     cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
 
@@ -1127,6 +1175,8 @@ def generate_driver_reports_from_sorted_excel(
             "contact": str(row_vals[idx_contact] or "").strip()
             if 0 <= idx_contact < len(row_vals)
             else "",
+            "per_pallet": _num_or_none(row_vals, idx_per_pallet),
+            "pallets": _num_or_none(row_vals, idx_pallets),
         }
 
         if driver_label not in drivers_map:
