@@ -1262,7 +1262,13 @@ class RouteEditor:
             lines.append((f"מקור: {cur['source']}", "muted"))
             if not cur.get("located", True):
                 lines.append(("המיקום של הכתובת לא אותר - משתמשים במיקום מקובץ ההזמנות", "bad"))
-            if cur.get("contact"):
+            # איש הקשר מהדוח תמיד גובר על איש הקשר מקובץ הכתובות
+            report_contact = " ".join(
+                p for p in (st.get("report_contact"), st.get("report_contact_phone")) if p
+            )
+            if report_contact:
+                lines.append((f"איש קשר: {report_contact}", "text"))
+            elif cur.get("contact"):
                 lines.append((f"איש קשר: {cur['contact']}", "text"))
             if cur.get("notes"):
                 lines.append((f"הערות אספקה: {cur['notes']}", "text"))

@@ -431,6 +431,12 @@ def load_or_create_config(
 # ==============================================================================
 def load_workbook_safe(excel_path: str | pathlib.Path) -> openpyxl.Workbook:
     excel_path = pathlib.Path(excel_path)
+    if excel_path.suffix.lower() == ".pdf":
+        # דוח "הזמנות מוכנות לאספקה" מפריוריטי ב-PDF -> טבלה במבנה של קובץ האקסל
+        from pdf_orders import pdf_to_workbook
+
+        print(f"[*] קורא דוח PDF: {excel_path.name}")
+        return pdf_to_workbook(excel_path)
     try:
         return openpyxl.load_workbook(excel_path)
     except TypeError:
@@ -2204,8 +2210,23 @@ def find_client_mark(cust_name: Any, marks: list[tuple[str, str]]) -> str:
 # בחלון העריכה אפשר לבחור כתובת אחרת (קליק ימני על העצירה).
 CHOSEN_ADDRESS_HEADER = "כתובת אספקה נבחרת"
 LOCATION_QUALITY_HEADER = "דיוק מיקום"
+DELIVERY_CONTACT_HEADER = "איש קשר לאספקה"
+
+
+def delivery_contact(stop: dict[str, Any]) -> str:
+    """איש הקשר לאספקה: מהדוח (תמיד גובר), ואם אין - מקובץ הכתובות לפי הכתובת שנבחרה."""
+    name = str(stop.get("report_contact") or "").strip()
+    phone = str(stop.get("report_contact_phone") or "").strip()
+    if name or phone:
+        return " ".join(p for p in (name, phone) if p)
+    opts = stop.get("address_options") or []
+    if opts:
+        return str(opts[stop.get("address_choice", 0)].get("contact") or "").strip()
+    return ""
 SOURCE_CLIENTS_FILE = "קובץ כתובות"
 SOURCE_ORDERS_FILE = "קובץ ההזמנות"
+SOURCE_REPORT_SITE = "כתובת אתר בדוח"
+SOURCE_REPORT_CUSTOMER = "שורת הלקוח בדוח"
 
 # מילים שלא עוזרות להשוואת כתובות ("שדרות" לא כאן - זו גם עיר)
 _ADDRESS_STOPWORDS = {
@@ -2369,10 +2390,13 @@ def build_address_options(
     cache: dict[str, Any],
     cfg: dict[str, Any],
     manual: dict[str, list[Any]] | None = None,
+    prefer_raw: bool = False,
+    raw_source: str = SOURCE_ORDERS_FILE,
 ) -> tuple[list[dict[str, Any]], int]:
     """
     רשימת הכתובות האפשריות לעצירה + האינדקס של ברירת המחדל.
     האפשרות האחרונה היא תמיד הכתובת מקובץ ההזמנות (כדי שאפשר יהיה לחזור אליה).
+    prefer_raw: הכתובת מקובץ ההזמנות היא ברירת המחדל (דוח PDF עם כתובות אתר).
     preferred: כתובת שנבחרה בעבר (מטבלה ממוינת) - גוברת על כל השאר.
     """
     options: list[dict[str, Any]] = []
@@ -2396,7 +2420,7 @@ def build_address_options(
     ))
     options.append({
         "address": raw_address or stop["effective_dest"],
-        "source": SOURCE_ORDERS_FILE,
+        "source": raw_source,
         "contact": "",
         "notes": "",
         "region": stop["region"],
@@ -2406,8 +2430,8 @@ def build_address_options(
         "city": stop["effective_dest"] or raw_address,
     })
 
-    default = 0 if client_opts else len(options) - 1
-    if client_opts:
+    default = 0 if client_opts and not prefer_raw else len(options) - 1
+    if client_opts and not prefer_raw:
         scores = [address_match_score(o["address"], raw_texts) for o in client_opts]
         best = max(range(len(scores)), key=lambda i: scores[i])
         if scores[best] >= ADDRESS_MATCH_THRESHOLD:
@@ -2442,6 +2466,7 @@ GENERATED_HEADERS = {
     "דגש מיוחד ללקוח",
     CHOSEN_ADDRESS_HEADER,
     LOCATION_QUALITY_HEADER,
+    DELIVERY_CONTACT_HEADER,
 }
 
 
@@ -2760,6 +2785,21 @@ def sort_orders_excel(
     idx_cust_note = find_col(["הערה למוצר ללקוח", "הערה למוצר"], 12)
     idx_unit = find_col(["יח'", "יחידות", "יח"], 13)
     idx_cust_no = find_cust_no_col(raw_headers)
+    # עמודות שיש רק בדוח ה-PDF (pdf_orders.py): כתובת האתר ואיש הקשר לאספקה
+    def exact_col(name: str) -> int:
+        return raw_headers.index(name) if name in raw_headers else -1
+
+    idx_site_addr = exact_col("כתובת אתר")
+    idx_site_city = exact_col("עיר אתר")
+    idx_site_phone = exact_col("טלפון אתר")
+    idx_contact_name = exact_col("שם איש קשר")
+    idx_contact_phone = exact_col("טלפון איש קשר")
+    report_mode = idx_site_addr >= 0 or idx_site_city >= 0
+    if report_mode:
+        print(
+            "[*] דוח עם כתובות אתר: כתובת האתר (כשיש עיר אתר) היא כתובת האספקה, "
+            "ובלעדיה - הכתובת משורת הלקוח בדוח."
+        )
     client_marks = load_client_marks(cfg)
     if not cfg.get("PRI_DOR_CODE"):
         print("[*] PRI_DOR_CODE לא מוגדר בקובץ ההגדרות - לא ייווצרו קישורים לפריוריטי.")
@@ -2828,9 +2868,22 @@ def sort_orders_excel(
             )
         warehouse_label = " + ".join(wh_tags)
 
+        def cell(i: int) -> str:
+            return str(row_vals[i] or "").strip() if 0 <= i < len(row_vals) else ""
+
+        # כתובת אתר מהדוח - תמיד כתובת האספקה, אבל רק כשיש עיר אתר או יישוב מוכר
+        # בכתובת (לפעמים בעמודה רשומות הערות כמו "משטחי יורו + לצרף חשבונית")
+        site_addr, site_city = cell(idx_site_addr), cell(idx_site_city)
+        has_site_address = bool(site_city) or bool(site_addr and locality_name_in(site_addr))
+        loc_dest, loc_addr = dest_val, addr_val
+        if has_site_address:
+            loc_dest, loc_addr = site_city or None, site_addr or site_city
+        contact_name = cell(idx_contact_name)
+        contact_phone = cell(idx_contact_phone) or cell(idx_site_phone)
+
         region, lat, lon, loc_quality = resolve_location_with_quality(
-            destination=dest_val,
-            address=addr_val,
+            destination=loc_dest,
+            address=loc_addr,
             site_name=site_val,
             phone=phone_val,
             cache=cache,
@@ -2838,9 +2891,9 @@ def sort_orders_excel(
             manual=manual_locations,
         )
 
-        effective_dest = str(dest_val or "").strip()
-        if not effective_dest and addr_val:
-            effective_dest = str(addr_val).strip()
+        effective_dest = str(loc_dest or "").strip()
+        if not effective_dest and loc_addr:
+            effective_dest = str(loc_addr).strip()
 
         qty_val = 0.0
         if idx_qty < len(row_vals) and row_vals[idx_qty] is not None:
@@ -2888,8 +2941,13 @@ def sort_orders_excel(
                 "cust_no": str(row_vals[idx_cust_no] or "").strip()
                 if 0 <= idx_cust_no < len(row_vals)
                 else "",
-                # הכתובת כפי שהיא בקובץ ההזמנות (להשוואה מול קובץ הכתובות)
-                "raw_address_texts": [addr_val, dest_val, site_val],
+                # הכתובת כפי שהיא בקובץ ההזמנות (להשוואה מול קובץ הכתובות).
+                # בדוח עם כתובת אתר - כתובת האתר.
+                "raw_address_texts": [loc_addr, loc_dest, site_val],
+                "has_site_address": has_site_address,
+                # איש הקשר מהדוח - גובר על איש הקשר מקובץ הכתובות
+                "contact_name": contact_name,
+                "contact_phone": contact_phone,
             }
         )
 
@@ -2918,6 +2976,9 @@ def sort_orders_excel(
                 "loc_quality": rec["loc_quality"],
                 "matrix_idx": m_idx,
                 "raw_address_texts": rec["raw_address_texts"],
+                "has_site_address": rec["has_site_address"],
+                "report_contact": "",
+                "report_contact_phone": "",
                 "prior_chosen": rec["prior_chosen"],
                 "weight": 0.0,
                 "needs_main": False,
@@ -2931,6 +2992,9 @@ def sort_orders_excel(
         st["needs_cooling"] = st["needs_cooling"] or rec["is_cooling"]
         st["needs_hazmat"] = st["needs_hazmat"] or rec["is_hazmat"]
         st["needs_goldbond"] = st["needs_goldbond"] or rec["is_goldbond"]
+        if not st["report_contact"] and (rec["contact_name"] or rec["contact_phone"]):
+            st["report_contact"] = rec["contact_name"]
+            st["report_contact_phone"] = rec["contact_phone"]
 
     # כתובות אספקה אפשריות לכל עצירה (מקובץ הכתובות + מקובץ ההזמנות).
     # כל כתובת מקבלת נקודה במטריצת הזמנים, כדי שבחירת כתובת אחרת בחלון תעדכן מיד
@@ -2953,6 +3017,13 @@ def sort_orders_excel(
             cache,
             cfg,
             manual_locations,
+            # דוח PDF: הכתובת מהדוח היא ברירת המחדל (כתובת האתר, ובלעדיה שורת הלקוח)
+            prefer_raw=report_mode,
+            raw_source=(
+                SOURCE_REPORT_SITE if st["has_site_address"]
+                else SOURCE_REPORT_CUSTOMER if report_mode
+                else SOURCE_ORDERS_FILE
+            ),
         )
         for opt in options:
             c = point_key(opt["coords"])
@@ -3156,6 +3227,7 @@ def sort_orders_excel(
         out_headers.append(CHOSEN_ADDRESS_HEADER)
         out_headers.append(LOCATION_QUALITY_HEADER)
         col_quality_out = len(out_headers)
+        out_headers.append(DELIVERY_CONTACT_HEADER)
         mark_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
         mark_font = Font(name="Arial", size=10, bold=True, color="9C0006")
 
@@ -3263,6 +3335,7 @@ def sort_orders_excel(
             row_out.append(stop.get("chosen_address") or None)
             stop_quality = stop.get("loc_quality", "")
             row_out.append(LOCATION_QUALITY_LABELS.get(stop_quality) or None)
+            row_out.append(delivery_contact(stop) or None)
             for col_idx, val in enumerate(row_out, start=1):
                 cell = ws_orders.cell(row_offset, col_idx, val)
                 cell.fill = row_fill
@@ -3554,7 +3627,8 @@ def resolve_input_file(
         xlsx_files = sorted(
             [
                 f
-                for f in in_dir.glob("*.xlsx")
+                for pattern in ("*.xlsx", "*.pdf")  # קובץ הזמנות: אקסל או דוח PDF
+                for f in in_dir.glob(pattern)
                 if not is_excluded_support_file(f, cfg)
             ],
             key=lambda f: f.stat().st_mtime,

@@ -795,6 +795,12 @@ def create_single_driver_report(
         phone_txt = (
             f"  |  טלפון: {first_it['phone']}" if first_it["phone"] else ""
         )
+        contact = first_it.get("contact") or ""
+        if contact:
+            # איש הקשר לאספקה (מהדוח, או מקובץ הכתובות). אם יש לו טלפון - במקום
+            # הטלפון הכללי של הלקוח; אחרת שניהם.
+            has_phone = any(ch.isdigit() for ch in contact)
+            phone_txt = f"  |  איש קשר: {contact}" + ("" if has_phone else phone_txt)
         arr_txt = (
             f"  |  שעת הגעה משוערת: {first_it['arrival_str']}"
             if first_it["arrival_str"]
@@ -989,6 +995,7 @@ def generate_driver_reports_from_sorted_excel(
     # הכתובת שנבחרה בחלון העריכה (מקובץ הכתובות הנכונות) - גוברת על הכתובת מההזמנה
     idx_chosen = find_col(["כתובת אספקה נבחרת"], -1)
     idx_quality = find_col(["דיוק מיקום"], -1)
+    idx_contact = find_col(["איש קשר לאספקה"], -1)
 
     cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
 
@@ -1116,6 +1123,9 @@ def generate_driver_reports_from_sorted_excel(
             else "",
             "loc_quality": str(row_vals[idx_quality] or "").strip()
             if 0 <= idx_quality < len(row_vals)
+            else "",
+            "contact": str(row_vals[idx_contact] or "").strip()
+            if 0 <= idx_contact < len(row_vals)
             else "",
         }
 
