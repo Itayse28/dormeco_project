@@ -10,3 +10,6 @@ output_files/
 input_files/config_local.txt
 logs/
 data/manual_locations.json
+
+# Claude Code local settings and hooks
+.claude/
