@@ -743,6 +743,8 @@ def create_single_driver_report(
         curr_row += 1
 
         first_item_row = curr_row
+        stop_weight = 0.0
+        stop_pallets_sum = 0
         for item in stop_items:
             vals = [
                 cust_name,
@@ -758,8 +760,10 @@ def create_single_driver_report(
             ]
             if isinstance(item["qty"], (int, float)):
                 total_weight += item["qty"]
+                stop_weight += item["qty"]
             if isinstance(item.get("pallets"), (int, float)):
                 total_pallets += round_pallets(item["pallets"])
+                stop_pallets_sum += round_pallets(item["pallets"])
             notes_col = 8 + len(pallet_headers)
             fill = row_fill(item)
             for c_i, v in enumerate(vals, start=1):
@@ -794,7 +798,25 @@ def create_single_driver_report(
             for c_i in range(1, CUST_COLS + 1):
                 ws.merge_cells(start_row=first_item_row, start_column=c_i,
                                end_row=curr_row - 1, end_column=c_i)
-        curr_row += 1
+
+        # סיכום משקל ומשטחים לתחנה הזאת
+        ws.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=QTY_COL - 1)
+        sl = ws.cell(curr_row, 1, 'סה"כ לתחנה - משקל (ק"ג)' + (" / משטחים" if has_pallets else ""))
+        sl.alignment = Alignment(horizontal="left", vertical="center")
+        sw = ws.cell(curr_row, QTY_COL, round(stop_weight, 2))
+        sw.number_format = num_format(sw.value)
+        sw.alignment = Alignment(horizontal="center", vertical="center")
+        if has_pallets:
+            sp = ws.cell(curr_row, PAL_COL, stop_pallets_sum)
+            sp.number_format = num_format(sp.value)
+            sp.alignment = Alignment(horizontal="center", vertical="center")
+        for c in range(1, num_cols + 1):
+            cc = ws.cell(curr_row, c)
+            cc.font = bold_font
+            cc.fill = tbl_header_fill
+            cc.border = grid_border
+        ws.row_dimensions[curr_row].height = 20
+        curr_row += 2
 
     # סיכום משקל של כל ההזמנות (לפני ההערות הקבועות)
     ws.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=QTY_COL - 1)
