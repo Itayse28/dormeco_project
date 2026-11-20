@@ -28,6 +28,8 @@ import zipfile
 from typing import Any
 
 import openpyxl
+from openpyxl.cell.rich_text import CellRichText, TextBlock
+from openpyxl.cell.text import InlineFont
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.page import PageMargins
@@ -743,9 +745,18 @@ def create_single_driver_report(
         first_item_row = curr_row
         stop_weight = 0.0
         stop_pallets_sum = 0
+        # פרטי הלקוח בתא אחד: שם הלקוח בפונט גדול, הכתובת ואיש הקשר בפונט רגיל
+        rest_txt = "\n".join(t for t in (stop_address, stop_contact) if t)
+        cust_details = CellRichText(
+            TextBlock(InlineFont(rFont=font_family, sz=12, b=True,
+                                 color="0563C1" if cust_url else "000000",
+                                 u="single" if cust_url else None), cust_name),
+            *([TextBlock(InlineFont(rFont=font_family, sz=9, color="000000"),
+                         "\n" + rest_txt)] if rest_txt else []),
+        )
         for item in stop_items:
             vals = [
-                "\n".join(t for t in (cust_name, stop_address, stop_contact) if t),
+                cust_details,
                 item["order_no"],
                 item["prod_desc"],
                 item["qty"],
