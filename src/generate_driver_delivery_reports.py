@@ -664,23 +664,6 @@ def create_single_driver_report(
     ws.row_dimensions[curr_row].height = 22
     curr_row += 1
 
-    # מקרא צבעים: רק למחסנים שיש מהם מוצרים לנהג הזה
-    used_wh = [(name, fill) for flag, name, fill in wh_row_fills
-               if any(r.get(flag) for r in driver_rows)]
-    if used_wh:
-        lg = ws.cell(curr_row, 1, "מקרא צבעים:")
-        lg.font = bold_font
-        lg.alignment = Alignment(horizontal="right", vertical="center")
-        for i, (name, fill) in enumerate(used_wh, start=2):
-            if i > num_cols:
-                break
-            lc = ws.cell(curr_row, i, name)
-            lc.font = bold_font
-            lc.fill = fill
-            lc.border = grid_border
-            lc.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        ws.row_dimensions[curr_row].height = 20
-        curr_row += 1
     curr_row += 1
 
     stops_grouped: list[tuple[tuple[int, str, str], list[dict[str, Any]]]] = []
@@ -737,56 +720,7 @@ def create_single_driver_report(
             )
         else:
             stop_contact = first_it["phone"] or ""
-        arr_txt = (
-            f"  |  שעת הגעה משוערת: {first_it['arrival_str']}"
-            if first_it["arrival_str"]
-            else ""
-        )
-
-        if first_it.get("chosen_address"):
-            # כתובת שנבחרה (מקובץ הכתובות הנכונות) - היעד שבהזמנה עלול להיות שגוי
-            stop_banner_text = (
-                f"תחנה {stop_num}  |  שם הלקוח: {cust_name}  |  "
-                f"כתובת מדויקת: {first_it['chosen_address']}{arr_txt}{phone_txt}"
-            )
-        else:
-            stop_banner_text = (
-                f"תחנה {stop_num}: {dest}  |  שם הלקוח: {cust_name}  |  "
-                f"כתובת מדויקת: {full_address}{arr_txt}{phone_txt}"
-            )
-        if extract_driver_number(driver_label) == NO_DEST_GROUP_NAME:
-            # עצירה בלי יעד מזוהה: הכתובת כפי שהיא בקובץ ההזמנות, כדי לבדוק מול הלקוח
-            stop_banner_text += f"  |  ⚠ לא נמצא יעד - הכתובת בקובץ הגלם: {full_address}"
-        # סה"כ משטחים לפריקה בתחנה
-        stop_pallets = [it["pallets"] for it in stop_items if it.get("pallets") is not None]
-        if stop_pallets:
-            stop_banner_text += f"  |  משטחים: {round(sum(stop_pallets), 2):g}"
-        # מיקום שלא אותר במדויק (ניחוש / רק מרכז הנפה) - הנהג צריך לוודא
-        if first_it.get("loc_quality", "").startswith(("לא אותר", "משוער")):
-            stop_banner_text += "  |  ⚠ מיקום משוער - לוודא מול הלקוח"
-
-        ws.merge_cells(
-            start_row=curr_row,
-            start_column=1,
-            end_row=curr_row,
-            end_column=num_cols,
-        )
-        sb_cell = ws.cell(curr_row, 1, stop_banner_text)
-        sb_cell.font = stop_banner_font
         cust_url = customer_link(cfg, first_it.get("cust_no"))
-        sb_cell.alignment = Alignment(
-            horizontal="right", vertical="center", wrap_text=True
-        )
-        for c in range(1, num_cols + 1):
-            ws.cell(curr_row, c).fill = stop_banner_fill
-            ws.cell(curr_row, c).border = grid_border
-        set_link(sb_cell, cust_url)  # לחיצה על שורת התחנה פותחת את הלקוח
-        # גובה שורת התחנה לפי אורך הטקסט (תא ממוזג לא מתאים גובה אוטומטית)
-        banner_width = 207.0 if has_pallets else 198.0  # סכום רוחבי העמודות
-        chars_per_line = max(40, int(banner_width * 0.85))
-        banner_lines = max(2, -(-len(stop_banner_text) // chars_per_line))
-        ws.row_dimensions[curr_row].height = banner_lines * 16 + 8
-        curr_row += 1
 
         for c_i, h_txt in enumerate(unload_headers, start=1):
             hc = ws.cell(curr_row, c_i, h_txt)
