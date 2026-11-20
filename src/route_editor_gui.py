@@ -1023,8 +1023,7 @@ class RouteEditor:
             ]
             info_lines.append(
                 (
-                    f'{len(keys)} עצירות | {sim["total_weight"]:,.0f}'
-                    f'/{float(sim.get("max_weight") or self.max_weight):,.0f} ק"ג | '
+                    f'{len(keys)} עצירות | {sim["total_weight"]:,.0f} ק"ג | '
                     f'משמרת {sim["total_shift_hhmm"]}',
                     "black",
                 )
