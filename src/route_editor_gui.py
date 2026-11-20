@@ -123,6 +123,25 @@ APPROX_QUALITIES = {"region_only", "guess"}
 WARN_MARK = "⚠ "
 
 
+RLM = "‏"  # סימן כיוון מימין לשמאל (בלתי נראה)
+
+
+def rtl(text: str) -> str:
+    """טקסט בעברית שמתחיל במספר ("2 עצירות | ...") - בלי RLM בהתחלה Windows מציג
+    אותו משמאל לימין והמספר קופץ לסוף השורה. ה-RLM קובע כיוון מימין לשמאל."""
+    return RLM + text if text else text
+
+
+def _air_km(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """מרחק אווירי בק"מ בין שתי נקודות (lat, lon)."""
+    import math
+
+    lat1, lon1, lat2, lon2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    h = (math.sin((lat2 - lat1) / 2) ** 2
+         + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2)
+    return 6371.0 * 2 * math.asin(math.sqrt(h))
+
+
 def parse_location_text(text: str) -> tuple[float, float] | None:
     """
     קואורדינטות מטקסט שהמשתמש הדביק: "31.25, 34.79" או קישור Google Maps
@@ -713,7 +732,7 @@ class RouteEditor:
         tk.Label(
             top_row, text=title, font=F_HEAD, bg="#1F4E78", fg="white", anchor="e"
         ).pack(side="right")
-        if day is not None or (self.days and title != "ממתינות לשיבוץ"):
+        if title not in SPECIAL_TITLES.values() and (day is not None or self.days):
             tk.Button(
                 top_row, text="הצג יום", font=F_SMALL, padx=4, pady=0,
                 command=lambda d=day: self.show_day(d),
@@ -773,6 +792,11 @@ class RouteEditor:
         else:
             text = prefix + f"תצוגה שבועית: {len(self.days)} ימים"
         tk.Label(bar, text=text, font=F_HEAD, bg=BG_APP, anchor="e").pack(side="right", padx=6)
+        if self.mode == "days":
+            tk.Button(
+                bar, text="+ הוסף יום", font=F_BTN, padx=8,
+                command=self.add_day,
+            ).pack(side="left", padx=6)
         if self.day_filter is not None:
             tk.Button(
                 bar, text="הצג את כל הימים", font=F_BTN, padx=8,
@@ -784,6 +808,31 @@ class RouteEditor:
         self.selected_id = None
         self.render()
         self._draw_map(fit=True)
+
+    def add_day(self) -> None:
+        """עמודה של יום חדש בדוח השבועי (עם נהג ריק אחד) - גוררים אליה עצירות.
+        הזמנה שמשובצת ביום החדש מקבלת את התאריך שלו בכל הקבצים."""
+        known = [d for d in (parse_date(x) for x in self.days) if d]
+        suggest = (max(known) + datetime.timedelta(days=1)) if known else datetime.date.today()
+        if suggest.weekday() == 5:  # שבת -> יום ראשון
+            suggest += datetime.timedelta(days=1)
+        text = simpledialog.askstring(
+            "הוספת יום",
+            "תאריך היום החדש (יום-חודש-שנה, למשל 05-11-2026):",
+            initialvalue=suggest.strftime("%d-%m-%Y"),
+            parent=self.root,
+        )
+        if not text:
+            return
+        day = parse_date(text.strip())
+        if day is None:
+            messagebox.showerror("הוספת יום", f"התאריך \"{text}\" לא תקין.", parent=self.root)
+            return
+        day_str = day.strftime("%d-%m-%Y")
+        if day_str not in self.days:
+            self.days = sorted(set(self.days) | {day_str}, key=date_sort_key)
+        self.day_filter = None
+        self.add_driver(day_str)
 
     def show_all_days(self) -> None:
         self.day_filter = None
@@ -998,7 +1047,7 @@ class RouteEditor:
 
         for text, color in info_lines:
             lbl = tk.Label(
-                frame, text=text, font=F_SMALL, bg=bg, fg=color,
+                frame, text=rtl(text), font=F_SMALL, bg=bg, fg=color,
                 anchor="e", justify="right",
             )
             lbl.pack(side="top", fill="x")
@@ -1168,7 +1217,7 @@ class RouteEditor:
                 parts.append("יש שינויים שעוד לא נוצרו לקבצים")
         if self._saved_text:
             parts.append(self._saved_text)
-        self.info_label.configure(text="   |   ".join(parts), fg=color)
+        self.info_label.configure(text=rtl("   |   ".join(parts)), fg=color)
 
     def _state_signature(self) -> str:
         """מצב המסלולים (לבדיקה אם השתנה משהו מאז יצירת הקבצים)."""
@@ -1389,7 +1438,7 @@ class RouteEditor:
         for text, style in self._stop_details(col, key):
             font, fg = styles[style]
             tk.Label(
-                box, text=text, font=font, fg=fg, bg="#FFFDE7",
+                box, text=rtl(text), font=font, fg=fg, bg="#FFFDE7",
                 anchor="e", justify="right", wraplength=460,
             ).pack(side="top", fill="x")
         tip.update_idletasks()
@@ -1503,15 +1552,22 @@ class RouteEditor:
         if st is None or self.set_location is None:
             return
         updated = self.set_location(st, lat, lon)
-        for k, s in self.stops.items():
-            if s.get("loc_quality") == "manual":
-                self._relocate(k)
         self._sim_cache.clear()
+        # העצירות שקיבלו עכשיו את המיקום (כל העצירות עם אותה כתובת): עצירה שלא
+        # הייתה במסלול (ללא יעד / ממתינות לשיבוץ) משובצת אוטומטית במסלול הקרוב
+        placed: list[str] = []
+        for k, s in self.stops.items():
+            same = s.get("loc_quality") == "manual" and _air_km(s["coords"], (lat, lon)) < 0.01
+            if same and (self._relocate(k) or k in self.pool):
+                where = self._auto_assign(k)
+                if where:
+                    placed.append(f"{s.get('cust_name', '')} -> {where}")
         self.render()
         messagebox.showinfo(
             "קביעת מיקום ידנית",
             f"המיקום נשמר ({lat:.5f}, {lon:.5f}) ויישמש גם בהרצות הבאות."
-            + (f"\nעודכנו {updated} עצירות עם אותה כתובת." if updated > 1 else ""),
+            + (f"\nעודכנו {updated} עצירות עם אותה כתובת." if updated > 1 else "")
+            + ("\n\nשובצה אוטומטית:\n" + "\n".join(placed) if placed else ""),
             parent=self.root,
         )
 
@@ -1521,25 +1577,74 @@ class RouteEditor:
         if st is None or self.apply_address is None or idx == st.get("address_choice"):
             return
         self.apply_address(st, idx)
-        self._relocate(key)
         self._sim_cache.clear()
+        if self._relocate(key):
+            self._auto_assign(key)
         self.render()
 
     def _unlocated(self, key: str) -> bool:
         """לעצירה לא נמצא מיקום (גם לא העיר)."""
         return self.stops[key].get("loc_quality") == "guess"
 
-    def _relocate(self, key: str) -> None:
+    def _relocate(self, key: str) -> bool:
         """אחרי שינוי מיקום/כתובת: עצירה שנמצא לה מיקום יוצאת מ"ללא יעד" לממתינות
         לשיבוץ, ועצירה שאיבדה את המיקום שלה עוברת ל"ללא יעד"."""
         if key in self.no_dest and not self._unlocated(key):
             self.no_dest.remove(key)
             self.pool.append(key)
-        elif self._unlocated(key) and key not in self.no_dest and key not in self.pickup:
+            return True
+        if self._unlocated(key) and key not in self.no_dest and key not in self.pickup:
             for lst in [self.pool, *self.routes]:
                 if key in lst:
                     lst.remove(key)
             self.no_dest.append(key)
+        return False
+
+    def _auto_assign(self, key: str) -> str:
+        """משבץ עצירה מ"ממתינות לשיבוץ" במסלול הקרוב ביותר שלה באותו יום (שיש בו
+        מקום במשקל), ומסדר מחדש את אותו מסלול. אם אין - נהג חדש לאותו יום.
+        מחזיר תיאור של מה שנעשה."""
+        st = self.stops[key]
+        if key not in self.pool:
+            return ""
+        day = st.get("date") if self.mode == "days" and self.multi_day else None
+        best: tuple[float, int] | None = None
+        for c, keys in enumerate(self.routes):
+            if not keys or (day is not None and self._route_date(c) != day):
+                continue
+            sim = self._sim_col(c)
+            max_w = float(sim.get("max_weight") or self.max_weight)
+            if sim["total_weight"] + float(st.get("weight", 0)) > max_w + 1e-6:
+                continue
+            dist = min(_air_km(st["coords"], self.stops[k]["coords"]) for k in keys)
+            if best is None or dist < best[0]:
+                best = (dist, c)
+        self.pool.remove(key)
+        if best is None:
+            # אין מסלול מתאים - נהג חדש לאותו יום
+            self.routes.append([key])
+            self.route_ids.append(self._next_id)
+            self.route_day[self._next_id] = day if day is not None else (
+                self.days[0] if self.days else None
+            )
+            self._next_id += 1
+            self._sim_cache.clear()
+            return "נהג חדש"
+        col = best[1]
+        self.routes[col].append(key)
+        self._sim_cache.clear()
+        if len(self.routes[col]) > 1:
+            chain = self._chain_cols(col)
+            sims = self.simulate(
+                [list(self.routes[c]) for c in chain],
+                [c != col for c in chain],  # רק המסלול הזה מסודר מחדש
+                self._driver_of(col),
+            )
+            self.routes[col] = [s["stop_key"] for s in sims[chain.index(col)]["ordered_stops"]]
+            self._sim_cache.clear()
+        self.selected_id = self.route_ids[col]
+        who = self._driver_of(col) or str(self._day_number(col))
+        return f"נהג {who} ({self._region_title(self.routes[col])})"
 
     # ------------------------------------------------------------------
     # גרירה ושחרור
