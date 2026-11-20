@@ -702,7 +702,7 @@ LOCATION_QUALITY_LABELS = {
     Q_MANUAL: "נקבע ידנית",
     Q_STREET: "כתובת מדויקת",
     Q_GEOCODED: "נמצא בחיפוש מפות",
-    Q_LOCALITY: "מרכז היישוב",
+    Q_LOCALITY: "רק העיר (בלי הכתובת המדויקת)",
     Q_REGION_ONLY: "משוער - רק מרכז הנפה",
     Q_GUESS: "לא אותר - ניחוש",
 }
@@ -2560,6 +2560,11 @@ def routes_from_sorted_records(
     for label in order:
         keys = sorted(stops_of[label], key=lambda k: stops_of[label][k])
         name = driver_name_from_label(label)
+        # "נהג איסוף עצמי 23.11.2026" / "נהג ללא יעד" -> קבוצה מיוחדת
+        group = LABEL_GROUP.get(re.sub(r"\s+\d{1,2}\.\d{1,2}\.\d{4}$", "", name or ""))
+        if group:
+            routes.append((keys, GROUP_DRIVER[group], stops_by_key[keys[0]].get("date", "")))
+            continue
         driver = name if name in known else None
         if name and not driver:
             print(f"[!] הנהג \"{name}\" מהטבלה לא נמצא בקובץ הנהגים - המסלול יוצג בלי נהג.")
@@ -2569,6 +2574,70 @@ def routes_from_sorted_records(
 
 class RouteEditCancelled(Exception):
     """המשתמש סגר/ביטל את חלון עריכת המסלולים."""
+
+
+# ==============================================================================
+# קבוצות מיוחדות: איסוף עצמי / ללא יעד (לא נכנסות למסלולי הנהגים)
+# ==============================================================================
+GROUP_PICKUP = "pickup"     # הלקוח אוסף בעצמו: רשימת ליקוט בלבד, בלי דוח הובלה
+GROUP_NO_DEST = "no_dest"   # לא נמצא מיקום (גם לא העיר): ליקוט + דוח הובלה נפרדים
+GROUP_LABELS = {GROUP_PICKUP: "איסוף עצמי", GROUP_NO_DEST: "ללא יעד"}
+# "נהג" מזויף שמסמן קבוצה ברשימת המסלולים שהחלון מחזיר
+GROUP_DRIVER = {GROUP_PICKUP: "__pickup__", GROUP_NO_DEST: "__no_dest__"}
+DRIVER_GROUP = {v: k for k, v in GROUP_DRIVER.items()}
+LABEL_GROUP = {v: k for k, v in GROUP_LABELS.items()}
+PICKUP_NOTE_RE = re.compile(r"איסוף\s*(?:עצמי|של\s*ה?לקוח)")
+
+
+def is_pickup_note(*texts: Any) -> bool:
+    """הערה כמו "איסוף עצמי מהמחסן" / "איסוף של הלקוח מאשדוד"."""
+    return any(t and PICKUP_NOTE_RE.search(str(t)) for t in texts)
+
+
+def stop_group(stop: dict[str, Any]) -> str | None:
+    """לאיזו קבוצה מיוחדת העצירה שייכת אוטומטית (None = מסלול רגיל)."""
+    if stop.get("pickup"):
+        return GROUP_PICKUP
+    if stop.get("loc_quality") == Q_GUESS:
+        return GROUP_NO_DEST
+    return None
+
+
+def group_trucks(
+    keys: list[str], group: str, stops_by_key: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """"משאית" מזויפת לכל קבוצה מיוחדת וכל יום - כדי שתיכתב לטבלה ולקבצים בנפרד."""
+    by_day: dict[str, list[dict[str, Any]]] = {}
+    for k in keys:
+        st = stops_by_key[k]
+        by_day.setdefault(st.get("date", ""), []).append(st)
+    label = GROUP_LABELS[group]
+    out = []
+    for day in sorted(by_day, key=date_sort_key):
+        stops = by_day[day]
+        out.append({
+            "special": group,
+            "ordered_stops": stops,
+            "schedule_by_stop": {
+                s["stop_key"]: {
+                    "stop_key": s["stop_key"], "route_stop_num": i,
+                    "arrival_str": "", "departure_str": "",
+                }
+                for i, s in enumerate(stops, start=1)
+            },
+            "region_title": label,
+            "driver_name": label,
+            "round_label": "",
+            "route_date": day,
+            "total_weight": round(sum(s["weight"] for s in stops), 2),
+            "total_shift_hhmm": "",
+            "Timeline_str": (
+                "איסוף עצמי של הלקוח מהמחסן - בלי הובלה"
+                if group == GROUP_PICKUP
+                else "לא נמצא מיקום ליעד - לבדוק את הכתובת מול הלקוח"
+            ),
+        })
+    return out
 
 
 def build_region_title(stops: list[dict[str, Any]]) -> str:
@@ -2690,21 +2759,33 @@ def apply_manual_route_edits(
             )
         return simulate_driver_day(rounds, matrix, cfg, keeps)
 
+    # קבוצות מיוחדות: ריבועים נפרדים בחלון (איסוף עצמי / ללא יעד)
+    initial_special: dict[str, list[str]] = {g: [] for g in GROUP_LABELS}
     if initial_edited:
-        initial_routes = [list(k) for k, _d, _day in initial_edited]
-        initial_days = [day or "" for _k, _d, day in initial_edited]
-        initial_drivers = [d for _k, d, _day in initial_edited]
+        for keys, drv, _day in initial_edited:
+            if drv in DRIVER_GROUP:
+                initial_special[DRIVER_GROUP[drv]].extend(keys)
+        regular = [e for e in initial_edited if e[1] not in DRIVER_GROUP]
+        initial_routes = [list(k) for k, _d, _day in regular]
+        initial_days = [day or "" for _k, _d, day in regular]
+        initial_drivers = [d for _k, d, _day in regular]
     else:
+        for t in planned_trucks:
+            if t.get("special"):
+                initial_special[t["special"]].extend(t["schedule_by_stop"])
+        regular_trucks = [t for t in planned_trucks if not t.get("special")]
         initial_routes = [
-            [s["stop_key"] for s in t["ordered_stops"]] for t in planned_trucks
+            [s["stop_key"] for s in t["ordered_stops"]] for t in regular_trucks
         ]
-        initial_days = [t.get("route_date", "") for t in planned_trucks]
+        initial_days = [t.get("route_date", "") for t in regular_trucks]
         initial_drivers = [None] * len(initial_routes)
 
     def compute_efficient() -> list[list[str]]:
         """סידור יעיל של כל העצירות בלי התחשבות בתאריך (כמו דוח יומי אחד גדול)."""
         print("[*] מחשב סידור יעיל לכל העצירות (ללא התחשבות בתאריך)...")
-        trucks = plan_trucks(list(stops_by_key.values()), matrix, cfg)
+        trucks = plan_trucks(
+            [s for s in stops_by_key.values() if not stop_group(s)], matrix, cfg
+        )
         return [[s["stop_key"] for s in t["ordered_stops"]] for t in trucks]
 
     def edited_to_trucks(
@@ -2730,6 +2811,8 @@ def apply_manual_route_edits(
         initial_drivers=initial_drivers,
         apply_address=apply_address_choice,
         set_location=set_location,
+        initial_special=initial_special,
+        group_of=stop_group,
         **(gui_extras or {}),
     )
     if edited is None:
@@ -2744,12 +2827,16 @@ def _edited_to_trucks_impl(
     stops_by_key: dict[str, dict[str, Any]],
     simulate_rounds: Callable[..., list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
+    # קבוצות מיוחדות (איסוף עצמי / ללא יעד) - בלי חישוב מסלול
+    special = [(keys, DRIVER_GROUP[drv]) for keys, drv, _day in edited if keys and drv in DRIVER_GROUP]
+    edited = [e for e in edited if e[1] not in DRIVER_GROUP]
     # לפי תאריך, ובתוך כל יום לפי סדר הכרטיסים בחלון
     edited = sorted(
         [(keys, drv, day or "") for keys, drv, day in edited if keys],
         key=lambda e: date_sort_key(e[2]),
     )
     edited_keys = [k for keys, _drv, _day in edited for k in keys]
+    edited_keys += [k for keys, _g in special for k in keys]
     if sorted(edited_keys) != sorted(stops_by_key.keys()):
         raise ValueError("שגיאה: לא כל העצירות שובצו לנהגים בחלון העריכה.")
 
@@ -2779,7 +2866,14 @@ def _edited_to_trucks_impl(
         sim["driver_name"] = drv_name
         sim["route_date"] = day
         result.append(sim)
-    print(f"[V] המסלולים אושרו ({len(result)} נהגים).")
+    n_routes = len(result)
+    for keys, group in special:
+        result += group_trucks(keys, group, stops_by_key)
+    extra = "".join(
+        f", {sum(len(k) for k, g in special if g == grp)} עצירות {GROUP_LABELS[grp]}"
+        for grp in GROUP_LABELS if any(g == grp for _k, g in special)
+    )
+    print(f"[V] המסלולים אושרו ({n_routes} נהגים{extra}).")
     return result
 
 
@@ -2837,6 +2931,9 @@ def sort_orders_excel(
     idx_sku = find_col(["מק'ט", 'מק"ט', "מקט"], 9)
     idx_qty = find_col(["כמות"], 11)
     idx_cust_note = find_col(["הערה למוצר ללקוח", "הערה למוצר"], 12)
+    # הערות שבהן מחפשים "איסוף עצמי" / "איסוף של הלקוח"
+    idx_internal_note = find_col(["הערה פנימית להזמנה", "הערה פנימית"], -1)
+    idx_cust_remarks = find_col(["דגשים ללקוח"], -1)
     idx_unit = find_col(["יח'", "יחידות", "יח"], 13)
     idx_cust_no = find_cust_no_col(raw_headers)
     # עמודות שיש רק בדוח ה-PDF (pdf_orders.py): כתובת האתר ואיש הקשר לאספקה
@@ -2964,6 +3061,11 @@ def sort_orders_excel(
         stop_key = (
             f"{rec_date}||{region}||{effective_dest}||{cust_name}||{lat:.5f},{lon:.5f}"
         )
+        pickup = is_pickup_note(
+            cell(idx_internal_note), cell(idx_cust_note), cell(idx_cust_remarks)
+        )
+        if pickup:
+            stop_key += "||איסוף עצמי"  # הזמנה באיסוף עצמי לא מתאחדת עם משלוח לאותו לקוח
 
         records.append(
             {
@@ -2999,6 +3101,7 @@ def sort_orders_excel(
                 # בדוח עם כתובת אתר - כתובת האתר.
                 "raw_address_texts": [loc_addr, loc_dest, site_val],
                 "has_site_address": has_site_address,
+                "pickup": pickup,
                 # איש הקשר מהדוח - גובר על איש הקשר מקובץ הכתובות
                 "contact_name": contact_name,
                 "contact_phone": contact_phone,
@@ -3034,6 +3137,7 @@ def sort_orders_excel(
                 "report_contact": "",
                 "report_contact_phone": "",
                 "orders": [],  # מספרי ההזמנות בעצירה (לחלון הפרטים)
+                "pickup": rec["pickup"],  # איסוף עצמי - לא נכנס למסלולי הנהגים
                 "prior_chosen": rec["prior_chosen"],
                 "weight": 0.0,
                 "needs_main": False,
@@ -3120,7 +3224,8 @@ def sort_orders_excel(
     travel_matrix = [[unique_matrix[a][b] for b in pos_of] for a in pos_of]
 
     approx_stops = [
-        st for st in unique_stops_by_key.values() if st.get("loc_quality") in APPROX_QUALITIES
+        st for st in unique_stops_by_key.values()
+        if st.get("loc_quality") in APPROX_QUALITIES and not stop_group(st)
     ]
     if approx_stops:
         print(
@@ -3177,9 +3282,19 @@ def sort_orders_excel(
         print(f"\n[*] דוח שבועי: {len(days)} ימים - " + ", ".join(d or "ללא תאריך" for d in days))
     planned_trucks: list[dict[str, Any]] = []
     for day in days:
-        for t in plan_trucks([st for st in all_stops if st["date"] == day], travel_matrix, cfg):
+        day_stops = [st for st in all_stops if st["date"] == day and not stop_group(st)]
+        for t in plan_trucks(day_stops, travel_matrix, cfg):
             t["route_date"] = day
             planned_trucks.append(t)
+    # איסוף עצמי / ללא יעד - לא נכנסים למסלולים, אלא לקבוצות נפרדות
+    for group, label in GROUP_LABELS.items():
+        keys = [st["stop_key"] for st in all_stops if stop_group(st) == group]
+        if keys:
+            print(f"[*] {label}: {len(keys)} עצירות (ריבוע נפרד בחלון, רשימת ליקוט נפרדת).")
+            for k in keys:
+                st = unique_stops_by_key[k]
+                print(f"    - {st['cust_name']} | {st.get('chosen_address') or st['effective_dest']}")
+            planned_trucks += group_trucks(keys, group, unique_stops_by_key)
 
     # טבלה ממוינת בקלט: המסלולים, הסדר והנהגים בדיוק כמו בטבלה
     initial_edited = (
@@ -3192,6 +3307,7 @@ def sort_orders_excel(
         """כתיבת קובץ האקסל הממוין לפי המסלולים שנקבעו (נקרא שוב בכל אישור בחלון)."""
         final_drivers: list[dict[str, Any]] = []
         stop_assignment: dict[str, dict[str, Any]] = {}
+        special_of: dict[str, str] = {}  # stop_key -> קבוצה מיוחדת
 
         multi_day = len({t.get("route_date", "") for t in planned_trucks}) > 1
         num_in_day: dict[str, int] = {}
@@ -3206,12 +3322,18 @@ def sort_orders_excel(
                 else str(num_in_day[route_date])
             )
             driver_label = f"נהג {who} ({reg_title})"
+            if t.get("special"):
+                # "נהג איסוף עצמי" / "נהג ללא יעד" - רשימת ליקוט (ודוח הובלה) נפרדים
+                driver_label = f"נהג {GROUP_LABELS[t['special']]}"
             if multi_day and route_date:
                 # בדוח שבועי התאריך הוא חלק מהשם, כדי שכל מסלול יהיה ייחודי
                 driver_label += f" {route_date.replace('-', '.')}"
             t["driver_id"] = driver_counter
             t["driver_label"] = driver_label
             final_drivers.append(t)
+            if t.get("special"):
+                for st_key in t["schedule_by_stop"]:
+                    special_of[st_key] = t["special"]
 
             for st_key, sched in t["schedule_by_stop"].items():
                 stop_assignment[st_key] = {
@@ -3359,6 +3481,9 @@ def sort_orders_excel(
         for row_offset, rec in enumerate(records, start=2):
             stop = unique_stops_by_key[rec["stop_key"]]
             reg = stop["region"]  # לפי הכתובת שנבחרה
+            special = special_of.get(rec["stop_key"])
+            if special:
+                reg = GROUP_LABELS[special]  # "איסוף עצמי" / "ללא יעד" במקום אזור
             row_color = order_date_color.get(rec.get("route_date", ""), "FFFFFF")
             row_fill = PatternFill(
                 start_color=row_color, end_color=row_color, fill_type="solid"

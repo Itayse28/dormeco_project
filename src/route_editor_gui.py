@@ -55,6 +55,20 @@ except Exception as _exc:  # pragma: no cover - אם קובץ המפה חסר, �
     MAP_PANEL_ERROR = f"{type(_exc).__name__}: {_exc}"
 
 POOL = -1  # מזהה העמודה "ממתינות לשיבוץ"
+NO_DEST = -2  # "הזמנות ללא יעד" - לא נמצא מיקום (גם לא העיר)
+PICKUP = -3   # "איסוף עצמי" - הלקוח אוסף בעצמו, בלי הובלה
+SPECIAL_COLS = (PICKUP, NO_DEST, POOL)  # עמודות שאינן מסלולים (col < 0)
+SPECIAL_TITLES = {
+    POOL: "ממתינות לשיבוץ",
+    NO_DEST: "הזמנות ללא יעד",
+    PICKUP: "איסוף עצמי",
+}
+# "נהג" מזויף שמסמן את הקבוצה ברשימה שהחלון מחזיר (sort_orders_by_region.GROUP_DRIVER)
+SPECIAL_DRIVER = {NO_DEST: "__no_dest__", PICKUP: "__pickup__"}
+GROUP_COL = {"no_dest": NO_DEST, "pickup": PICKUP}
+SPECIAL_BG = {POOL: "#FFF1D6", NO_DEST: "#FDE2E2", PICKUP: "#E3F2FD"}
+SPECIAL_STRIPE = {POOL: "#F6A623", NO_DEST: "#B3261E", PICKUP: "#1976D2"}
+FG_CITY_ONLY = "#D46A00"  # כתום: נמצאה רק העיר (בלי הכתובת המדויקת)
 
 FONT = "Arial"
 F_TITLE = (FONT, 15, "bold")
@@ -101,7 +115,7 @@ LOCATION_QUALITY_LABELS = {
     "manual": "נקבע ידנית",
     "street": "כתובת מדויקת",
     "geocoded": "נמצא בחיפוש מפות",
-    "locality": "מרכז היישוב",
+    "locality": "רק העיר (בלי הכתובת המדויקת)",
     "region_only": "משוער - רק מרכז הנפה",
     "guess": "לא אותר - ניחוש",
 }
@@ -191,8 +205,18 @@ class RouteEditor:
         save_as_path: str = "",
         apply_address: Callable[[dict[str, Any], int], None] | None = None,
         set_location: Callable[[dict[str, Any], float, float], int] | None = None,
+        initial_special: dict[str, list[str]] | None = None,
+        group_of: Callable[[dict[str, Any]], str | None] | None = None,
     ) -> None:
         self.root = root
+        # ריבועים מיוחדים: הזמנות ללא יעד / איסוף עצמי (לא מסלולים)
+        self.group_of = group_of
+        self._initial_special = {
+            GROUP_COL[g]: list(keys) for g, keys in (initial_special or {}).items()
+            if g in GROUP_COL
+        }
+        self.no_dest: list[str] = list(self._initial_special.get(NO_DEST, []))
+        self.pickup: list[str] = list(self._initial_special.get(PICKUP, []))
         # בחירת כתובת אספקה לעצירה (מעדכן מיקום ואינדקס במטריצה - מהסקריפט הראשי)
         self.apply_address = apply_address
         # קביעת מיקום ידנית (נשמר לקובץ ונטען בהרצות הבאות - מהסקריפט הראשי)
@@ -272,6 +296,7 @@ class RouteEditor:
         self._reselect: tuple[int, int] | None = None
         self._first_render = True
 
+        self._ensure_all_stops()
         self._build_window()
         # המפה מוסתרת כברירת מחדל - מוצגת בלחיצה על "הצג מפה"
         self._paned.forget(self._map_widget)
@@ -283,7 +308,7 @@ class RouteEditor:
     # חישובים
     # ------------------------------------------------------------------
     def _driver_of(self, col: int) -> str | None:
-        if col == POOL:
+        if col < 0:  # ממתינות / ללא יעד / איסוף עצמי
             return None
         return self.route_driver.get(self.route_ids[col])
 
@@ -301,7 +326,7 @@ class RouteEditor:
 
     def _route_date(self, col: int) -> str | None:
         """תאריך המסלול: היום של העמודה, או (בסידור יעיל) התאריך המוקדם בהזמנות."""
-        if col == POOL:
+        if col < 0:
             return None
         if self.mode == "days":
             return self.route_day.get(self.route_ids[col])
@@ -366,8 +391,8 @@ class RouteEditor:
         return " + ".join(ordered)
 
     def _color(self, col: int) -> str:
-        if col == POOL:
-            return "#F6A623"
+        if col < 0:
+            return SPECIAL_STRIPE[col]
         return DRIVER_COLORS[self.route_ids[col] % len(DRIVER_COLORS)]
 
     def _col_of_id(self, rid: int | None) -> int | None:
@@ -640,9 +665,10 @@ class RouteEditor:
 
         if self._week_view():
             # עמודה לכל יום, והמסלולים של אותו יום אחד מתחת לשני
-            if self.pool:
-                pf = self._new_day_frame("ממתינות לשיבוץ", None)
-                self._build_column(POOL, self.pool, list_height, None, parent=pf)
+            for sc in SPECIAL_COLS:
+                if self._col_list(sc):
+                    pf = self._new_day_frame(SPECIAL_TITLES[sc], None)
+                    self._build_column(sc, self._col_list(sc), list_height, None, parent=pf)
             for day in self.days:
                 df = self._new_day_frame(short_date(day), day)
                 for col in visible:
@@ -652,8 +678,9 @@ class RouteEditor:
                             col, self.routes[col], list_height, num, parent=df
                         )
         else:
-            if self.pool:
-                self._build_column(POOL, self.pool, list_height, None)
+            for sc in SPECIAL_COLS:
+                if self._col_list(sc):
+                    self._build_column(sc, self._col_list(sc), list_height, None)
             for col in visible:
                 num = self._day_number(col) if self.routes[col] else 0
                 self._build_column(col, self.routes[col], list_height, num)
@@ -773,6 +800,8 @@ class RouteEditor:
             "route_driver": dict(self.route_driver),
             "route_day": dict(self.route_day),
             "pool": list(self.pool),
+            "no_dest": list(self.no_dest),
+            "pickup": list(self.pickup),
         }
 
     def _set_state(self, st: dict[str, Any]) -> None:
@@ -781,6 +810,23 @@ class RouteEditor:
         self.route_driver = dict(st["route_driver"])
         self.route_day = dict(st["route_day"])
         self.pool = list(st["pool"])
+        self.no_dest = list(st.get("no_dest", self.no_dest))
+        self.pickup = list(st.get("pickup", self.pickup))
+        self._ensure_all_stops()
+
+    def _ensure_all_stops(self) -> None:
+        """כל עצירה מופיעה בדיוק פעם אחת: עצירה בריבוע מיוחד יוצאת מהמסלולים,
+        ועצירה שלא מופיעה בשום מקום חוזרת לקבוצה שלה (או לממתינות לשיבוץ)."""
+        special = set(self.no_dest) | set(self.pickup)
+        for r in self.routes:
+            r[:] = [k for k in r if k not in special]
+        self.pool = [k for k in self.pool if k not in special]
+        placed = special | set(self.pool) | {k for r in self.routes for k in r}
+        for k in self.stops:
+            if k in placed:
+                continue
+            group = self.group_of(self.stops[k]) if self.group_of else None
+            self._col_list(GROUP_COL.get(group, POOL)).append(k)
 
     def _fresh_state(
         self,
@@ -800,6 +846,9 @@ class RouteEditor:
             },
             "route_day": {rid: d for rid, d in zip(ids, days)},
             "pool": [],
+            # הריבועים המיוחדים נשארים כמו שהם (בחזרה לתכנון המקורי - כמו בהתחלה)
+            "no_dest": list(self.no_dest),
+            "pickup": list(self.pickup),
         }
 
     def toggle_efficient(self) -> None:
@@ -840,13 +889,13 @@ class RouteEditor:
         drv_num: int | None,
         parent: tk.Frame | None = None,
     ) -> None:
-        is_pool = col == POOL
+        is_pool = col < 0  # ממתינות לשיבוץ / ללא יעד / איסוף עצמי - לא מסלול
         sim = self._sim_col(col) if (keys and not is_pool) else None
         problems = self._problems(sim) if sim else []
         driver = self._driver_of(col)
 
         if is_pool:
-            bg = BG_POOL
+            bg = SPECIAL_BG[col]
         elif not keys:
             bg = BG_EMPTY
         elif problems:
@@ -871,8 +920,8 @@ class RouteEditor:
 
         # כותרת
         if is_pool:
-            title = "ממתינות לשיבוץ"
-            head_bg = "#F6C26B"
+            title = SPECIAL_TITLES[col]
+            head_bg = {POOL: "#F6C26B", NO_DEST: "#F4A6A6", PICKUP: "#90CAF9"}[col]
         elif not keys:
             title = f"נהג {driver} (ריק)" if driver else "נהג נוסף (ריק)"
             head_bg = "#E6E6E6"
@@ -897,11 +946,24 @@ class RouteEditor:
         # שורות מידע (תמיד 3 שורות, כדי שכל הכרטיסים יהיו באותו גובה)
         info_lines: list[tuple[str, str]] = []
         if is_pool:
-            info_lines = [
-                (f"{len(keys)} עצירות", FG_BAD),
-                ("גררו כל אחת לנהג כלשהו", FG_BAD),
-                ("", FG_MUTED),
-            ]
+            weight = sum(self.stops[k].get("weight", 0) for k in keys)
+            info_lines = {
+                POOL: [
+                    (f"{len(keys)} עצירות", FG_BAD),
+                    ("גררו כל אחת לנהג כלשהו", FG_BAD),
+                    ("", FG_MUTED),
+                ],
+                NO_DEST: [
+                    (f'{len(keys)} עצירות | {weight:,.0f} ק"ג', FG_BAD),
+                    ("לא נמצא מיקום (גם לא העיר). קליק ימני > קביעת מיקום ידנית", FG_BAD),
+                    ("בלי מיקום: רשימת ליקוט ודוח הובלה נפרדים", FG_MUTED),
+                ],
+                PICKUP: [
+                    (f'{len(keys)} עצירות | {weight:,.0f} ק"ג', "black"),
+                    ("הלקוח אוסף בעצמו - בלי הובלה", FG_MUTED),
+                    ("רשימת ליקוט נפרדת, בלי דוח הובלה", FG_MUTED),
+                ],
+            }[col]
         elif not keys:
             info_lines = [("גררו לכאן עצירות", FG_MUTED), ("", FG_MUTED), ("", FG_MUTED)]
         else:
@@ -964,8 +1026,10 @@ class RouteEditor:
         lb.pack(side="right", fill="both", expand=True)
         for key in keys:
             lb.insert("end", self._stop_text(key))
-            if self._is_approx(key):
+            if self._is_approx(key) or col == NO_DEST:
                 lb.itemconfigure("end", fg=FG_BAD)
+            elif self.stops[key].get("loc_quality") == "locality":
+                lb.itemconfigure("end", fg=FG_CITY_ONLY)
         self._listboxes[col] = lb
         self._register_drop(lb, col)
 
@@ -1084,7 +1148,16 @@ class RouteEditor:
         if self.pool:
             parts.append(f"{len(self.pool)} ממתינות לשיבוץ")
             color = FG_BAD
-        approx = sum(1 for k in self.stops if self._is_approx(k))
+        if self.no_dest:
+            parts.append(f"{len(self.no_dest)} ללא יעד")
+            color = FG_BAD
+        if self.pickup:
+            parts.append(f"{len(self.pickup)} באיסוף עצמי")
+        # (איסוף עצמי - המיקום לא משנה; ללא יעד - נספר בנפרד)
+        approx = sum(
+            1 for k in self.stops
+            if self._is_approx(k) and k not in self.pickup and k not in self.no_dest
+        )
         if approx:
             parts.append(f"⚠ {approx} מיקומים לא אותרו (קליק ימני על העצירה)")
             color = FG_BAD
@@ -1106,6 +1179,8 @@ class RouteEditor:
                     for c in range(len(self.routes))
                     if self.routes[c]
                 ],
+                sorted(self.no_dest),
+                sorted(self.pickup),
                 # גם שינוי כתובת אספקה מחייב יצירה מחדש של הקבצים
                 sorted(
                     (k, s.get("address_choice"), tuple(s.get("coords") or ()))
@@ -1240,7 +1315,7 @@ class RouteEditor:
         ]
         if whs:
             lines.append(("העמסה: " + ", ".join(whs), "text"))
-        if col != POOL and self.routes[col]:
+        if col >= 0 and self.routes[col]:
             sched = self._sim_col(col).get("schedule_by_stop", {}).get(key)
             if sched:
                 lines.append(
@@ -1258,7 +1333,7 @@ class RouteEditor:
                     ("⚠ " if approx else "")
                     + f"דיוק המיקום: {LOCATION_QUALITY_LABELS.get(quality, quality)}"
                     + ("  -  קליק ימני > קביעת מיקום ידנית" if approx else ""),
-                    "bad" if approx else "muted",
+                    "bad" if approx else ("city" if quality == "locality" else "muted"),
                 )
             )
 
@@ -1309,6 +1384,7 @@ class RouteEditor:
             "text": (F_SMALL, "black"),
             "muted": (F_SMALL, FG_MUTED),
             "bad": (F_SMALL, FG_BAD),
+            "city": (F_SMALL, FG_CITY_ONLY),
         }
         for text, style in self._stop_details(col, key):
             font, fg = styles[style]
@@ -1427,6 +1503,9 @@ class RouteEditor:
         if st is None or self.set_location is None:
             return
         updated = self.set_location(st, lat, lon)
+        for k, s in self.stops.items():
+            if s.get("loc_quality") == "manual":
+                self._relocate(k)
         self._sim_cache.clear()
         self.render()
         messagebox.showinfo(
@@ -1442,14 +1521,37 @@ class RouteEditor:
         if st is None or self.apply_address is None or idx == st.get("address_choice"):
             return
         self.apply_address(st, idx)
+        self._relocate(key)
         self._sim_cache.clear()
         self.render()
+
+    def _unlocated(self, key: str) -> bool:
+        """לעצירה לא נמצא מיקום (גם לא העיר)."""
+        return self.stops[key].get("loc_quality") == "guess"
+
+    def _relocate(self, key: str) -> None:
+        """אחרי שינוי מיקום/כתובת: עצירה שנמצא לה מיקום יוצאת מ"ללא יעד" לממתינות
+        לשיבוץ, ועצירה שאיבדה את המיקום שלה עוברת ל"ללא יעד"."""
+        if key in self.no_dest and not self._unlocated(key):
+            self.no_dest.remove(key)
+            self.pool.append(key)
+        elif self._unlocated(key) and key not in self.no_dest and key not in self.pickup:
+            for lst in [self.pool, *self.routes]:
+                if key in lst:
+                    lst.remove(key)
+            self.no_dest.append(key)
 
     # ------------------------------------------------------------------
     # גרירה ושחרור
     # ------------------------------------------------------------------
     def _col_list(self, col: int) -> list[str]:
-        return self.pool if col == POOL else self.routes[col]
+        if col == POOL:
+            return self.pool
+        if col == NO_DEST:
+            return self.no_dest
+        if col == PICKUP:
+            return self.pickup
+        return self.routes[col]
 
     def _resolve_col(self, widget: tk.Misc | None) -> int | None:
         w = widget
@@ -1580,13 +1682,22 @@ class RouteEditor:
         dst = self._col_list(dst_col)
         if not (0 <= src_idx < len(src)):
             return
+        if dst_col not in (NO_DEST, PICKUP) and self._unlocated(src[src_idx]):
+            messagebox.showwarning(
+                "אין מיקום לעצירה",
+                "לעצירה הזו לא נמצא מיקום, ולכן אי אפשר לשבץ אותה במסלול.\n"
+                "קליק ימני עליה > קביעת מיקום ידנית (או בחירת כתובת אחרת),\n"
+                "או גררו אותה לריבוע \"איסוף עצמי\".",
+                parent=self.root,
+            )
+            return
         key = src.pop(src_idx)
         if src is dst and src_idx < dst_idx:
             dst_idx -= 1
         dst_idx = max(0, min(dst_idx, len(dst)))
         dst.insert(dst_idx, key)
         self._reselect = (dst_col, dst_idx)
-        if dst_col != POOL:
+        if dst_col >= 0:
             self.selected_id = self.route_ids[dst_col]
         self.render()
 
@@ -1654,6 +1765,13 @@ class RouteEditor:
         )
         if not ok:
             return
+        # הריבועים המיוחדים לפי מצב העצירות עכשיו (כולל מיקומים שנקבעו ידנית)
+        if self.group_of is not None:
+            self.no_dest = [k for k, s in self.stops.items() if self.group_of(s) == "no_dest"]
+            self.pickup = [k for k, s in self.stops.items() if self.group_of(s) == "pickup"]
+        else:
+            self.no_dest = list(self._initial_special.get(NO_DEST, []))
+            self.pickup = list(self._initial_special.get(PICKUP, []))
         if self.mode == "days":
             self._set_state(
                 self._fresh_state(self.initial, self._initial_days, self._initial_drivers)
@@ -1674,8 +1792,8 @@ class RouteEditor:
         if frame is None:
             return
         keys = self._col_list(col)
-        is_sel = col != POOL and self.selected_id == self.route_ids[col]
-        bad = bool(keys) and col != POOL and bool(self._problems(self._sim_col(col)))
+        is_sel = col >= 0 and self.selected_id == self.route_ids[col]
+        bad = bool(keys) and col >= 0 and bool(self._problems(self._sim_col(col)))
         if is_sel:
             color = self._color(col)
         elif bad:
@@ -1713,7 +1831,7 @@ class RouteEditor:
 
     def select_route(self, col: int, idx: int | None = None) -> None:
         """מסמן נהג (ואם צוין - עצירה מסוימת שלו) ברשימות ובמפה."""
-        if col == POOL:
+        if col < 0:
             self.selected_id = None
         else:
             self.selected_id = self.route_ids[col]
@@ -1729,8 +1847,10 @@ class RouteEditor:
     def on_map_stop_click(self, key: str) -> None:
         """לחיצה על עצירה במפה: מסמנת אותה ברשימה של הנהג ומגלגלת אליה."""
         col: int | None = None
-        if key in self.pool:
-            col, idx = POOL, self.pool.index(key)
+        for sc in SPECIAL_COLS:
+            if key in self._col_list(sc):
+                col, idx = sc, self._col_list(sc).index(key)
+                break
         else:
             for c, keys in enumerate(self.routes):
                 if key in keys:
@@ -1779,9 +1899,21 @@ class RouteEditor:
             )
             return
         active_cols = [c for c, r in enumerate(self.routes) if r]
-        if not active_cols:
+        if not active_cols and not self.no_dest and not self.pickup:
             messagebox.showerror("אין מסלולים", "לא נשארו נהגים עם עצירות.", parent=self.root)
             return
+        if self.no_dest:
+            ok = messagebox.askyesno(
+                "יש הזמנות ללא יעד",
+                f"ל-{len(self.no_dest)} עצירות לא נמצא יעד.\n"
+                "ייווצרו להן רשימת ליקוט ודוח הובלה נפרדים (\"ללא יעד\"),\n"
+                "עם הכתובת כפי שהיא בקובץ ההזמנות.\n\n"
+                "להמשיך?",
+                icon="warning",
+                parent=self.root,
+            )
+            if not ok:
+                return
         labels = {}
         for i, c in enumerate(active_cols, start=1):
             rnd, n_rounds = self._round_info(c)
@@ -1818,6 +1950,10 @@ class RouteEditor:
             (list(self.routes[c]), self._driver_of(c), self._route_date(c))
             for c in active_cols
         ]
+        # איסוף עצמי / ללא יעד: "נהג" מזויף שמסמן את הקבוצה
+        for sc in (PICKUP, NO_DEST):
+            if self._col_list(sc):
+                result.append((list(self._col_list(sc)), SPECIAL_DRIVER[sc], None))
         if self.on_generate is None:
             self.result = result
             self.root.destroy()
@@ -1924,6 +2060,8 @@ def run_route_editor(
     save_as_path: str = "",
     apply_address: Callable[[dict[str, Any], int], None] | None = None,
     set_location: Callable[[dict[str, Any], float, float], int] | None = None,
+    initial_special: dict[str, list[str]] | None = None,
+    group_of: Callable[[dict[str, Any]], str | None] | None = None,
 ) -> list[tuple[list[str], str | None, str | None]] | None:
     """
     פותח את חלון העריכה וממתין עד שהמשתמש יאשר או יבטל.
@@ -1935,7 +2073,7 @@ def run_route_editor(
         root, initial_routes, stops_by_key, simulate, cfg, region_order, drivers,
         initial_days, compute_efficient, on_generate, send_mails,
         initial_drivers, list_mail_groups, save_copy, save_as_path,
-        apply_address, set_location,
+        apply_address, set_location, initial_special, group_of,
     )
     root.lift()
     try:

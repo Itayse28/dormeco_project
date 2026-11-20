@@ -751,7 +751,9 @@ def extract_driver_name(driver_label: str) -> str:
     """
     drv_str = str(driver_label or "").strip()
     m = re.match(r"^\s*נהג\s+(.+?)\s*(\(|$)", drv_str)
-    return m.group(1).strip() if m else (drv_str or "1")
+    name = m.group(1).strip() if m else (drv_str or "1")
+    # "נהג איסוף עצמי 23.11.2026" (קבוצה בדוח שבועי) - התאריך נוסף לשם הקובץ בנפרד
+    return re.sub(r"\s+\d{1,2}\.\d{1,2}\.\d{4}$", "", name) or name
 
 
 def safe_file_part(text: str) -> str:

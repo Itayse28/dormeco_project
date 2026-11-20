@@ -499,6 +499,10 @@ def create_all_shipping_launcher(
     )
 
 
+PICKUP_GROUP_NAME = "איסוף עצמי"   # "נהג איסוף עצמי" בטבלה הממוינת - בלי דוח הובלה
+NO_DEST_GROUP_NAME = "ללא יעד"      # "נהג ללא יעד" - דוח הובלה עם הכתובת מקובץ הגלם
+
+
 def extract_driver_number(driver_label: str) -> str:
     """
     מחזיר את שם הנהג מתוך התווית:
@@ -506,7 +510,9 @@ def extract_driver_number(driver_label: str) -> str:
     """
     drv_str = str(driver_label or "").strip()
     m = re.match(r"^\s*נהג\s+(.+?)\s*(\(|$)", drv_str)
-    return m.group(1).strip() if m else (drv_str or "1")
+    name = m.group(1).strip() if m else (drv_str or "1")
+    # "נהג ללא יעד 23.11.2026" (קבוצה בדוח שבועי) - התאריך נוסף לשם הקובץ בנפרד
+    return re.sub(r"\s+\d{1,2}\.\d{1,2}\.\d{4}$", "", name) or name
 
 
 def safe_file_part(text: str) -> str:
@@ -874,6 +880,9 @@ def create_single_driver_report(
                 f"תחנה {stop_num}: {dest}  |  שם הלקוח: {cust_name}  |  "
                 f"כתובת מדויקת: {full_address}{arr_txt}{phone_txt}"
             )
+        if extract_driver_number(driver_label) == NO_DEST_GROUP_NAME:
+            # עצירה בלי יעד מזוהה: הכתובת כפי שהיא בקובץ ההזמנות, כדי לבדוק מול הלקוח
+            stop_banner_text += f"  |  ⚠ לא נמצא יעד - הכתובת בקובץ הגלם: {full_address}"
         # סה"כ משטחים לפריקה בתחנה
         stop_pallets = [it["pallets"] for it in stop_items if it.get("pallets") is not None]
         if stop_pallets:
@@ -898,7 +907,11 @@ def create_single_driver_report(
             ws.cell(curr_row, c).fill = stop_banner_fill
             ws.cell(curr_row, c).border = grid_border
         set_link(sb_cell, cust_url)  # לחיצה על שורת התחנה פותחת את הלקוח
-        ws.row_dimensions[curr_row].height = 24
+        # גובה שורת התחנה לפי אורך הטקסט (תא ממוזג לא מתאים גובה אוטומטית)
+        banner_width = 162.0 if has_pallets else 145.0  # סכום רוחבי העמודות
+        chars_per_line = max(40, int(banner_width * 0.85))
+        banner_lines = max(2, -(-len(stop_banner_text) // chars_per_line))
+        ws.row_dimensions[curr_row].height = banner_lines * 16 + 8
         curr_row += 1
 
         for c_i, h_txt in enumerate(unload_headers, start=1):
@@ -1088,6 +1101,8 @@ def generate_driver_reports_from_sorted_excel(
             else "נהג 1"
         )
         driver_num = extract_driver_number(driver_label)
+        if driver_num == PICKUP_GROUP_NAME:
+            continue  # איסוף עצמי: רק רשימת ליקוט, בלי דוח הובלה
         route_date_val = (
             str(row_vals[idx_route_date] or "").strip()
             if 0 <= idx_route_date < len(row_vals)
