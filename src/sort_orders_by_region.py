@@ -3033,6 +3033,7 @@ def sort_orders_excel(
                 "has_site_address": rec["has_site_address"],
                 "report_contact": "",
                 "report_contact_phone": "",
+                "orders": [],  # מספרי ההזמנות בעצירה (לחלון הפרטים)
                 "prior_chosen": rec["prior_chosen"],
                 "weight": 0.0,
                 "needs_main": False,
@@ -3046,6 +3047,8 @@ def sort_orders_excel(
         st["needs_cooling"] = st["needs_cooling"] or rec["is_cooling"]
         st["needs_hazmat"] = st["needs_hazmat"] or rec["is_hazmat"]
         st["needs_goldbond"] = st["needs_goldbond"] or rec["is_goldbond"]
+        if rec["order_no"] and rec["order_no"] not in st["orders"]:
+            st["orders"].append(rec["order_no"])
         if not st["report_contact"] and (rec["contact_name"] or rec["contact_phone"]):
             st["report_contact"] = rec["contact_name"]
             st["report_contact_phone"] = rec["contact_phone"]

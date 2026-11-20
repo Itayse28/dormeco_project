@@ -1213,7 +1213,13 @@ class RouteEditor:
         """שורות חלון הפרטים: [(טקסט, סגנון)] - סגנון: title / text / muted / bad."""
         st = self.stops[key]
         cfg = self.cfg
-        lines: list[tuple[str, str]] = [(str(st.get("cust_name") or "-"), "title")]
+        lines: list[tuple[str, str]] = [
+            (f"לקוח: {st.get('cust_name') or '-'}", "title")
+        ]
+        orders = st.get("orders") or []
+        if orders:
+            label = "הזמנה" if len(orders) == 1 else "הזמנות"
+            lines.append((f"{label}: {', '.join(orders)}", "text"))
         meta = []
         if st.get("cust_no"):
             meta.append(f"מס' לקוח {st['cust_no']}")
