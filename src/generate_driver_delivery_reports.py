@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import io
 import pathlib
 import re
@@ -601,8 +602,16 @@ def create_single_driver_report(
     pallet_headers = ["מספר משטחים"] if has_pallets else []
     num_cols = 9 + len(pallet_headers)
 
+    def round_pallets(v: Any) -> Any:
+        """מספר משטחים עם שבר (למשל 0.13) מעוגל למעלה למספר שלם (1)."""
+        return math.ceil(v - 1e-9) if isinstance(v, (int, float)) else v
+
+    def num_format(v: Any) -> str:
+        """מספר שלם בלי נקודה בסוף (100 ולא 100.); שבר עם עד 2 ספרות."""
+        return "#,##0" if isinstance(v, (int, float)) and float(v).is_integer() else "#,##0.##"
+
     def pallet_vals(item: dict[str, Any]) -> list[Any]:
-        return [item.get("pallets")] if has_pallets else []
+        return [round_pallets(item.get("pallets"))] if has_pallets else []
 
     # צבע רקע לשורות של מוצרים ממחסן שאינו אוברסיז (צבע שונה לכל מחסן)
     wh_row_fills = [
@@ -730,7 +739,7 @@ def create_single_driver_report(
             hc.alignment = Alignment(
                 horizontal="center", vertical="center", wrap_text=True
             )
-        ws.row_dimensions[curr_row].height = 20
+        ws.row_dimensions[curr_row].height = 32
         curr_row += 1
 
         first_item_row = curr_row
@@ -750,7 +759,7 @@ def create_single_driver_report(
             if isinstance(item["qty"], (int, float)):
                 total_weight += item["qty"]
             if isinstance(item.get("pallets"), (int, float)):
-                total_pallets += item["pallets"]
+                total_pallets += round_pallets(item["pallets"])
             notes_col = 8 + len(pallet_headers)
             fill = row_fill(item)
             for c_i, v in enumerate(vals, start=1):
@@ -764,7 +773,7 @@ def create_single_driver_report(
                 if fill is not None and c_i > CUST_COLS:
                     c.fill = fill
                 if (c_i == QTY_COL or (has_pallets and c_i == PAL_COL)) and isinstance(v, (int, float)):
-                    c.number_format = "#,##0.##"
+                    c.number_format = num_format(v)
                     c.alignment = Alignment(
                         horizontal="center", vertical="center", wrap_text=True
                     )
@@ -792,11 +801,11 @@ def create_single_driver_report(
     tl = ws.cell(curr_row, 1, 'סה"כ משקל כל ההזמנות (ק"ג)')
     tl.alignment = Alignment(horizontal="left", vertical="center")
     tv = ws.cell(curr_row, QTY_COL, round(total_weight, 2))
-    tv.number_format = "#,##0.##"
+    tv.number_format = num_format(tv.value)
     tv.alignment = Alignment(horizontal="center", vertical="center")
     if has_pallets:
         pv = ws.cell(curr_row, PAL_COL, round(total_pallets, 2))
-        pv.number_format = "#,##0.##"
+        pv.number_format = num_format(pv.value)
         pv.alignment = Alignment(horizontal="center", vertical="center")
         pl = ws.cell(curr_row, PAL_COL + 1, "משטחים")
         pl.alignment = Alignment(horizontal="right", vertical="center")
