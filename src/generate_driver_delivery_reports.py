@@ -600,7 +600,7 @@ def create_single_driver_report(
         r.get("pallets") is not None or r.get("per_pallet") is not None for r in driver_rows
     )
     pallet_headers = ["מספר משטחים"] if has_pallets else []
-    num_cols = 9 + len(pallet_headers)
+    num_cols = 7 + len(pallet_headers)
 
     def round_pallets(v: Any) -> Any:
         """מספר משטחים עם שבר (למשל 0.13) מעוגל למעלה למספר שלם (1)."""
@@ -684,9 +684,7 @@ def create_single_driver_report(
             stops_grouped[-1][1].append(r)
 
     unload_headers = [
-        "שם לקוח",
-        "כתובת מדויקת לפריקה",
-        "איש קשר + טלפון",
+        "פרטי לקוח (שם, כתובת לפריקה, איש קשר)",
         "הזמנה",
         "תיאור החומר",
         "כמות לפריקה",
@@ -695,10 +693,10 @@ def create_single_driver_report(
         "הערות למוצר",
         "דגש מיוחד ללקוח",
     ]
-    CUST_COLS = 3  # שם לקוח, כתובת, איש קשר - ממוזגים לאורך שורות התחנה
-    ORDER_COL = 4
-    QTY_COL = 6
-    PAL_COL = 7  # רק כשיש משטחים
+    CUST_COLS = 1  # שם לקוח + כתובת + איש קשר בתא אחד, ממוזג לאורך שורות התחנה
+    ORDER_COL = 2
+    QTY_COL = 4
+    PAL_COL = 5  # רק כשיש משטחים
     total_weight = 0.0
     total_pallets = 0.0
 
@@ -747,9 +745,7 @@ def create_single_driver_report(
         stop_pallets_sum = 0
         for item in stop_items:
             vals = [
-                cust_name,
-                stop_address,
-                stop_contact,
+                "\n".join(t for t in (cust_name, stop_address, stop_contact) if t),
                 item["order_no"],
                 item["prod_desc"],
                 item["qty"],
@@ -764,7 +760,7 @@ def create_single_driver_report(
             if isinstance(item.get("pallets"), (int, float)):
                 total_pallets += round_pallets(item["pallets"])
                 stop_pallets_sum += round_pallets(item["pallets"])
-            notes_col = 8 + len(pallet_headers)
+            notes_col = 6 + len(pallet_headers)
             fill = row_fill(item)
             for c_i, v in enumerate(vals, start=1):
                 c = ws.cell(curr_row, c_i, v)
@@ -798,6 +794,11 @@ def create_single_driver_report(
             for c_i in range(1, CUST_COLS + 1):
                 ws.merge_cells(start_row=first_item_row, start_column=c_i,
                                end_row=curr_row - 1, end_column=c_i)
+        # מספיק גובה לשלוש שורות פרטי הלקוח (גם בתחנה עם מוצר אחד או שניים)
+        n_rows = curr_row - first_item_row
+        if n_rows * 30 < 60:
+            for r_i in range(first_item_row, curr_row):
+                ws.row_dimensions[r_i].height = 60 / n_rows
 
         # סיכום משקל ומשטחים לתחנה הזאת
         ws.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=QTY_COL - 1)
@@ -875,11 +876,10 @@ def create_single_driver_report(
         curr_row += 1
 
     # רוחבי עמודות קומפקטיים ומותאמים להדפסה על דף אחד
-    col_widths = {1: 18.0, 2: 26.0, 3: 20.0, 4: 11.0, 5: 30.0, 6: 10.0,
-                  7: 14.0, 8: 30.0, 9: 22.0}
+    col_widths = {1: 34.0, 2: 11.0, 3: 30.0, 4: 10.0, 5: 14.0, 6: 30.0, 7: 22.0}
     if has_pallets:
-        col_widths = {1: 18.0, 2: 26.0, 3: 20.0, 4: 11.0, 5: 30.0, 6: 10.0,
-                      7: 9.0, 8: 14.0, 9: 30.0, 10: 22.0}
+        col_widths = {1: 34.0, 2: 11.0, 3: 30.0, 4: 10.0, 5: 9.0, 6: 14.0,
+                      7: 30.0, 8: 22.0}
     for col_i, w in col_widths.items():
         ws.column_dimensions[get_column_letter(col_i)].width = w
 
