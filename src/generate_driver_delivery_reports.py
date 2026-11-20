@@ -598,8 +598,27 @@ def create_single_driver_report(
     has_pallets = any(
         r.get("pallets") is not None or r.get("per_pallet") is not None for r in driver_rows
     )
-    pallet_headers = ["כמות במשטח", "מספר משטחים"] if has_pallets else []
-    num_cols = 8 + len(pallet_headers)
+    pallet_headers = ["מספר משטחים"] if has_pallets else []
+    num_cols = 6 + len(pallet_headers)
+
+    def pallet_vals(item: dict[str, Any]) -> list[Any]:
+        return [item.get("pallets")] if has_pallets else []
+
+    # צבע רקע לשורות של מוצרים ממחסן שאינו אוברסיז (צבע שונה לכל מחסן)
+    wh_row_fills = [
+        ("is_cooling", cfg["COOLING_WAREHOUSE_NAME"],
+         PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")),
+        ("is_hazmat", cfg["HAZMAT_WAREHOUSE_NAME"],
+         PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")),
+        ("is_goldbond", cfg["GOLDBOND_WAREHOUSE_NAME"],
+         PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")),
+    ]
+
+    def row_fill(item: dict[str, Any]) -> PatternFill | None:
+        for flag, _name, fill in wh_row_fills:
+            if item.get(flag):
+                return fill
+        return None
     mark_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     mark_font = Font(name=font_family, size=9, bold=True, color="9C0006")
 
@@ -625,186 +644,7 @@ def create_single_driver_report(
     curr_row = 3
 
     # ==========================================================================
-    # 2. חלק א': רשימת העמסות במחסנים באשדוד (רק מחסנים שיש בהם סחורה לנהג זה)
-    # ==========================================================================
-    ws.merge_cells(
-        start_row=curr_row,
-        start_column=1,
-        end_row=curr_row,
-        end_column=num_cols,
-    )
-    sec1_cell = ws.cell(
-        curr_row, 1, "א. רשימת העמסות במחסנים באשדוד (לפי סדר ההעמסה)"
-    )
-    sec1_cell.font = sec_font
-    for c in range(1, num_cols + 1):
-        ws.cell(curr_row, c).fill = sec_fill
-        ws.cell(curr_row, c).border = grid_border
-    ws.row_dimensions[curr_row].height = 22
-    curr_row += 1
-
-    warehouses_order = [
-        (
-            "main",
-            cfg["MAIN_WAREHOUSE_NAME"],
-            cfg["MAIN_WAREHOUSE_ADDRESS"],
-            wh_main_fill,
-        ),
-        (
-            "cooling",
-            cfg["COOLING_WAREHOUSE_NAME"],
-            cfg["COOLING_WAREHOUSE_ADDRESS"],
-            wh_special_fill,
-        ),
-        (
-            "hazmat",
-            cfg["HAZMAT_WAREHOUSE_NAME"],
-            cfg["HAZMAT_WAREHOUSE_ADDRESS"],
-            wh_special_fill,
-        ),
-        (
-            "goldbond",
-            cfg["GOLDBOND_WAREHOUSE_NAME"],
-            cfg["GOLDBOND_WAREHOUSE_ADDRESS"],
-            wh_special_fill,
-        ),
-    ]
-
-    load_headers = [
-        "הזמנה",
-        "שם לקוח",
-        "יעד פריקה",
-        "מק'ט",
-        "תיאור החומר",
-        "כמות",
-        "יח'",
-        *pallet_headers,  # עמודות 8-9 (כשיש משטחים)
-        "דגש מיוחד ללקוח",
-    ]
-    PAL_COL = 9  # עמודת "מספר משטחים" בטבלת ההעמסה (I)
-
-    def pallet_vals(item: dict[str, Any]) -> list[Any]:
-        return [item.get("per_pallet"), item.get("pallets")] if has_pallets else []
-
-    wh_total_rows: list[int] = []
-    for wh_key, wh_name, wh_addr, wh_fill in warehouses_order:
-        wh_items = [r for r in driver_rows if r.get(f"is_{wh_key}", False)]
-        if not wh_items:
-            continue
-
-        ws.merge_cells(
-            start_row=curr_row,
-            start_column=1,
-            end_row=curr_row,
-            end_column=num_cols,
-        )
-        wh_cell = ws.cell(
-            curr_row,
-            1,
-            f'העמסה ב{wh_name}  |  כתובת: {wh_addr}  |  סה"כ שורות להעמסה: {len(wh_items)}',
-        )
-        wh_cell.font = wh_header_font
-        wh_cell.alignment = Alignment(horizontal="right", vertical="center")
-        for c in range(1, num_cols + 1):
-            ws.cell(curr_row, c).fill = wh_fill
-            ws.cell(curr_row, c).border = grid_border
-        ws.row_dimensions[curr_row].height = 22
-        curr_row += 1
-
-        for c_i, h_txt in enumerate(load_headers, start=1):
-            hc = ws.cell(curr_row, c_i, h_txt)
-            hc.font = tbl_header_font
-            hc.fill = tbl_header_fill
-            hc.border = grid_border
-            hc.alignment = Alignment(
-                horizontal="center", vertical="center", wrap_text=True
-            )
-        ws.row_dimensions[curr_row].height = 20
-        curr_row += 1
-
-        for item in wh_items:
-            vals = [
-                item["order_no"],
-                item["cust_name"],
-                item["dest"],
-                item["sku"],
-                item["prod_desc"],
-                item["qty"],
-                item["unit"],
-                *pallet_vals(item),
-                item.get("client_mark") or None,
-            ]
-            for c_i, v in enumerate(vals, start=1):
-                c = ws.cell(curr_row, c_i, v)
-                c.font = bold_font if c_i in (4, 6) else data_font
-                c.border = grid_border
-                if (c_i == 6 or (has_pallets and c_i in (8, 9))) and isinstance(v, (int, float)):
-                    c.number_format = "#,##0.##"
-                    c.alignment = Alignment(
-                        horizontal="center", vertical="center", wrap_text=True
-                    )
-                elif c_i in (1, 7):
-                    c.alignment = Alignment(
-                        horizontal="center", vertical="center", wrap_text=True
-                    )
-                else:
-                    c.alignment = Alignment(
-                        horizontal="right", vertical="center", wrap_text=True
-                    )
-            style_mark(ws.cell(curr_row, num_cols))
-            set_link(ws.cell(curr_row, 1), order_link(cfg, item["order_no"]))
-            set_link(ws.cell(curr_row, 2), customer_link(cfg, item.get("cust_no")))
-            ws.row_dimensions[curr_row].height = 20
-            curr_row += 1
-
-        # סיכום משקל להעמסה במחסן הזה
-        first_item_row = curr_row - len(wh_items)
-        wh_total_rows.append(curr_row)
-        ws.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=5)
-        tl = ws.cell(curr_row, 1, f'סה"כ משקל להעמסה ב{wh_name} (ק"ג)')
-        tl.alignment = Alignment(horizontal="left", vertical="center")
-        tv = ws.cell(curr_row, 6, f"=SUM(F{first_item_row}:F{curr_row - 1})")
-        tv.number_format = "#,##0.##"
-        tv.alignment = Alignment(horizontal="center", vertical="center")
-        if has_pallets:
-            # סה"כ משטחים להעמסה במחסן הזה (מתחת לעמודת מספר המשטחים)
-            pl = ws.cell(curr_row, PAL_COL - 1, 'סה"כ משטחים')
-            pl.alignment = Alignment(horizontal="center", vertical="center")
-            pv = ws.cell(curr_row, PAL_COL, f"=SUM(I{first_item_row}:I{curr_row - 1})")
-            pv.number_format = "#,##0.##"
-            pv.alignment = Alignment(horizontal="center", vertical="center")
-        for c in range(1, num_cols + 1):
-            cc = ws.cell(curr_row, c)
-            cc.font = bold_font
-            cc.fill = tbl_header_fill
-            cc.border = grid_border
-        ws.row_dimensions[curr_row].height = 20
-        curr_row += 2
-
-    # סיכום משקל כולל לכל ההעמסות
-    if wh_total_rows:
-        ws.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=5)
-        gl = ws.cell(curr_row, 1, 'סה"כ משקל להעמסה בכל המחסנים (ק"ג)')
-        gl.alignment = Alignment(horizontal="left", vertical="center")
-        gv = ws.cell(curr_row, 6, "=" + "+".join(f"F{r}" for r in wh_total_rows))
-        gv.number_format = "#,##0.##"
-        gv.alignment = Alignment(horizontal="center", vertical="center")
-        if has_pallets:
-            gpl = ws.cell(curr_row, PAL_COL - 1, 'סה"כ משטחים')
-            gpl.alignment = Alignment(horizontal="center", vertical="center")
-            gpv = ws.cell(curr_row, PAL_COL, "=" + "+".join(f"I{r}" for r in wh_total_rows))
-            gpv.number_format = "#,##0.##"
-            gpv.alignment = Alignment(horizontal="center", vertical="center")
-        for c in range(1, num_cols + 1):
-            cc = ws.cell(curr_row, c)
-            cc.font = Font(name=font_family, size=10, bold=True, color="FFFFFF")
-            cc.fill = title_fill
-            cc.border = box_border
-        ws.row_dimensions[curr_row].height = 22
-        curr_row += 2
-
-    # ==========================================================================
-    # 3. חלק ב': פירוט פריקת החומרים לפי סדר היעדים במסלול
+    # 2. פירוט פריקת החומרים לפי סדר היעדים במסלול
     # ==========================================================================
     ws.merge_cells(
         start_row=curr_row,
@@ -815,13 +655,32 @@ def create_single_driver_report(
     sec2_cell = ws.cell(
         curr_row,
         1,
-        "ב. פירוט יעדי פריקה לפי סדר הנסיעה במסלול (כתובת מדויקת וחומרים לפריקה בכל יעד)",
+        "פירוט יעדי פריקה לפי סדר הנסיעה במסלול (כתובת מדויקת וחומרים לפריקה בכל יעד)",
     )
     sec2_cell.font = sec_font
     for c in range(1, num_cols + 1):
         ws.cell(curr_row, c).fill = sec_fill
         ws.cell(curr_row, c).border = grid_border
     ws.row_dimensions[curr_row].height = 22
+    curr_row += 1
+
+    # מקרא צבעים: רק למחסנים שיש מהם מוצרים לנהג הזה
+    used_wh = [(name, fill) for flag, name, fill in wh_row_fills
+               if any(r.get(flag) for r in driver_rows)]
+    if used_wh:
+        lg = ws.cell(curr_row, 1, "מקרא צבעים:")
+        lg.font = bold_font
+        lg.alignment = Alignment(horizontal="right", vertical="center")
+        for i, (name, fill) in enumerate(used_wh, start=2):
+            if i > num_cols:
+                break
+            lc = ws.cell(curr_row, i, name)
+            lc.font = bold_font
+            lc.fill = fill
+            lc.border = grid_border
+            lc.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.row_dimensions[curr_row].height = 20
+        curr_row += 1
     curr_row += 1
 
     stops_grouped: list[tuple[tuple[int, str, str], list[dict[str, Any]]]] = []
@@ -834,15 +693,17 @@ def create_single_driver_report(
 
     unload_headers = [
         "הזמנה",
-        "מק'ט",
         "תיאור החומר",
         "כמות לפריקה",
-        "יח'",
-        *pallet_headers,  # עמודות 6-7 (כשיש משטחים)
+        *pallet_headers,  # עמודה 4 (כשיש משטחים)
         "מחסן העמסה",
-        "הערות למוצר / הערות לאספקה",
+        "הערות למוצר",
         "דגש מיוחד ללקוח",
     ]
+    QTY_COL = 3
+    PAL_COL = 4  # רק כשיש משטחים
+    total_weight = 0.0
+    total_pallets = 0.0
 
     for (stop_num, dest, cust_name), stop_items in stops_grouped:
         first_it = stop_items[0]
@@ -908,7 +769,7 @@ def create_single_driver_report(
             ws.cell(curr_row, c).border = grid_border
         set_link(sb_cell, cust_url)  # לחיצה על שורת התחנה פותחת את הלקוח
         # גובה שורת התחנה לפי אורך הטקסט (תא ממוזג לא מתאים גובה אוטומטית)
-        banner_width = 162.0 if has_pallets else 145.0  # סכום רוחבי העמודות
+        banner_width = 138.0 if has_pallets else 135.0  # סכום רוחבי העמודות
         chars_per_line = max(40, int(banner_width * 0.85))
         banner_lines = max(2, -(-len(stop_banner_text) // chars_per_line))
         ws.row_dimensions[curr_row].height = banner_lines * 16 + 8
@@ -928,29 +789,33 @@ def create_single_driver_report(
         for item in stop_items:
             vals = [
                 item["order_no"],
-                item["sku"],
                 item["prod_desc"],
                 item["qty"],
-                item["unit"],
                 *pallet_vals(item),
                 item["wh_short"],
                 item["combined_notes"],
                 item.get("client_mark") or None,
             ]
-            notes_col = 7 + len(pallet_headers)
+            if isinstance(item["qty"], (int, float)):
+                total_weight += item["qty"]
+            if isinstance(item.get("pallets"), (int, float)):
+                total_pallets += item["pallets"]
+            notes_col = 5 + len(pallet_headers)
+            fill = row_fill(item)
             for c_i, v in enumerate(vals, start=1):
                 c = ws.cell(curr_row, c_i, v)
-                c.font = bold_font if c_i in (2, 4, notes_col) else data_font
+                c.font = bold_font if c_i in (QTY_COL, notes_col) else data_font
                 if c_i == 1:
-                    c.border = grid_border
                     set_link(c, order_link(cfg, v))
                 c.border = grid_border
-                if (c_i == 4 or (has_pallets and c_i in (6, 7))) and isinstance(v, (int, float)):
+                if fill is not None:
+                    c.fill = fill
+                if (c_i == QTY_COL or (has_pallets and c_i == PAL_COL)) and isinstance(v, (int, float)):
                     c.number_format = "#,##0.##"
                     c.alignment = Alignment(
                         horizontal="center", vertical="center", wrap_text=True
                     )
-                elif c_i in (1, 5):
+                elif c_i == 1:
                     c.alignment = Alignment(
                         horizontal="center", vertical="center", wrap_text=True
                     )
@@ -964,8 +829,29 @@ def create_single_driver_report(
 
         curr_row += 1
 
+    # סיכום משקל של כל ההזמנות (לפני ההערות הקבועות)
+    ws.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=2)
+    tl = ws.cell(curr_row, 1, 'סה"כ משקל כל ההזמנות (ק"ג)')
+    tl.alignment = Alignment(horizontal="left", vertical="center")
+    tv = ws.cell(curr_row, QTY_COL, round(total_weight, 2))
+    tv.number_format = "#,##0.##"
+    tv.alignment = Alignment(horizontal="center", vertical="center")
+    if has_pallets:
+        pv = ws.cell(curr_row, PAL_COL, round(total_pallets, 2))
+        pv.number_format = "#,##0.##"
+        pv.alignment = Alignment(horizontal="center", vertical="center")
+        pl = ws.cell(curr_row, PAL_COL + 1, "משטחים")
+        pl.alignment = Alignment(horizontal="right", vertical="center")
+    for c in range(1, num_cols + 1):
+        cc = ws.cell(curr_row, c)
+        cc.font = Font(name=font_family, size=10, bold=True, color="FFFFFF")
+        cc.fill = title_fill
+        cc.border = box_border
+    ws.row_dimensions[curr_row].height = 22
+    curr_row += 2
+
     # ==========================================================================
-    # 4. חלק ג': הערות והנחיות חובה לנהג (ללא מספור וללא סימני קריאה)
+    # 3. הערות והנחיות חובה לנהג (ללא מספור וללא סימני קריאה)
     # ==========================================================================
     ws.merge_cells(
         start_row=curr_row,
@@ -1000,21 +886,9 @@ def create_single_driver_report(
         curr_row += 1
 
     # רוחבי עמודות קומפקטיים ומותאמים להדפסה על דף אחד
-    col_widths = {
-        1: 11.0,
-        2: 16.0,
-        3: 22.0,
-        4: 13.0,
-        5: 20.0,
-        6: 13.0,
-        7: 26.0,
-        8: 24.0,
-    }
+    col_widths = {1: 12.0, 2: 34.0, 3: 13.0, 4: 16.0, 5: 34.0, 6: 26.0}
     if has_pallets:
-        col_widths = {
-            1: 11.0, 2: 16.0, 3: 22.0, 4: 13.0, 5: 18.0,
-            6: 11.0, 7: 11.0, 8: 14.0, 9: 24.0, 10: 22.0,
-        }
+        col_widths = {1: 12.0, 2: 32.0, 3: 12.0, 4: 11.0, 5: 15.0, 6: 32.0, 7: 24.0}
     for col_i, w in col_widths.items():
         ws.column_dimensions[get_column_letter(col_i)].width = w
 
