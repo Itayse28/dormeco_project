@@ -569,13 +569,13 @@ def create_single_driver_report(
         start_color="E2EFDA", end_color="E2EFDA", fill_type="solid"
     )
 
-    tbl_header_font = Font(name=font_family, size=10, bold=True, color="1F4E78")
+    tbl_header_font = Font(name=font_family, size=12, bold=True, color="1F4E78")
     tbl_header_fill = PatternFill(
         start_color="EDEDED", end_color="EDEDED", fill_type="solid"
     )
 
-    data_font = Font(name=font_family, size=9, bold=False, color="000000")
-    bold_font = Font(name=font_family, size=9, bold=True, color="000000")
+    data_font = Font(name=font_family, size=12, bold=False, color="000000")
+    bold_font = Font(name=font_family, size=12, bold=True, color="000000")
 
     note_title_font = Font(name=font_family, size=10, bold=True, color="9C0006")
     note_font = Font(name=font_family, size=10, bold=True, color="9C0006")
@@ -604,6 +604,17 @@ def create_single_driver_report(
     pallet_headers = ["מספר משטחים"] if has_pallets else []
     num_cols = 7 + len(pallet_headers)
 
+    # רוחבי עמודות  ומותאמים להדפסה על דף אחד
+    col_widths = {1: 34.0, 2: 11.0, 3: 30.0, 4: 10.0, 5: 14.0, 6: 30.0, 7: 22.0}
+    if has_pallets:
+        col_widths = {1: 34.0, 2: 11.0, 3: 30.0, 4: 10.0, 5: 9.0, 6: 14.0,
+                      7: 30.0, 8: 22.0}
+
+    def text_lines(text: Any, col: int) -> int:
+        """כמה שורות יתפוס טקסט בעמודה (הערכה לפונט 12) - לחישוב גובה השורה."""
+        per_line = max(4, int(col_widths.get(col, 12.0) * 0.85))
+        return sum(max(1, -(-len(part) // per_line)) for part in str(text or "").split("\n"))
+
     def round_pallets(v: Any) -> Any:
         """מספר משטחים עם שבר (למשל 0.13) מעוגל למעלה למספר שלם (1)."""
         return math.ceil(v - 1e-9) if isinstance(v, (int, float)) else v
@@ -631,7 +642,7 @@ def create_single_driver_report(
                 return fill
         return None
     mark_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-    mark_font = Font(name=font_family, size=9, bold=True, color="9C0006")
+    mark_font = Font(name=font_family, size=12, bold=True, color="9C0006")
 
     def style_mark(cell: Any) -> None:
         if cell.value:
@@ -739,7 +750,7 @@ def create_single_driver_report(
             hc.alignment = Alignment(
                 horizontal="center", vertical="center", wrap_text=True
             )
-        ws.row_dimensions[curr_row].height = 32
+        ws.row_dimensions[curr_row].height = 36
         curr_row += 1
 
         first_item_row = curr_row
@@ -751,7 +762,7 @@ def create_single_driver_report(
             TextBlock(InlineFont(rFont=font_family, sz=12, b=True,
                                  color="0563C1" if cust_url else "000000",
                                  u="single" if cust_url else None), cust_name),
-            *([TextBlock(InlineFont(rFont=font_family, sz=9, color="000000"),
+            *([TextBlock(InlineFont(rFont=font_family, sz=12, color="000000"),
                          "\n" + rest_txt)] if rest_txt else []),
         )
         for item in stop_items:
@@ -797,7 +808,8 @@ def create_single_driver_report(
                         horizontal="right", vertical="center", wrap_text=True
                     )
             style_mark(ws.cell(curr_row, num_cols))
-            ws.row_dimensions[curr_row].height = 30
+            lines = max(text_lines(v, c_i) for c_i, v in enumerate(vals, start=1) if c_i > CUST_COLS)
+            ws.row_dimensions[curr_row].height = max(24, lines * 17 + 7)
             curr_row += 1
 
         if curr_row - 1 > first_item_row:
@@ -807,9 +819,12 @@ def create_single_driver_report(
                                end_row=curr_row - 1, end_column=c_i)
         # מספיק גובה לשלוש שורות פרטי הלקוח (גם בתחנה עם מוצר אחד או שניים)
         n_rows = curr_row - first_item_row
-        if n_rows * 30 < 60:
+        cust_need = 20 + 17 * (text_lines(rest_txt, 1) if rest_txt else 0) + 8
+        have = sum(ws.row_dimensions[r_i].height for r_i in range(first_item_row, curr_row))
+        if have < cust_need:
+            extra = (cust_need - have) / n_rows
             for r_i in range(first_item_row, curr_row):
-                ws.row_dimensions[r_i].height = 60 / n_rows
+                ws.row_dimensions[r_i].height += extra
 
         # סיכום משקל ומשטחים לתחנה הזאת
         ws.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=QTY_COL - 1)
@@ -845,7 +860,7 @@ def create_single_driver_report(
         pl.alignment = Alignment(horizontal="right", vertical="center")
     for c in range(1, num_cols + 1):
         cc = ws.cell(curr_row, c)
-        cc.font = Font(name=font_family, size=10, bold=True, color="FFFFFF")
+        cc.font = Font(name=font_family, size=12, bold=True, color="FFFFFF")
         cc.fill = title_fill
         cc.border = box_border
     ws.row_dimensions[curr_row].height = 22
@@ -886,11 +901,6 @@ def create_single_driver_report(
         ws.row_dimensions[curr_row].height = 20
         curr_row += 1
 
-    # רוחבי עמודות קומפקטיים ומותאמים להדפסה על דף אחד
-    col_widths = {1: 34.0, 2: 11.0, 3: 30.0, 4: 10.0, 5: 14.0, 6: 30.0, 7: 22.0}
-    if has_pallets:
-        col_widths = {1: 34.0, 2: 11.0, 3: 30.0, 4: 10.0, 5: 9.0, 6: 14.0,
-                      7: 30.0, 8: 22.0}
     for col_i, w in col_widths.items():
         ws.column_dimensions[get_column_letter(col_i)].width = w
 
