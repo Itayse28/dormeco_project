@@ -599,7 +599,7 @@ def create_single_driver_report(
         r.get("pallets") is not None or r.get("per_pallet") is not None for r in driver_rows
     )
     pallet_headers = ["מספר משטחים"] if has_pallets else []
-    num_cols = 6 + len(pallet_headers)
+    num_cols = 9 + len(pallet_headers)
 
     def pallet_vals(item: dict[str, Any]) -> list[Any]:
         return [item.get("pallets")] if has_pallets else []
@@ -692,16 +692,21 @@ def create_single_driver_report(
             stops_grouped[-1][1].append(r)
 
     unload_headers = [
+        "שם לקוח",
+        "כתובת מדויקת לפריקה",
+        "איש קשר + טלפון",
         "הזמנה",
         "תיאור החומר",
         "כמות לפריקה",
-        *pallet_headers,  # עמודה 4 (כשיש משטחים)
+        *pallet_headers,  # עמודה 7 (כשיש משטחים)
         "מחסן העמסה",
         "הערות למוצר",
         "דגש מיוחד ללקוח",
     ]
-    QTY_COL = 3
-    PAL_COL = 4  # רק כשיש משטחים
+    CUST_COLS = 3  # שם לקוח, כתובת, איש קשר - ממוזגים לאורך שורות התחנה
+    ORDER_COL = 4
+    QTY_COL = 6
+    PAL_COL = 7  # רק כשיש משטחים
     total_weight = 0.0
     total_pallets = 0.0
 
@@ -724,6 +729,14 @@ def create_single_driver_report(
             # הטלפון הכללי של הלקוח; אחרת שניהם.
             has_phone = any(ch.isdigit() for ch in contact)
             phone_txt = f"  |  איש קשר: {contact}" + ("" if has_phone else phone_txt)
+        # ערכי העמודות של הלקוח בטבלה
+        stop_address = first_it.get("chosen_address") or full_address
+        if contact:
+            stop_contact = contact if any(ch.isdigit() for ch in contact) else (
+                f"{contact} {first_it['phone']}".strip()
+            )
+        else:
+            stop_contact = first_it["phone"] or ""
         arr_txt = (
             f"  |  שעת הגעה משוערת: {first_it['arrival_str']}"
             if first_it["arrival_str"]
@@ -769,7 +782,7 @@ def create_single_driver_report(
             ws.cell(curr_row, c).border = grid_border
         set_link(sb_cell, cust_url)  # לחיצה על שורת התחנה פותחת את הלקוח
         # גובה שורת התחנה לפי אורך הטקסט (תא ממוזג לא מתאים גובה אוטומטית)
-        banner_width = 138.0 if has_pallets else 135.0  # סכום רוחבי העמודות
+        banner_width = 207.0 if has_pallets else 198.0  # סכום רוחבי העמודות
         chars_per_line = max(40, int(banner_width * 0.85))
         banner_lines = max(2, -(-len(stop_banner_text) // chars_per_line))
         ws.row_dimensions[curr_row].height = banner_lines * 16 + 8
@@ -786,8 +799,12 @@ def create_single_driver_report(
         ws.row_dimensions[curr_row].height = 20
         curr_row += 1
 
+        first_item_row = curr_row
         for item in stop_items:
             vals = [
+                cust_name,
+                stop_address,
+                stop_contact,
                 item["order_no"],
                 item["prod_desc"],
                 item["qty"],
@@ -800,22 +817,24 @@ def create_single_driver_report(
                 total_weight += item["qty"]
             if isinstance(item.get("pallets"), (int, float)):
                 total_pallets += item["pallets"]
-            notes_col = 5 + len(pallet_headers)
+            notes_col = 8 + len(pallet_headers)
             fill = row_fill(item)
             for c_i, v in enumerate(vals, start=1):
                 c = ws.cell(curr_row, c_i, v)
-                c.font = bold_font if c_i in (QTY_COL, notes_col) else data_font
-                if c_i == 1:
+                c.font = bold_font if c_i in (1, QTY_COL, notes_col) else data_font
+                if c_i == ORDER_COL:
                     set_link(c, order_link(cfg, v))
+                elif c_i == 1:
+                    set_link(c, cust_url)
                 c.border = grid_border
-                if fill is not None:
+                if fill is not None and c_i > CUST_COLS:
                     c.fill = fill
                 if (c_i == QTY_COL or (has_pallets and c_i == PAL_COL)) and isinstance(v, (int, float)):
                     c.number_format = "#,##0.##"
                     c.alignment = Alignment(
                         horizontal="center", vertical="center", wrap_text=True
                     )
-                elif c_i == 1:
+                elif c_i == ORDER_COL:
                     c.alignment = Alignment(
                         horizontal="center", vertical="center", wrap_text=True
                     )
@@ -824,13 +843,18 @@ def create_single_driver_report(
                         horizontal="right", vertical="center", wrap_text=True
                     )
             style_mark(ws.cell(curr_row, num_cols))
-            ws.row_dimensions[curr_row].height = 22
+            ws.row_dimensions[curr_row].height = 30
             curr_row += 1
 
+        if curr_row - 1 > first_item_row:
+            # פרטי הלקוח פעם אחת לכל התחנה (תא ממוזג לאורך שורות המוצרים)
+            for c_i in range(1, CUST_COLS + 1):
+                ws.merge_cells(start_row=first_item_row, start_column=c_i,
+                               end_row=curr_row - 1, end_column=c_i)
         curr_row += 1
 
     # סיכום משקל של כל ההזמנות (לפני ההערות הקבועות)
-    ws.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=2)
+    ws.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=QTY_COL - 1)
     tl = ws.cell(curr_row, 1, 'סה"כ משקל כל ההזמנות (ק"ג)')
     tl.alignment = Alignment(horizontal="left", vertical="center")
     tv = ws.cell(curr_row, QTY_COL, round(total_weight, 2))
@@ -886,9 +910,11 @@ def create_single_driver_report(
         curr_row += 1
 
     # רוחבי עמודות קומפקטיים ומותאמים להדפסה על דף אחד
-    col_widths = {1: 12.0, 2: 34.0, 3: 13.0, 4: 16.0, 5: 34.0, 6: 26.0}
+    col_widths = {1: 18.0, 2: 26.0, 3: 20.0, 4: 11.0, 5: 30.0, 6: 10.0,
+                  7: 14.0, 8: 30.0, 9: 22.0}
     if has_pallets:
-        col_widths = {1: 12.0, 2: 32.0, 3: 12.0, 4: 11.0, 5: 15.0, 6: 32.0, 7: 24.0}
+        col_widths = {1: 18.0, 2: 26.0, 3: 20.0, 4: 11.0, 5: 30.0, 6: 10.0,
+                      7: 9.0, 8: 14.0, 9: 30.0, 10: 22.0}
     for col_i, w in col_widths.items():
         ws.column_dimensions[get_column_letter(col_i)].width = w
 
