@@ -426,7 +426,10 @@ def remove_old_picking_lists(picking_dir: pathlib.Path, list_name: str) -> int:
             print(f"[!] לא ניתן למחוק קובץ ישן (אולי פתוח באקסל): {old.name} ({exc})")
     for sub in picking_dir.iterdir():
         if sub.is_dir() and not any(sub.iterdir()):
-            sub.rmdir()  # תת-תיקיית תאריך שהתרוקנה
+            try:
+                sub.rmdir()  # תת-תיקיית תאריך שהתרוקנה
+            except OSError:
+                pass  # תיקייה פתוחה בסייר / נעולה ע"י OneDrive - לא קריטי
     return removed
 
 

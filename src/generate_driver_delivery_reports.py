@@ -1284,7 +1284,10 @@ def main() -> None:
                 print(f"[!] לא ניתן למחוק דוח ישן (אולי פתוח באקסל): {old.name} ({exc})")
         for sub in reports_dir.iterdir():
             if sub.is_dir() and not any(sub.iterdir()):
-                sub.rmdir()  # תת-תיקיית תאריך שהתרוקנה
+                try:
+                    sub.rmdir()  # תת-תיקיית תאריך שהתרוקנה
+                except OSError:
+                    pass  # תיקייה פתוחה בסייר / נעולה ע"י OneDrive - לא קריטי
 
     print("=" * 75)
     print(f"[*] קובץ ממוין שנקרא:  {sorted_excel_path}")
