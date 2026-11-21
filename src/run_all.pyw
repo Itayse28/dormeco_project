@@ -6,7 +6,7 @@
 שלבים:
   1. sort_orders_by_region.py  - מיון + חלון עריכת המסלולים
      (אם הקבצים נוצרו מתוך החלון, שלבים 2 ו-3 כבר בוצעו ולא מורצים שוב)
-  2. generate_regional_picking_lists.py - רשימות ליקוט
+  2. generate_regional_picking_lists.py - דוחות העמסות
   3. generate_driver_delivery_reports.py - דוחות הובלה
 כל הפלט נשמר בקובץ logs\run_log.txt בתיקיית הפרויקט. שגיאה מוצגת בחלון הודעה.
 """
@@ -73,7 +73,7 @@ def main() -> int:
 
         rc = run_step("generate_regional_picking_lists.py", ["--no-open"], log)
         if rc not in (0, 4):
-            show_error(f"אירעה שגיאה ביצירת רשימות הליקוט.\nהפרטים בקובץ:\n{LOG}")
+            show_error(f"אירעה שגיאה ביצירת דוחות ההעמסות.\nהפרטים בקובץ:\n{LOG}")
             return 1
         picking_partial = rc == 4
 

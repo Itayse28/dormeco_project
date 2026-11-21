@@ -194,8 +194,8 @@ PRI_DOR_CODE =
 PRIORITY_SERVER_URL = https://pri.dormeco.co.il
 # כמה נהגים יוצגו במסך אחד בחלון העריכה (בלי לגלול)
 AMOUNT_OF_DRIVERS_ON_SCREEN = 10
-# כתובות מייל לשליחת רשימות הליקוט, לכל מחסן בנפרד (מופרדות בפסיק).
-# כל רשימת ליקוט נשלחת במייל נפרד לנמענים של המחסן שלה.
+# כתובות מייל לשליחת דוחות ההעמסות, לכל מחסן בנפרד (מופרדות בפסיק).
+# כל דוח העמסות נשלחת במייל נפרד לנמענים של המחסן שלה.
 SEND_PICKING_LIST_TO_OVERSEAS = 
 SEND_PICKING_LIST_TO_COOLING = 
 SEND_PICKING_LIST_TO_DANGEROUS = 
@@ -2579,8 +2579,8 @@ class RouteEditCancelled(Exception):
 # ==============================================================================
 # קבוצות מיוחדות: איסוף עצמי / ללא יעד (לא נכנסות למסלולי הנהגים)
 # ==============================================================================
-GROUP_PICKUP = "pickup"     # הלקוח אוסף בעצמו: רשימת ליקוט בלבד, בלי דוח הובלה
-GROUP_NO_DEST = "no_dest"   # לא נמצא מיקום (גם לא העיר): ליקוט + דוח הובלה נפרדים
+GROUP_PICKUP = "pickup"     # הלקוח אוסף בעצמו: דוח העמסות בלבד, בלי דוח הובלה
+GROUP_NO_DEST = "no_dest"   # לא נמצא מיקום (גם לא העיר): דוח העמסות + דוח הובלה נפרדים
 GROUP_LABELS = {GROUP_PICKUP: "איסוף עצמי", GROUP_NO_DEST: "ללא יעד"}
 # "נהג" מזויף שמסמן קבוצה ברשימת המסלולים שהחלון מחזיר
 GROUP_DRIVER = {GROUP_PICKUP: "__pickup__", GROUP_NO_DEST: "__no_dest__"}
@@ -3290,7 +3290,7 @@ def sort_orders_excel(
     for group, label in GROUP_LABELS.items():
         keys = [st["stop_key"] for st in all_stops if stop_group(st) == group]
         if keys:
-            print(f"[*] {label}: {len(keys)} עצירות (ריבוע נפרד בחלון, רשימת ליקוט נפרדת).")
+            print(f"[*] {label}: {len(keys)} עצירות (ריבוע נפרד בחלון, דוח העמסות נפרדת).")
             for k in keys:
                 st = unique_stops_by_key[k]
                 print(f"    - {st['cust_name']} | {st.get('chosen_address') or st['effective_dest']}")
@@ -3323,7 +3323,7 @@ def sort_orders_excel(
             )
             driver_label = f"נהג {who} ({reg_title})"
             if t.get("special"):
-                # "נהג איסוף עצמי" / "נהג ללא יעד" - רשימת ליקוט (ודוח הובלה) נפרדים
+                # "נהג איסוף עצמי" / "נהג ללא יעד" - דוח העמסות (ודוח הובלה) נפרדים
                 driver_label = f"נהג {GROUP_LABELS[t['special']]}"
             if multi_day and route_date:
                 # בדוח שבועי התאריך הוא חלק מהשם, כדי שכל מסלול יהיה ייחודי
@@ -3777,7 +3777,7 @@ def is_excluded_support_file(
         CLIENT_ADDRESSES_DEFAULT_FILE.lower(),
         "drivers.xlsx",
         "clients_marks.xlsx",
-        "package_sizes.xlsx",  # גודל אריזה לכל מק"ט (רשימות ליקוט)
+        "package_sizes.xlsx",  # גודל אריזה לכל מק"ט (דוחות העמסות)
         "gold_bond_gili.xlsx",
         "gold_bond.xlsx",
         "dangerous_products.xlsx",
@@ -3869,7 +3869,7 @@ def main() -> None:
     print(f"[*] קובץ הזמנות:  {input_path.name}")
     print("=" * 75)
 
-    # כל אישור בחלון העריכה מריץ מיד גם את רשימות הליקוט ודוחות ההובלה
+    # כל אישור בחלון העריכה מריץ מיד גם את דוחות ההעמסות ודוחות ההובלה
     downstream_runs = {"count": 0}
 
     def run_downstream(_drivers: list[dict[str, Any]]) -> None:
@@ -3912,7 +3912,7 @@ def main() -> None:
         rp_cfg = rp.load_config(cfg_path)
         rc = pk.recipients_by_warehouse(pk_cfg)
         dm = pk.date_folder_suffix(day)
-        pick_dir = out_dir / f"רשימות ליקוט {list_stem}" / f"רשימות ליקוט {dm}"
+        pick_dir = out_dir / f"דוחות העמסות {list_stem}" / f"דוחות העמסות {dm}"
         ship_dir = out_dir / f"דוחות הובלה {list_stem}" / f"דוחות הובלה {dm}"
         wh_suffixes = [
             (pk.GOLDBOND_FILE_SUFFIX, "goldbond", "Gold Bond Gili"),
@@ -3935,19 +3935,19 @@ def main() -> None:
 
         groups = [
             picking_group(
-                "overseas", f"רשימות ליקוט - {pk_cfg['MAIN_WAREHOUSE_NAME']}",
+                "overseas", f"דוחות העמסות - {pk_cfg['MAIN_WAREHOUSE_NAME']}",
                 "SEND_PICKING_LIST_TO_OVERSEAS", f"^(?!.*({any_suffix})$)",
             ),
             picking_group(
-                "cooling", f"רשימות ליקוט - {pk_cfg['COOLING_WAREHOUSE_NAME']}",
+                "cooling", f"דוחות העמסות - {pk_cfg['COOLING_WAREHOUSE_NAME']}",
                 "SEND_PICKING_LIST_TO_COOLING", re.escape(pk.COOLING_FILE_SUFFIX) + "$",
             ),
             picking_group(
-                "hazmat", f"רשימות ליקוט - {pk_cfg['HAZMAT_WAREHOUSE_NAME']}",
+                "hazmat", f"דוחות העמסות - {pk_cfg['HAZMAT_WAREHOUSE_NAME']}",
                 "SEND_PICKING_LIST_TO_DANGEROUS", re.escape(pk.HAZMAT_FILE_SUFFIX) + "$",
             ),
             picking_group(
-                "goldbond", f"רשימות ליקוט - {pk_cfg['GOLDBOND_WAREHOUSE_NAME']}",
+                "goldbond", f"דוחות העמסות - {pk_cfg['GOLDBOND_WAREHOUSE_NAME']}",
                 "SEND_PICKING_LIST_TO_GOLDBOND_GILI", re.escape(pk.GOLDBOND_FILE_SUFFIX) + "$",
             ),
             {
@@ -4015,7 +4015,7 @@ def main() -> None:
         dest.mkdir(parents=True, exist_ok=True)
         shutil.copy2(output_path, dest / output_path.name)
         for folder in (
-            out_dir / f"רשימות ליקוט {list_stem}",
+            out_dir / f"דוחות העמסות {list_stem}",
             out_dir / f"דוחות הובלה {list_stem}",
         ):
             if folder.exists():
@@ -4060,8 +4060,8 @@ def main() -> None:
         )
 
     if downstream_runs["count"] > 0:
-        # רשימות הליקוט ודוחות ההובלה כבר נוצרו מתוך החלון - run_all.bat לא יריץ אותם שוב
-        print("\n[V] רשימות הליקוט ודוחות ההובלה נוצרו מתוך חלון העריכה.")
+        # דוחות ההעמסות ודוחות ההובלה כבר נוצרו מתוך החלון - run_all.bat לא יריץ אותם שוב
+        print("\n[V] דוחות ההעמסות ודוחות ההובלה נוצרו מתוך חלון העריכה.")
         sys.exit(3)
 
     if cfg.get("AUTO_OPEN_OUTPUT_FOLDER", True) and not args.no_open:

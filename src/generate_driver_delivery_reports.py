@@ -988,7 +988,7 @@ def generate_driver_reports_from_sorted_excel(
         )
         driver_num = extract_driver_number(driver_label)
         if driver_num == PICKUP_GROUP_NAME:
-            continue  # איסוף עצמי: רק רשימת ליקוט, בלי דוח הובלה
+            continue  # איסוף עצמי: רק דוח העמסות, בלי דוח הובלה
         route_date_val = (
             str(row_vals[idx_route_date] or "").strip()
             if 0 <= idx_route_date < len(row_vals)
@@ -1165,7 +1165,7 @@ def is_excluded_support_file(p: pathlib.Path, cfg: dict[str, Any]) -> bool:
         CONFIG_FILE_NAME.lower(),
         "drivers.xlsx",
         "clients_marks.xlsx",
-        "package_sizes.xlsx",  # גודל אריזה לכל מק"ט (רשימות ליקוט)
+        "package_sizes.xlsx",  # גודל אריזה לכל מק"ט (דוחות העמסות)
         "clients_with_correct_adresses.xlsx",
         "gold_bond_gili.xlsx",
         "gold_bond.xlsx",

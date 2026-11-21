@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-מערכת ייצור רשימות ליקוט לפי נהגים ו-4 מחסנים באשדוד (דורמקו)
+מערכת ייצור דוחות העמסות לפי נהגים ו-4 מחסנים באשדוד (דורמקו)
 ==============================================================
 - קורא את הקובץ הממוין (<ListName>_sorted.xlsx) מתיקיית output_files.
-- מפצל את רשימות הליקוט גם לפי נהג (Driver_1, Driver_2...) וגם לפי מחסן העמסה:
-  1. אוברסיז:       "רשימת ליקוט עבור <נהג> <תאריך>.xlsx"
-  2. מחסן קירור:    "רשימת ליקוט עבור <נהג> <תאריך> - קירור.xlsx"
-  3. מחסן חומ"ס:    "רשימת ליקוט עבור <נהג> <תאריך> - חומס.xlsx"
-  4. גולד בונד גילי: "רשימת ליקוט עבור <נהג> <תאריך> - גולד בונד גילי.xlsx"
+- מפצל את דוחות ההעמסות גם לפי נהג (Driver_1, Driver_2...) וגם לפי מחסן העמסה:
+  1. אוברסיז:       "דוח העמסות עבור <נהג> <תאריך>.xlsx"
+  2. מחסן קירור:    "דוח העמסות עבור <נהג> <תאריך> - קירור.xlsx"
+  3. מחסן חומ"ס:    "דוח העמסות עבור <נהג> <תאריך> - חומס.xlsx"
+  4. גולד בונד גילי: "דוח העמסות עבור <נהג> <תאריך> - גולד בונד גילי.xlsx"
   שורה 1 בכל קובץ: "העמסות ב<מחסן> לנהג <נהג> - <תאריך>"
 - כל הטקסט בתוך כל המשבצות מיושר למרכז המשבצת (horizontal="center", vertical="center").
-- כל הקבצים נשמרים בתיקייה: output_files\רשימות ליקוט <ListName>\
-- הרשימות מסודרות בתתי-תיקיות לפי תאריך: "רשימות ליקוט 2.11" וכו'.
-- בכל תת-תיקייה נוצר הקובץ "שליחת רשימות ליקוט במייל.bat" - לחיצה כפולה
-  עליו שולחת כל רשימת ליקוט של אותה תת-תיקייה במייל נפרד (דרך Outlook,
-  בנושא "דוח ליקוט עבור נהג X <תאריך>") לנמענים של המחסן שלה:
+- כל הקבצים נשמרים בתיקייה: output_files\דוחות העמסות <ListName>\
+- הרשימות מסודרות בתתי-תיקיות לפי תאריך: "דוחות העמסות 2.11" וכו'.
+- בכל תת-תיקייה נוצר הקובץ "שליחת דוחות העמסות במייל.bat" - לחיצה כפולה
+  עליו שולחת כל דוח העמסות של אותה תת-תיקייה במייל נפרד (דרך Outlook,
+  בנושא "דוח העמסות עבור נהג X <תאריך>") לנמענים של המחסן שלה:
   SEND_PICKING_LIST_TO_OVERSEAS / _COOLING / _DANGEROUS / _GOLDBOND_GILI
 - לפני יצירת הרשימות נמחקות רשימות ישנות של אותה רשימה מהרצה קודמת,
   כדי שלא יישלחו במייל בטעות.
@@ -339,10 +339,10 @@ def load_picking_config(
 
 
 # ==============================================================================
-# שליחת רשימות הליקוט במייל (Outlook) בלחיצה כפולה
+# שליחת דוחות ההעמסות במייל (Outlook) בלחיצה כפולה
 # ==============================================================================
-MAIL_LAUNCHER_NAME = "שליחת רשימות ליקוט במייל.bat"
-MAIL_SUBJECT_PREFIX = "דוח ליקוט עבור "  # + "נהג <שם> <תאריך>"
+MAIL_LAUNCHER_NAME = "שליחת דוחות העמסות במייל.bat"
+MAIL_SUBJECT_PREFIX = "דוח העמסות עבור "  # + "נהג <שם> <תאריך>"
 MAIL_ATTACH_EXTENSIONS = (".xlsx", ".xls", ".pdf")
 
 
@@ -408,8 +408,8 @@ def create_send_mail_launcher(
     picking_dir: pathlib.Path, cfg: dict[str, Any]
 ) -> pathlib.Path | None:
     """
-    יוצר בתיקייה קובץ bat ששולח כל רשימת ליקוט במייל נפרד (דרך Outlook)
-    לנמענים של המחסן שלה. נושא המייל: "דוח ליקוט עבור נהג <שם> <תאריך>".
+    יוצר בתיקייה קובץ bat ששולח כל דוח העמסות במייל נפרד (דרך Outlook)
+    לנמענים של המחסן שלה. נושא המייל: "דוח העמסות עבור נהג <שם> <תאריך>".
     """
     if mail_sender is None:
         print("[!] הקובץ mail_sender.py חסר בתיקיית הפרויקט - קובץ השליחה במייל לא נוצר.")
@@ -418,7 +418,7 @@ def create_send_mail_launcher(
     return mail_sender.create_launcher(
         folder=picking_dir,
         launcher_name=MAIL_LAUNCHER_NAME,
-        title="שליחת רשימות ליקוט במייל",
+        title="שליחת דוחות העמסות במייל",
         default_to=rcpt["overseas"],
         default_name="Overseas",
         rules=[
@@ -431,7 +431,11 @@ def create_send_mail_launcher(
     )
 
 
-PICKING_FILE_PREFIX = "רשימת ליקוט עבור "
+PICKING_FILE_PREFIX = "דוח העמסות עבור "
+# השמות הקודמים ("רשימת ליקוט") - כדי למחוק קבצים ישנים שנוצרו לפני שינוי השם
+LEGACY_PICKING_FILE_PREFIX = "רשימת ליקוט עבור "
+LEGACY_MAIL_LAUNCHER_NAME = "שליחת רשימות ליקוט במייל.bat"
+LEGACY_PICKING_DIR_PREFIX = "רשימות ליקוט "
 
 
 def date_dots(d: Any) -> str:
@@ -452,7 +456,7 @@ def date_folder_suffix(d: Any) -> str:
 
 def remove_old_picking_lists(picking_dir: pathlib.Path, list_name: str) -> int:
     """
-    מוחק רשימות ליקוט וקובצי שליחה מהרצה קודמת (גם בתתי-התיקיות של התאריכים),
+    מוחק דוחות העמסות וקובצי שליחה מהרצה קודמת (גם בתתי-התיקיות של התאריכים),
     כדי שלא יישלחו בטעות.
     """
     removed = 0
@@ -462,6 +466,8 @@ def remove_old_picking_lists(picking_dir: pathlib.Path, list_name: str) -> int:
         list(picking_dir.rglob(f"{list_name}_Driver_*.xlsx"))
         + list(picking_dir.rglob(f"{PICKING_FILE_PREFIX}*.xlsx"))
         + list(picking_dir.rglob(MAIL_LAUNCHER_NAME))
+        + list(picking_dir.rglob(f"{LEGACY_PICKING_FILE_PREFIX}*.xlsx"))
+        + list(picking_dir.rglob(LEGACY_MAIL_LAUNCHER_NAME))
     )
     for old in old_files:
         try:
@@ -650,7 +656,7 @@ def create_single_picking_excel(
     cust_no_by_order: dict[str, Any] | None = None,
 ) -> None:
     """
-    מייצר קובץ ליקוט מעוצב:
+    מייצר דוח העמסות מעוצב:
     - שורה 1: "העמסות ב{warehouse_hebrew_name} לנהג {driver_num}"
     - שורה 2: כותרות הטבלה (הזמנה | שם לקוח | מק'ט | תאור מוצר | כמות | אריזות | הערות)
       אריזות = כמות / גודל האריזה של המק"ט (package_sizes.xlsx)
@@ -1000,7 +1006,7 @@ def generate_picking_lists_from_sorted_excel(
 
             base_name = f"{PICKING_FILE_PREFIX}{who}" + (f" {when}" if when else "")
             out_filename = re.sub(r'[\\/:*?"<>|]+', " ", f"{base_name}{file_suffix}") + ".xlsx"
-            day_dir = picking_dir / f"רשימות ליקוט {date_folder_suffix(date_val)}"
+            day_dir = picking_dir / f"דוחות העמסות {date_folder_suffix(date_val)}"
             day_dir.mkdir(parents=True, exist_ok=True)
             out_file = day_dir / out_filename
             sheet_title = re.sub(r"[\[\]:*?/\\]", " ", f"{who} - {wh_heb_name}")
@@ -1136,7 +1142,7 @@ def resolve_base_list_name_and_sorted_file(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="ייצור רשימות ליקוט לפי נהגים ו-4 מחסנים - דורמקו"
+        description="ייצור דוחות העמסות לפי נהגים ו-4 מחסנים - דורמקו"
     )
     parser.add_argument(
         "input_pos", nargs="?", default=None, help="נתיב לקובץ אקסל"
@@ -1159,16 +1165,24 @@ def main() -> None:
     )
 
     out_dir: pathlib.Path = cfg["OUTPUT_DIR_PATH"]
-    picking_dir = out_dir / f"רשימות ליקוט {list_name}"
+    picking_dir = out_dir / f"דוחות העמסות {list_name}"
 
     print("=" * 75)
     print(f"[*] קובץ ממוין שנקרא:  {sorted_excel_path}")
-    print(f"[*] תיקיית רשימות ליקוט: {picking_dir}")
+    print(f"[*] תיקיית דוחות העמסות: {picking_dir}")
     print("=" * 75)
 
     removed = remove_old_picking_lists(picking_dir, list_name)
+    # התיקייה מלפני שינוי השם ("רשימות ליקוט <רשימה>") - מוחקים את הקבצים הישנים שבה
+    legacy_dir = out_dir / f"{LEGACY_PICKING_DIR_PREFIX}{list_name}"
+    if legacy_dir.exists():
+        removed += remove_old_picking_lists(legacy_dir, list_name)
+        try:
+            legacy_dir.rmdir()
+        except OSError:
+            pass  # נשארו בה קבצים אחרים / פתוחה בסייר
     if removed:
-        print(f"[*] נמחקו {removed} רשימות ליקוט ישנות מהרצה קודמת.")
+        print(f"[*] נמחקו {removed} דוחות העמסות ישנות מהרצה קודמת.")
 
     created = generate_picking_lists_from_sorted_excel(
         sorted_excel_path=sorted_excel_path,
@@ -1177,7 +1191,7 @@ def main() -> None:
         cfg=cfg,
     )
 
-    print(f"\n[V] נוצרו {len(created)} קבצי ליקוט (לפי נהג ומחסן):")
+    print(f"\n[V] נוצרו {len(created)} דוחות העמסות (לפי נהג ומחסן):")
     for label, f_path, count, weight in created:
         print(
             f"  - {label}: {f_path.name} ({count} שורות, {weight:,.0f} ק\"ג)"
@@ -1190,7 +1204,7 @@ def main() -> None:
         print(f"\n[V] נוצר קובץ שליחה במייל ({MAIL_LAUNCHER_NAME}) בכל תיקיית תאריך:")
         for d in day_dirs:
             print(f"      - {d.name}")
-        print('    כל רשימה נשלחת במייל נפרד, בנושא "דוח ליקוט עבור נהג X <תאריך>". נמענים לפי מחסן:')
+        print('    כל דוח נשלח במייל נפרד, בנושא "דוח העמסות עבור נהג X <תאריך>". נמענים לפי מחסן:')
         wh_titles = {
             "overseas": cfg["MAIN_WAREHOUSE_NAME"],
             "cooling": cfg["COOLING_WAREHOUSE_NAME"],
