@@ -21,7 +21,7 @@ CLIENT_ADDRESSES_FILE_NAME = Clients_With_Correct_Adresses.xlsx
 MAIN_WAREHOUSE_LOAD_MINUTES = 60
 # זמן העמסה במחסן קירור (מבוא הספנים 6 אשדוד) - ברירת מחדל: 30 דקות
 COOLING_WAREHOUSE_LOAD_MINUTES = 30
-# זמן העמסה במחסן חומ"ס (פארק נמלי ישראל, אשדוד) - ברירת מחדל: 30 דקות
+# זמן העמסה במחסן פרידנזון חומ"ס (פארק נמלי ישראל, אשדוד) - ברירת מחדל: 30 דקות
 HAZMAT_WAREHOUSE_LOAD_MINUTES = 30
 # זמן העמסה במחסן גולד בונד (הקידמה 1 אשדוד) - ברירת מחדל: 30 דקות
 GOLDBOND_WAREHOUSE_LOAD_MINUTES = 30
@@ -65,7 +65,7 @@ PREFER_SITE_NAME_CITY = false
 AUTO_OPEN_OUTPUT_FOLDER = true
 
 
-# --- 7. הוספת מק"טים ידנית לקירור, חומ"ס או גולד בונד (אופציונלי, מופרדים בפסיק) ---
+# --- 7. הוספת מק"טים ידנית לקירור, פרידנזון חומ"ס או גולד בונד (אופציונלי, מופרדים בפסיק) ---
 EXTRA_COOLING_SKUS = 
 EXTRA_HAZMAT_SKUS = 
 EXTRA_GOLDBOND_SKUS =

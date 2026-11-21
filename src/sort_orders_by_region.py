@@ -7,7 +7,7 @@
 - סיווג מוצרים אוטומטי ל-4 מחסנים באשדוד לפי מק"ט:
   1. אוברסיז (מבוא הספנים 1 אשדוד) - העמסה של 60 דקות כברירת מחדל
   2. מחסן קירור (מבוא הספנים 6 אשדוד) - מק"טים מ-Cooling_products.xlsx (30 דקות כברירת מחדל)
-  3. מחסן חומ"ס (פארק נמלי ישראל, אשדוד) - מק"טים מ-dangerous_products.xlsx (30 דקות כברירת מחדל)
+  3. פרידנזון חומ"ס (פארק נמלי ישראל, אשדוד) - מק"טים מ-dangerous_products.xlsx (30 דקות כברירת מחדל)
   4. גולד בונד גילי (הקידמה 1 אשדוד) - מק"טים מ-Gold_bond_gili.xlsx (30 דקות כברירת מחדל)
 - תאריך אספקה מוצג תמיד בפורמט DD-MM-YYYY (למשל 02-11-2026).
 - גיליון "סיכום מסלולי נהגים ומשאיות" מותאם בדיוק לתצוגת מסך קומפקטית (5 עמודות: A עד E).
@@ -171,7 +171,7 @@ COOLING_WAREHOUSE_ADDRESS = מבוא הספנים 6 אשדוד
 COOLING_WAREHOUSE_LAT = 31.8322
 COOLING_WAREHOUSE_LON = 34.6482
 
-HAZMAT_WAREHOUSE_NAME = מחסן חומ"ס
+HAZMAT_WAREHOUSE_NAME = פרידנזון חומ"ס
 HAZMAT_WAREHOUSE_ADDRESS = פארק נמלי ישראל, אשדוד
 HAZMAT_WAREHOUSE_LAT = 31.8245
 HAZMAT_WAREHOUSE_LON = 34.6610
@@ -377,7 +377,7 @@ def load_or_create_config(
             float(raw_kv.get("COOLING_WAREHOUSE_LON", "34.6482") or 34.6482),
         ),
         "HAZMAT_WAREHOUSE_NAME": raw_kv.get(
-            "HAZMAT_WAREHOUSE_NAME", 'מחסן חומ"ס'
+            "HAZMAT_WAREHOUSE_NAME", 'פרידנזון חומ"ס'
         ),
         "HAZMAT_WAREHOUSE_ADDRESS": raw_kv.get(
             "HAZMAT_WAREHOUSE_ADDRESS", "פארק נמלי ישראל, אשדוד"

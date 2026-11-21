@@ -89,7 +89,13 @@ def _read_pdf(path: pathlib.Path) -> list[dict[str, Any]]:
 
 
 def _read_excel(path: pathlib.Path) -> list[dict[str, Any]]:
-    ws = openpyxl.load_workbook(path, data_only=True).active
+    try:
+        ws = openpyxl.load_workbook(path, data_only=True).active
+    except TypeError:
+        # קובץ אקסל מפריוריטי עם עיצוב שמשבש את openpyxl - אותו תיקון כמו בקובץ ההזמנות
+        from sort_orders_by_region import load_workbook_safe
+
+        ws = load_workbook_safe(path).active
     header_row, idx = None, {}
     for r in range(1, min(ws.max_row, 15) + 1):
         names = [str(ws.cell(r, c).value or "").replace("\n", " ").strip()

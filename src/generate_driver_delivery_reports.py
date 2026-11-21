@@ -243,7 +243,7 @@ def load_config(custom_config_path: pathlib.Path | None = None) -> dict[str, Any
             "COOLING_WAREHOUSE_ADDRESS", "מבוא הספנים 6 אשדוד"
         ),
         "HAZMAT_WAREHOUSE_NAME": raw_kv.get(
-            "HAZMAT_WAREHOUSE_NAME", 'מחסן חומ"ס'
+            "HAZMAT_WAREHOUSE_NAME", 'פרידנזון חומ"ס'
         ),
         "HAZMAT_WAREHOUSE_ADDRESS": raw_kv.get(
             "HAZMAT_WAREHOUSE_ADDRESS", "פארק נמלי ישראל, אשדוד"

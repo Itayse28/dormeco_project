@@ -1397,7 +1397,7 @@ class RouteEditor:
             for flag, name_key, default in (
                 ("needs_main", "MAIN_WAREHOUSE_NAME", "אוברסיז"),
                 ("needs_cooling", "COOLING_WAREHOUSE_NAME", "מחסן קירור"),
-                ("needs_hazmat", "HAZMAT_WAREHOUSE_NAME", 'מחסן חומ"ס'),
+                ("needs_hazmat", "HAZMAT_WAREHOUSE_NAME", 'פרידנזון חומ"ס'),
                 ("needs_goldbond", "GOLDBOND_WAREHOUSE_NAME", "גולד בונד גילי"),
             )
             if st.get(flag)

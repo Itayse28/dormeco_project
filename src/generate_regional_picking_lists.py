@@ -6,7 +6,7 @@
 - מפצל את דוחות ההעמסות גם לפי נהג (Driver_1, Driver_2...) וגם לפי מחסן העמסה:
   1. אוברסיז:       "דוח העמסות עבור <נהג> <תאריך>.xlsx"
   2. מחסן קירור:    "דוח העמסות עבור <נהג> <תאריך> - קירור.xlsx"
-  3. מחסן חומ"ס:    "דוח העמסות עבור <נהג> <תאריך> - חומס.xlsx"
+  3. פרידנזון חומ"ס:    "דוח העמסות עבור <נהג> <תאריך> - פרידנזון חומס.xlsx"
   4. גולד בונד גילי: "דוח העמסות עבור <נהג> <תאריך> - גולד בונד גילי.xlsx"
   שורה 1 בכל קובץ: "העמסות ב<מחסן> לנהג <נהג> - <תאריך>"
 - כל הטקסט בתוך כל המשבצות מיושר למרכז המשבצת (horizontal="center", vertical="center").
@@ -309,7 +309,7 @@ def load_picking_config(
             "COOLING_WAREHOUSE_NAME", "מחסן קירור"
         ),
         "HAZMAT_WAREHOUSE_NAME": raw_kv.get(
-            "HAZMAT_WAREHOUSE_NAME", 'מחסן חומ"ס'
+            "HAZMAT_WAREHOUSE_NAME", 'פרידנזון חומ"ס'
         ),
         "GOLDBOND_WAREHOUSE_NAME": raw_kv.get(
             "GOLDBOND_WAREHOUSE_NAME", "גולד בונד גילי"
@@ -376,7 +376,7 @@ def _ps_quote(value: str) -> str:
 
 # סיומות שמות הקבצים לפי מחסן (אוברסיז = בלי סיומת)
 COOLING_FILE_SUFFIX = " - קירור"
-HAZMAT_FILE_SUFFIX = " - חומס"
+HAZMAT_FILE_SUFFIX = " - פרידנזון חומס"
 GOLDBOND_FILE_SUFFIX = " - גולד בונד גילי"
 
 
