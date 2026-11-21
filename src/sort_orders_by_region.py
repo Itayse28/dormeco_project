@@ -3777,6 +3777,7 @@ def is_excluded_support_file(
         CLIENT_ADDRESSES_DEFAULT_FILE.lower(),
         "drivers.xlsx",
         "clients_marks.xlsx",
+        "package_sizes.xlsx",  # גודל אריזה לכל מק"ט (רשימות ליקוט)
         "gold_bond_gili.xlsx",
         "gold_bond.xlsx",
         "dangerous_products.xlsx",

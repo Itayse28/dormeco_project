@@ -146,6 +146,51 @@ PICKING_HEADERS: list[str] = [
     "דגש מיוחד ללקוח",
 ]
 
+# טבלת גודל אריזה לכל מק"ט (input_files/package_sizes.xlsx): אריזות = כמות / גודל
+PACKAGE_SIZES_FILE_NAME = "package_sizes.xlsx"
+
+
+def load_package_sizes(cfg: dict[str, Any]) -> dict[str, float]:
+    """{מק"ט: גודל אריזה}. עמודת המק"ט ועמודת הגודל מזוהות לפי הכותרות."""
+    path = pathlib.Path(cfg["INPUT_DIR_PATH"]) / cfg.get(
+        "PACKAGE_SIZES_FILE_NAME", PACKAGE_SIZES_FILE_NAME
+    )
+    sizes: dict[str, float] = {}
+    if not path.exists():
+        print(f"[*] קובץ גודל האריזות לא נמצא ({path.name}) - עמודת האריזות תישאר ריקה.")
+        return sizes
+    try:
+        ws = load_workbook_safe(path).active
+    except Exception as exc:  # noqa: BLE001
+        print(f"[!] לא ניתן לקרוא את {path.name}: {exc}")
+        return sizes
+    headers = [str(c.value or "").strip() for c in ws[1]]
+    i_sku = next((i for i, h in enumerate(headers) if "מק" in h or "SKU" in h.upper()), 0)
+    i_size = next(
+        (i for i, h in enumerate(headers) if "אריזה" in h or "גודל" in h), len(headers) - 1
+    )
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        sku = clean_sku_token(row[i_sku] if i_sku < len(row) else None)
+        raw = row[i_size] if i_size < len(row) else None
+        try:
+            size = float(str(raw).replace(",", "").strip()) if raw not in (None, "") else 0.0
+        except ValueError:
+            size = 0.0
+        if sku and size > 0:
+            sizes[sku] = size
+    print(f"[*] נטענו גדלי אריזה ל-{len(sizes)} מק\"טים מ-{path.name}")
+    return sizes
+
+
+def packages_count(qty: Any, sku: str, sizes: dict[str, float]) -> float | int | None:
+    """מספר האריזות: כמות / גודל האריזה של המק"ט (None אם הגודל לא ידוע)."""
+    size = sizes.get(sku)
+    if not size or not isinstance(qty, (int, float)):
+        return None
+    n = round(qty / size, 2)
+    return int(n) if n == int(n) else n
+
+
 DEFAULT_COOLING_SKUS: set[str] = {
     "BANKBIOPRO10L25",
     "CCCPPP0000",
@@ -608,6 +653,7 @@ def create_single_picking_excel(
     מייצר קובץ ליקוט מעוצב:
     - שורה 1: "העמסות ב{warehouse_hebrew_name} לנהג {driver_num}"
     - שורה 2: כותרות הטבלה (הזמנה | שם לקוח | מק'ט | תאור מוצר | כמות | אריזות | הערות)
+      אריזות = כמות / גודל האריזה של המק"ט (package_sizes.xlsx)
     - שורה 3 והלאה: נתוני ההזמנות של אותו נהג ואותו מחסן, כשכל המשבצות ממורכזות.
     """
     wb = openpyxl.Workbook()
@@ -684,7 +730,7 @@ def create_single_picking_excel(
             cell.fill = row_fill
             cell.border = data_border
             cell.alignment = center_align
-            if col_idx == 5 and isinstance(val, (int, float)):
+            if col_idx in (5, 6) and isinstance(val, (int, float)):
                 cell.number_format = "#,##0.##"
             if col_idx == 8 and val:
                 # דגש מיוחד ללקוח - ממורקר באדום חלש
@@ -706,9 +752,10 @@ def create_single_picking_excel(
     # שורת סיכום תחתונה (ממורכזת)
     last_data_row = len(rows_data) + 2
     total_row_idx = last_data_row + 1
-    ws.cell(total_row_idx, 1, 'סה"כ שורות ליקוט').font = bold_font
-    ws.cell(total_row_idx, 3, f"=COUNTA(C3:C{last_data_row})")
+    ws.cell(total_row_idx, 1, 'סה"כ').font = bold_font
     ws.cell(total_row_idx, 5, f"=SUM(E3:E{last_data_row})")
+    if any(isinstance(r[5], (int, float)) for r in rows_data if len(r) > 5):
+        ws.cell(total_row_idx, 6, f"=SUM(F3:F{last_data_row})")
 
     for c in range(1, num_cols + 1):
         cell = ws.cell(total_row_idx, c)
@@ -716,10 +763,8 @@ def create_single_picking_excel(
         cell.fill = total_fill
         cell.border = total_border
         cell.alignment = center_align
-        if c == 5:
+        if c in (5, 6):
             cell.number_format = "#,##0.##"
-        elif c == 3:
-            cell.number_format = "#,##0"
     ws.row_dimensions[total_row_idx].height = 24
     ws.freeze_panes = "A3"
 
@@ -823,6 +868,7 @@ def generate_picking_lists_from_sorted_excel(
     cust_no_by_order: dict[str, Any] = {}
 
     cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
+    package_sizes = load_package_sizes(cfg)
 
     # מפתח = התווית המלאה של המסלול (ייחודית לכל נהג/סבב/יום)
     drivers_meta: dict[str, tuple[str, str, str, str, str]] = {}
@@ -910,7 +956,7 @@ def generate_picking_lists_from_sorted_excel(
             row_vals[idx_sku] if idx_sku < len(row_vals) else None,
             row_vals[idx_prod_desc] if idx_prod_desc < len(row_vals) else None,
             qty_val,
-            row_vals[idx_unit] if idx_unit < len(row_vals) else None,
+            packages_count(qty_val, sku_val, package_sizes),
             combined_notes if combined_notes else None,
             (
                 str(row_vals[idx_mark] or "").strip() or None
@@ -1009,6 +1055,7 @@ def is_excluded_support_file(p: pathlib.Path, cfg: dict[str, Any]) -> bool:
         "drivers.xlsx",
         "clients_marks.xlsx",
         "clients_with_correct_adresses.xlsx",
+        PACKAGE_SIZES_FILE_NAME.lower(),
         "gold_bond_gili.xlsx",
         "gold_bond.xlsx",
         "dangerous_products.xlsx",
