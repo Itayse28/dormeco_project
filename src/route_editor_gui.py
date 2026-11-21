@@ -1375,11 +1375,21 @@ class RouteEditor:
         )
         if not ok:
             return
+        preview = messagebox.askyesno(
+            "שליחת מיילים",
+            "האם להציג מיילים לפני שליחה?\n\n"
+            "כן - כל מייל ייפתח ב-Outlook לעריכה, ואתה לוחץ \"שלח\" בעצמך.\n"
+            "לא - כל המיילים יישלחו מיד.",
+            default=messagebox.NO,
+            parent=self.root,
+        )
         self.root.configure(cursor="watch")
         self.root.update()
         try:
             summary = (
-                self.send_mails(day, group_key) if group_key else self.send_mails(day)
+                self.send_mails(day, group_key, preview=preview)
+                if group_key
+                else self.send_mails(day, preview=preview)
             )
         except Exception as exc:  # noqa: BLE001
             summary = f"השליחה נכשלה: {exc}"

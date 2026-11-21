@@ -8,6 +8,8 @@
   בתיקייה במייל נפרד דרך Outlook (הגרסה הקלאסית), לנמענים לפי סיומת שם הקובץ.
 - run_launcher: מריץ את אותה שליחה מתוך Python (לכפתור "שלח מיילים" בחלון העריכה).
 - run_inline: שליחה של קבוצת קבצים מתיקייה בלי קובץ bat (לכפתור "שלח חלקית").
+- לפני השליחה נשאלת השאלה "האם להציג מיילים לפני שליחה?" (preview=None בקוד):
+  כן = כל מייל נפתח ב-Outlook לעריכה (בלי לשלוח), לא = הכל נשלח מיד.
 - pdf_single_mail=True: קובצי האקסל מומרים ל-PDF ברגע השליחה (דרך Excel) ונשלחים
   כולם במייל אחד - כך שאפשר לתקן ידנית את האקסל לפני הלחיצה על ה-bat.
 """
@@ -35,6 +37,26 @@ exit /b
 
 _PS_BODY = r"""#PS-START
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
+# הצגת המיילים לפני שליחה: 'ask' = לשאול בחלון, 'yes' = לפתוח לעריכה ב-Outlook, 'no' = לשלוח
+if (-not $global:DormecoPreview) { $global:DormecoPreview = __PREVIEW__ }
+function Get-PreviewChoice {
+    if ($global:DormecoPreview -eq 'yes') { return $true }
+    if ($global:DormecoPreview -eq 'no') { return $false }
+    Add-Type -AssemblyName System.Windows.Forms
+    $owner = New-Object System.Windows.Forms.Form
+    $owner.TopMost = $true
+    $r = [System.Windows.Forms.MessageBox]::Show($owner,
+        ('האם להציג מיילים לפני שליחה?' + "`n`n" +
+         'כן - כל מייל ייפתח ב-Outlook לעריכה, ואתה לוחץ "שלח" בעצמך.' + "`n" +
+         'לא - כל המיילים יישלחו מיד.'),
+        'שליחת מיילים', 'YesNo', 'Question', 'Button2', 'RtlReading, RightAlign')
+    $owner.Dispose()
+    $global:DormecoPreview = $(if ($r -eq 'Yes') { 'yes' } else { 'no' })
+    return ($global:DormecoPreview -eq 'yes')
+}
+function Send-Or-Show($mail) {
+    if ($global:DormecoPreview -eq 'yes') { $mail.Display($false) } else { $mail.Send() }
+}
 function Send-FolderFiles {
     $exts = @(__EXTS__)
     # נמענים לפי סיומת שם הקובץ; קובץ בלי סיומת מתאימה מקבל את ברירת המחדל
@@ -64,6 +86,8 @@ function Send-FolderFiles {
         return
     }
 
+    $preview = Get-PreviewChoice
+    $verb = $(if ($preview) { 'Opened for review' } else { 'Sent' })
     $sent = 0
     foreach ($file in $files) {
         $base = [IO.Path]::GetFileNameWithoutExtension($file.Name)
@@ -94,12 +118,17 @@ function Send-FolderFiles {
                 [System.Net.WebUtility]::HtmlEncode($base) + '</b><br><br>' +
                 'נשלח אוטומטית ממערכת מיון ההזמנות.</div>'
             [void]$mail.Attachments.Add($file.FullName)
-            $mail.Send()
+            Send-Or-Show $mail
             $sent++
-            Write-Host ('[V] Sent (' + $whName + ') to ' + $to + ' : ' + $file.Name)
+            Write-Host ('[V] ' + $verb + ' (' + $whName + ') to ' + $to + ' : ' + $file.Name)
         } catch {
             Write-Host ('[X] Sending failed for ' + $file.Name + ': ' + $_.Exception.Message)
         }
+    }
+    if ($preview) {
+        Write-Host ''
+        Write-Host ('[V] Done: ' + $sent + ' of ' + $files.Count + ' emails opened for review (not sent yet - press Send in Outlook).')
+        return
     }
     try { $outlook.Session.SendAndReceive($false) } catch {}
     Start-Sleep -Seconds 3
@@ -176,6 +205,7 @@ function Send-FolderAsPdf {
         return
     }
 
+    $preview = Get-PreviewChoice
     $sent = 0
     try {
         $names = ($pdfs | ForEach-Object {
@@ -187,17 +217,28 @@ function Send-FolderAsPdf {
             'שלום,<br><br>מצורפים:<br><b>' + $names + '</b><br><br>' +
             'נשלח אוטומטית ממערכת מיון ההזמנות.</div>'
         foreach ($p in $pdfs) { [void]$mail.Attachments.Add($p) }
-        $mail.Send()
+        Send-Or-Show $mail
         $sent = 1
-        Write-Host ('[V] Sent ' + $pdfs.Count + ' PDF files in one email to ' + $defaultTo)
+        if ($preview) {
+            Write-Host ('[V] Opened for review: one email with ' + $pdfs.Count + ' PDF files to ' + $defaultTo)
+        } else {
+            Write-Host ('[V] Sent ' + $pdfs.Count + ' PDF files in one email to ' + $defaultTo)
+        }
     } catch {
         Write-Host ('[X] Sending failed: ' + $_.Exception.Message)
     }
-    try { $outlook.Session.SendAndReceive($false) } catch {}
+    if (-not $preview) {
+        try { $outlook.Session.SendAndReceive($false) } catch {}
+    }
     Start-Sleep -Seconds 3
+    # הקבצים כבר מוטמעים במייל (גם במייל שפתוח לעריכה) - אפשר למחוק את ה-PDF הזמניים
     Remove-Item -LiteralPath $pdfDir -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host ''
-    Write-Host ('[V] Done: ' + $sent + ' of 1 emails sent.')
+    if ($preview) {
+        Write-Host ('[V] Done: ' + $sent + ' of 1 emails opened for review (not sent yet - press Send in Outlook).')
+    } else {
+        Write-Host ('[V] Done: ' + $sent + ' of 1 emails sent.')
+    }
 }
 __ENTRY__
 """
@@ -270,6 +311,13 @@ def create_launcher(
     return out
 
 
+def _preview_mode(preview: bool | None) -> str:
+    """None = לשאול בחלון לפני השליחה; True = לפתוח לעריכה ב-Outlook; False = לשלוח מיד."""
+    if preview is None:
+        return "ask"
+    return "yes" if preview else "no"
+
+
 def build_ps_body(
     default_to: list[str],
     default_name: str,
@@ -279,6 +327,7 @@ def build_ps_body(
     subject_prefix: str = "",
     pdf_single_mail: bool = False,
     single_subject: str = "",
+    preview: bool | None = None,
 ) -> str:
     """סקריפט ה-PowerShell של השליחה (מתחיל בשורה #PS-START)."""
     rules = rules or []
@@ -295,18 +344,22 @@ def build_ps_body(
         .replace("__STRIP_PREFIX__", _ps_quote(strip_prefix))
         .replace("__SUBJECT_PREFIX__", _ps_quote(subject_prefix))
         .replace("__SINGLE_SUBJECT__", _ps_quote(single_subject))
+        .replace("__PREVIEW__", _ps_quote(_preview_mode(preview)))
         .replace("__ENTRY__", "Send-FolderAsPdf" if pdf_single_mail else "Send-FolderFiles")
     )
     return ps_body
 
 
-def run_launcher(launcher: pathlib.Path, powershell: str = "powershell") -> tuple[int, int, str]:
+def run_launcher(
+    launcher: pathlib.Path, powershell: str = "powershell", preview: bool | None = False
+) -> tuple[int, int, str]:
     """
     מריץ את השליחה של קובץ bat שנוצר ב-create_launcher, בלי חלון ובלי "pause".
     מחזיר (כמה נשלחו, כמה קבצים, הפלט המלא).
     """
     path = str(launcher.resolve()).replace("'", "''")
     cmd = (
+        f"$global:DormecoPreview='{_preview_mode(preview)}'; "
         f"$f='{path}'; $s=[IO.File]::ReadAllText($f,[Text.Encoding]::UTF8); "
         "$i=$s.LastIndexOf('#PS-START'); Invoke-Expression $s.Substring($i)"
     )
@@ -349,6 +402,7 @@ def run_inline(
     powershell: str = "powershell",
     pdf_single_mail: bool = False,
     single_subject: str = "",
+    preview: bool | None = None,
 ) -> tuple[int, int, str]:
     """
     שולח מיד את הקבצים המתאימים בתיקייה (כל קובץ במייל נפרד), בלי ליצור bat.
@@ -358,7 +412,7 @@ def run_inline(
         return 0, 0, "no recipients"
     body = build_ps_body(
         default_to, default_name, rules, name_filter, strip_prefix, subject_prefix,
-        pdf_single_mail, single_subject,
+        pdf_single_mail, single_subject, preview,
     )
     fake_self = str((folder / "_send.bat").resolve()).replace("'", "''")
     script = f"$f = '{fake_self}'\r\n" + body.replace("\r\n", "\n").replace("\n", "\r\n")

@@ -4129,8 +4129,13 @@ def main() -> None:
             for g in mail_groups(None)
         ]
 
-    def send_day_mails(day: str | None, group_key: str | None = None) -> str:
-        """שולח את מיילי היום: כל הקבוצות, או רק group_key ("שלח חלקית")."""
+    def send_day_mails(
+        day: str | None, group_key: str | None = None, preview: bool = False
+    ) -> str:
+        """
+        שולח את מיילי היום: כל הקבוצות, או רק group_key ("שלח חלקית").
+        preview=True: המיילים נפתחים ב-Outlook לעריכה במקום להישלח.
+        """
         import mail_sender
 
         lines: list[str] = []
@@ -4149,11 +4154,14 @@ def main() -> None:
                 g["folder"], g["default_to"], g["default_name"], g["rules"],
                 g["name_filter"], g["strip_prefix"], g["subject_prefix"],
                 pdf_single_mail=g.get("pdf_single_mail", False),
+                preview=preview,
             )
             if "Could not open Outlook" in out:
                 lines.append(f"{g['title']}: לא ניתן לפתוח את Outlook (נדרש Outlook הקלאסי).")
             elif total == 0:
                 lines.append(f"{g['title']}: אין קבצים לשליחה ביום הזה.")
+            elif preview:
+                lines.append(f"{g['title']}: נפתחו לעריכה ב-Outlook {sent} מתוך {total} מיילים.")
             else:
                 lines.append(f"{g['title']}: נשלחו {sent} מתוך {total} מיילים.")
         return "\n".join(lines) or "לא הוגדרו נמענים לאף קבוצת מיילים בקובץ ההגדרות."
