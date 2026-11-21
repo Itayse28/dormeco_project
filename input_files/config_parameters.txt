@@ -10,6 +10,14 @@ COOLING_FILE_NAME = Cooling_products.xlsx
 HAZMAT_FILE_NAME = dangerous_products.xlsx
 GOLDBOND_FILE_NAME = Gold_bond.xlsx
 
+# --- כתובת התקיות בכונן G ----
+BASE_DIR_DORMECO = "G:\לוגיסטיקה\הובלות"
+DORMECO_DRIVERS = נהגי דורמקו
+TAKE_AWAY = איסוף עצמי
+ELIRAN_DIR = "הובלות חצוניות\א.קים הפצה (אלירן)"
+OVERSEAS_DIR = "הובלות חצוניות\אוברסיז שינוע"
+
+
 # קובץ רשימת הנהגים (עמודות: שם נהג, כתובת) - לבחירת נהג לכל מסלול בחלון העריכה
 DRIVERS_FILE_NAME = drivers.xlsx
 # קובץ כתובות האספקה הנכונות של הלקוחות (לפי מספר לקוח, אפשר כמה כתובות ללקוח)
@@ -88,5 +96,4 @@ SEND_PICKING_LIST_TO_GOLDBOND_GILI = karin@dormeco.co.il, gil@goldbond.co.il, da
 SEND_SHIPPING_LIST_TO_OVERSEAS_DRIVERS = karin@dormeco.co.il, orders@ovrs-comr.co.il
 
 # --- שולח את כל רשימות ההובלה (מיועד לסוכנים) ---
-#SEND_ALL_SHIPPING_LISTS_TO = karin@dormeco.co.il, kobi@dormeco.co.il, revital@dormeco.co.il, rborochovitz@dormeco.co.il, tamar@dormeco.co.il, udi@dormeco.co.il, tsvika@dormeco.co.il
-SEND_ALL_SHIPPING_LISTS_TO = alondoron7@gmail.com
+SEND_ALL_SHIPPING_LISTS_TO = karin@dormeco.co.il, kobi@dormeco.co.il, revital@dormeco.co.il, rborochovitz@dormeco.co.il, tamar@dormeco.co.il, udi@dormeco.co.il, tsvika@dormeco.co.il

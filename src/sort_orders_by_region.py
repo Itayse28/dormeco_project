@@ -413,6 +413,11 @@ def load_or_create_config(
         ),
         **priority_cfg_values(raw_kv),
         "SAVE_AS_PATH": str(raw_kv.get("SAVE_AS_PATH", "") or "").strip().strip('"'),
+        # תיקיות הארכיון לכפתור "שמור בשם" (BASE_DIR_DORMECO, DORMECO_DRIVERS...)
+        "ARCHIVE": {
+            k: str(raw_kv.get(k, "") or "").strip().strip('"').strip()
+            for k in ("BASE_DIR_DORMECO", "DORMECO_DRIVERS", "TAKE_AWAY", "ELIRAN_DIR", "OVERSEAS_DIR")
+        },
         "AMOUNT_OF_DRIVERS_ON_SCREEN": parse_int(
             raw_kv.get("AMOUNT_OF_DRIVERS_ON_SCREEN", "10"), 10
         ),
@@ -4154,24 +4159,47 @@ def main() -> None:
         return "\n".join(lines) or "לא הוגדרו נמענים לאף קבוצת מיילים בקובץ ההגדרות."
 
     def save_copy() -> str:
-        """כפתור "שמור בשם": מעתיק את כל הקבצים שנוצרו לתיקייה SAVE_AS_PATH."""
-        dest_raw = cfg.get("SAVE_AS_PATH", "")
-        if not dest_raw:
-            raise RuntimeError(f"לא הוגדר SAVE_AS_PATH בקובץ {LOCAL_CONFIG_FILE_NAME}.")
-        dest = pathlib.Path(dest_raw).expanduser()
-        dest.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(output_path, dest / output_path.name)
-        for folder in (
+        """
+        כפתור "שמור בשם":
+        - BASE_DIR_DORMECO מוגדר: כל דוח הובלה/העמסות נשמר בתיקייה של הנהג שלו בארכיון
+          (<נהג>/<שנה>/<חודש>/הובלות|העמסות - ראו save_to_archive.py).
+        - SAVE_AS_PATH מוגדר (config_local.txt): עותק של כל הקבצים שנוצרו בתיקייה אחת.
+        """
+        import save_to_archive
+
+        report_folders = [
             out_dir / f"דוחות העמסות {list_stem}",
             out_dir / f"דוחות הובלה {list_stem}",
-        ):
-            if folder.exists():
-                target = dest / folder.name
-                if target.exists():
-                    shutil.rmtree(target)  # בלי שאריות משמירה קודמת
-                shutil.copytree(folder, target)
-        print(f"\n[V] נשמר עותק של כל הקבצים ב: {dest}")
-        return str(dest)
+        ]
+        done: list[str] = []
+        acfg = cfg.get("ARCHIVE") or {}
+        if acfg.get("BASE_DIR_DORMECO"):
+            saved, errors = save_to_archive.save_reports(report_folders, acfg)
+            print(f"\n[V] נשמרו {len(saved)} דוחות בתיקיות הארכיון ב: {acfg['BASE_DIR_DORMECO']}")
+            for x in saved:
+                print(f"      - {x}")
+            if errors:
+                raise RuntimeError(
+                    f"נשמרו {len(saved)} דוחות, אבל אלה לא נשמרו:\n" + "\n".join(errors)
+                )
+            done.append(f"{len(saved)} דוחות בתיקיות הנהגים ב-{acfg['BASE_DIR_DORMECO']}")
+
+        dest_raw = cfg.get("SAVE_AS_PATH", "")
+        if dest_raw:
+            dest = pathlib.Path(dest_raw).expanduser()
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(output_path, dest / output_path.name)
+            for folder in report_folders:
+                if folder.exists():
+                    target = dest / folder.name
+                    if target.exists():
+                        shutil.rmtree(target)  # בלי שאריות משמירה קודמת
+                    shutil.copytree(folder, target)
+            print(f"\n[V] נשמר עותק של כל הקבצים ב: {dest}")
+            done.append(str(dest))
+        if not done:
+            raise RuntimeError("לא הוגדרו BASE_DIR_DORMECO / SAVE_AS_PATH בקובצי ההגדרות.")
+        return " + ".join(done)
 
     try:
         drivers = sort_orders_excel(
@@ -4182,7 +4210,11 @@ def main() -> None:
             send_mails=send_day_mails,
             gui_extras={
                 "list_mail_groups": list_mail_groups,
-                "save_copy": save_copy if cfg.get("SAVE_AS_PATH") else None,
+                "save_copy": (
+                    save_copy
+                    if cfg.get("SAVE_AS_PATH") or cfg["ARCHIVE"].get("BASE_DIR_DORMECO")
+                    else None
+                ),
                 "save_as_path": cfg.get("SAVE_AS_PATH", ""),
             },
         )

@@ -18,7 +18,8 @@
 - "שלח מיילים" (בראש כל עמודת יום, או בתחתית המסך בדוח יומי) - שולח את כל
   קבוצות המיילים של אותו יום. "שלח חלקית" - תפריט לשליחת קבוצה אחת בלבד
   (קבוצה = פרמטר נמענים אחד בקובץ ההגדרות).
-- "שמור בשם" - שומר עותק של כל הקבצים בתיקייה SAVE_AS_PATH.
+- "שמור בשם" - שומר כל דוח בתיקיית הנהג שלו מתחת ל-BASE_DIR_DORMECO
+  (ו/או עותק של כל הקבצים בתיקייה SAVE_AS_PATH).
 - "ביטול" / סגירת החלון לפני אישור - ההרצה נעצרת ולא נוצרים קבצים.
 - בחירת נהג לכל מסלול מתוך input_files/drivers.xlsx: המסלול מחושב מחדש
   מכתובת הבית של הנהג (יציאה וחזרה), והשם מופיע בכל הדוחות.
@@ -2196,11 +2197,11 @@ class RouteEditor:
         self._update_info()  # בשורת המידע: "הקבצים נוצרו (HH:MM)" - בלי חלון קופץ
 
     def on_save_as(self) -> None:
-        """'שמור בשם': יוצר את הקבצים (אם צריך) ושומר עותק שלהם בתיקייה SAVE_AS_PATH."""
+        """'שמור בשם': יוצר את הקבצים (אם צריך) ושומר אותם בתיקיות הארכיון / SAVE_AS_PATH."""
         if self.save_copy is None:
             messagebox.showwarning(
                 "שמור בשם",
-                "לא הוגדרה תיקייה לשמירה.\nהוסיפו לקובץ input_files\\config_local.txt את השורה:\nSAVE_AS_PATH = <נתיב התיקייה>",
+                "לא הוגדרה תיקייה לשמירה.\nהגדירו BASE_DIR_DORMECO בקובץ input_files\\config_parameters.txt\n(או SAVE_AS_PATH בקובץ input_files\\config_local.txt).",
                 parent=self.root,
             )
             return
@@ -2222,7 +2223,7 @@ class RouteEditor:
             return
         self.root.configure(cursor="")
         self._saved_text = (
-            f"נשמר עותק ב-{dest} ({datetime.datetime.now().strftime('%H:%M')})"
+            f"נשמר: {dest} ({datetime.datetime.now().strftime('%H:%M')})"
         )
         self._update_info()
 
