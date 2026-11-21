@@ -2267,6 +2267,83 @@ DELIVERY_CONTACT_HEADER = "איש קשר לאספקה"
 # מספר האריזות מדוח "פירוט הזמנות ששודרו לפי נהג" (רק כשהדוח נוסף בחלון) -
 # דוחות ההעמסות לוקחים ממנו את עמודת האריזות במקום החישוב לפי package_sizes.xlsx
 PACKAGES_HEADER = "מספר אריזות (פריוריטי)"
+# שם וטלפון של הנהג בפועל לנהג כללי (אוברסיז N / אלירן N) - הוזן בחלון העריכה
+ACTUAL_DRIVER_HEADER = "נהג בפועל"
+
+# הקובץ הממוין: גיליון ראשון (נפתח באקסל) = תצוגה מצומצמת לקריאה; הנתונים המלאים
+# בגיליון מוסתר - דוחות ההעמסות, דוחות ההובלה ופתיחה מחדש של הטבלה קוראים ממנו.
+VIEW_SHEET_TITLE = "הזמנות ממוינות לפי אזור"
+DATA_SHEET_TITLE = "נתונים מלאים"
+# עמודות שלא מוצגות בגיליון התצוגה (נשארות בגיליון הנתונים המלאים)
+VIEW_HIDDEN_HEADERS = {
+    "תחנה במסלול", "מס. לקוח", "מס' לקוח", "כתובת", "יעד", "שעת הגעה ליעד",
+    "שם האתר", "מספר טלפון", "שורה", "מק'ט", 'מק"ט', "יח'", "טלפון אתר",
+    "שם איש קשר", "טלפון איש קשר", "מחסן מועדף", "דיוק מיקום",
+}
+PALLETS_HEADER = "מספר משטחים"  # בתצוגה: מעוגל למעלה למשטח שלם
+
+
+def sorted_data_sheet(wb: Any) -> Any:
+    """הגיליון עם הנתונים המלאים בקובץ ממוין (בקבצים ישנים - הגיליון הפעיל)."""
+    return wb[DATA_SHEET_TITLE] if DATA_SHEET_TITLE in wb.sheetnames else wb.active
+
+
+def build_view_sheet(wb: Any, data_ws: Any, last_row: int) -> Any:
+    """
+    גיליון התצוגה: עותק של גיליון הנתונים בלי העמודות שב-VIEW_HIDDEN_HEADERS,
+    ועם מספר המשטחים מעוגל למעלה. נוצר ראשון ופעיל; גיליון הנתונים מוסתר.
+    """
+    import copy as _copy
+
+    from openpyxl.formula.translate import Translator
+
+    view = wb.create_sheet(VIEW_SHEET_TITLE, 0)
+    view.sheet_view.rightToLeft = True
+    headers = [str(data_ws.cell(1, c).value or "") for c in range(1, data_ws.max_column + 1)]
+    keep = [
+        c for c, h in enumerate(headers, start=1)
+        if h not in VIEW_HIDDEN_HEADERS and not h.startswith("שעת יציאה")
+    ]
+    for new_c, src_c in enumerate(keep, start=1):
+        is_pallets = headers[src_c - 1] == PALLETS_HEADER
+        for r in range(1, last_row + 1):
+            src = data_ws.cell(r, src_c)
+            dst = view.cell(r, new_c)
+            val = src.value
+            if isinstance(val, str) and val.startswith("="):
+                val = Translator(val, origin=src.coordinate).translate_formula(dst.coordinate)
+            elif is_pallets and r > 1 and isinstance(val, (int, float)):
+                val = math.ceil(val - 1e-9)
+            dst.value = val
+            if src.has_style:
+                dst._style = _copy.copy(src._style)
+            if src.hyperlink is not None:
+                dst.hyperlink = _copy.copy(src.hyperlink)
+        src_letter = get_column_letter(src_c)
+        view.column_dimensions[get_column_letter(new_c)].width = (
+            data_ws.column_dimensions[src_letter].width
+        )
+    for r in range(1, last_row + 1):
+        if data_ws.row_dimensions[r].height:
+            view.row_dimensions[r].height = data_ws.row_dimensions[r].height
+    view.freeze_panes = "A2"
+    wb.active = 0
+    data_ws.sheet_state = "hidden"
+    return view
+
+
+def format_actual_driver(info: dict[str, str] | None) -> str:
+    info = info or {}
+    return " ".join(p for p in (info.get("name", ""), info.get("phone", "")) if p).strip()
+
+
+def parse_actual_driver(text: Any) -> dict[str, str]:
+    """"יוסי כהן 050-1234567" -> {"name": "יוסי כהן", "phone": "050-1234567"}."""
+    t = str(text or "").strip()
+    m = re.search(r"(\+?[\d][\d\- ]{5,})$", t)
+    if m:
+        return {"name": t[: m.start()].strip(), "phone": m.group(1).strip()}
+    return {"name": t, "phone": ""} if t else {}
 
 
 def delivery_contact(stop: dict[str, Any]) -> str:
@@ -2524,6 +2601,7 @@ GENERATED_HEADERS = {
     LOCATION_QUALITY_HEADER,
     DELIVERY_CONTACT_HEADER,
     PACKAGES_HEADER,
+    ACTUAL_DRIVER_HEADER,
 }
 
 
@@ -2735,6 +2813,7 @@ def apply_manual_route_edits(
     initial_edited: list[tuple[list[str], str | None, str | None]] | None = None,
     set_location: Callable[[dict[str, Any], float, float], int] | None = None,
     load_packages: Callable[[str], str] | None = None,
+    initial_actual: dict[tuple[str, str], dict[str, str]] | None = None,
 ) -> list[dict[str, Any]] | None:
     """
     פותח את חלון העריכה.
@@ -2818,6 +2897,7 @@ def apply_manual_route_edits(
         set_location=set_location,
         load_packages=load_packages,
         initial_special=initial_special,
+        initial_actual=initial_actual,
         group_of=stop_group,
         **(gui_extras or {}),
     )
@@ -2833,6 +2913,14 @@ def _edited_to_trucks_impl(
     stops_by_key: dict[str, dict[str, Any]],
     simulate_rounds: Callable[..., list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
+    # פרטי הנהג בפועל (רביעייה מהחלון) לפי (נהג, תאריך); ממשיכים עם שלישיות
+    actual_of: dict[tuple[str, str], dict[str, str]] = {}
+    norm = []
+    for e in edited:
+        if len(e) > 3 and e[3] and e[1]:
+            actual_of[(e[1], e[2] or "")] = dict(e[3])
+        norm.append((e[0], e[1], e[2]))
+    edited = norm
     # קבוצות מיוחדות (איסוף עצמי / ללא יעד) - בלי חישוב מסלול
     special = [(keys, DRIVER_GROUP[drv]) for keys, drv, _day in edited if keys and drv in DRIVER_GROUP]
     edited = [e for e in edited if e[1] not in DRIVER_GROUP]
@@ -2871,6 +2959,7 @@ def _edited_to_trucks_impl(
         sim["region_title"] = build_region_title([stops_by_key[k] for k in keys])
         sim["driver_name"] = drv_name
         sim["route_date"] = day
+        sim["actual_driver"] = actual_of.get((drv_name, day), {}) if drv_name else {}
         result.append(sim)
     n_routes = len(result)
     for keys, group in special:
@@ -2895,7 +2984,7 @@ def sort_orders_excel(
     gui_extras: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     wb_in = load_workbook_safe(input_path)
-    ws_in = wb_in.active
+    ws_in = sorted_data_sheet(wb_in)
 
     raw_headers = [
         str(ws_in.cell(1, col).value or "").strip()
@@ -2918,6 +3007,10 @@ def sort_orders_excel(
         if CHOSEN_ADDRESS_HEADER in full_headers
         else -1
     )
+    i_prior_actual = (
+        full_headers.index(ACTUAL_DRIVER_HEADER) if ACTUAL_DRIVER_HEADER in full_headers else -1
+    )
+    initial_actual: dict[tuple[str, str], dict[str, str]] = {}
 
     def find_col(possible_names: list[str], default_idx: int) -> int:
         for name in possible_names:
@@ -2978,6 +3071,7 @@ def sort_orders_excel(
         if not any(v is not None and str(v).strip() != "" for v in row_vals):
             continue
         prior_label, prior_stop, prior_chosen = None, None, ""
+        prior_actual = ""
         if is_sorted_input:
             if str(row_vals[0] or "").strip().startswith('סה"כ'):
                 continue  # שורת הסיכום בתחתית הטבלה הממוינת
@@ -2985,6 +3079,8 @@ def sort_orders_excel(
             prior_stop = row_vals[i_prior_stop]
             if 0 <= i_prior_chosen < len(row_vals):
                 prior_chosen = str(row_vals[i_prior_chosen] or "").strip()
+            if 0 <= i_prior_actual < len(row_vals):
+                prior_actual = str(row_vals[i_prior_actual] or "").strip()
             row_vals = [row_vals[i] if i < len(row_vals) else None for i in keep_idx]
 
         # תיקון תאריך אספקה לפורמט DD-MM-YYYY (למשל 02-11-2026)
@@ -3100,6 +3196,7 @@ def sort_orders_excel(
                 "prior_label": prior_label,
                 "prior_stop": prior_stop,
                 "prior_chosen": prior_chosen,
+                "prior_actual": prior_actual,
                 "cust_no": str(row_vals[idx_cust_no] or "").strip()
                 if 0 <= idx_cust_no < len(row_vals)
                 else "",
@@ -3326,6 +3423,12 @@ def sort_orders_excel(
                 print(f"    - {st['cust_name']} | {st.get('chosen_address') or st['effective_dest']}")
             planned_trucks += group_trucks(keys, group, unique_stops_by_key)
 
+    # טבלה ממוינת בקלט: פרטי הנהג בפועל (נהג כללי) לפי (נהג, תאריך המסלול)
+    for rec in records:
+        drv = driver_name_from_label(rec.get("prior_label") or "")
+        if drv and rec.get("prior_actual"):
+            initial_actual.setdefault((drv, rec["date"]), parse_actual_driver(rec["prior_actual"]))
+
     # טבלה ממוינת בקלט: המסלולים, הסדר והנהגים בדיוק כמו בטבלה
     initial_edited = (
         routes_from_sorted_records(records, unique_stops_by_key, drivers)
@@ -3373,6 +3476,7 @@ def sort_orders_excel(
                     "arrival_str": sched["arrival_str"],
                     "departure_str": sched["departure_str"],
                     "route_date": route_date,
+                    "actual_driver": format_actual_driver(t.get("actual_driver")),
                 }
 
         for rec in records:
@@ -3383,6 +3487,7 @@ def sort_orders_excel(
             rec["arrival_str"] = assign["arrival_str"]
             rec["departure_str"] = assign["departure_str"]
             rec["route_date"] = assign["route_date"]
+            rec["actual_driver"] = assign["actual_driver"]
             rec["client_mark"] = find_client_mark(rec["cust_name"], client_marks)
             # הזמנה שהועברה ליום אחר מקבלת את תאריך המסלול
             if assign["route_date"] and 0 <= idx_date < len(rec["raw_values"]):
@@ -3437,6 +3542,7 @@ def sort_orders_excel(
         out_headers.append(LOCATION_QUALITY_HEADER)
         col_quality_out = len(out_headers)
         out_headers.append(DELIVERY_CONTACT_HEADER)
+        out_headers.append(ACTUAL_DRIVER_HEADER)
         pk_lookup = packages["lookup"]
         if pk_lookup is not None:
             out_headers.append(PACKAGES_HEADER)
@@ -3445,7 +3551,7 @@ def sort_orders_excel(
 
         wb_out = openpyxl.Workbook()
         ws_orders = wb_out.active
-        ws_orders.title = "הזמנות ממוינות לפי אזור"
+        ws_orders.title = DATA_SHEET_TITLE  # הנתונים המלאים (מוסתר; גיליון התצוגה נבנה בסוף)
         ws_orders.sheet_view.rightToLeft = True
 
         font_family = "Arial"
@@ -3551,6 +3657,7 @@ def sort_orders_excel(
             stop_quality = stop.get("loc_quality", "")
             row_out.append(LOCATION_QUALITY_LABELS.get(stop_quality) or None)
             row_out.append(delivery_contact(stop) or None)
+            row_out.append(rec.get("actual_driver") or None)
             if pk_lookup is not None:
                 row_out.append(pk_lookup.get(rec["order_no"], rec["sku"], rec["qty"]))
             for col_idx, val in enumerate(row_out, start=1):
@@ -3686,8 +3793,8 @@ def sort_orders_excel(
                 start_color=row_color, end_color=row_color, fill_type="solid"
             )
             weight_formula = (
-                f"=SUMIF('הזמנות ממוינות לפי אזור'!$B$2:$B${last_data_row}, "
-                f"A{d_idx}, 'הזמנות ממוינות לפי אזור'!${qty_col_letter}$2:${qty_col_letter}${last_data_row})"
+                f"=SUMIF('{DATA_SHEET_TITLE}'!$B$2:$B${last_data_row}, "
+                f"A{d_idx}, '{DATA_SHEET_TITLE}'!${qty_col_letter}$2:${qty_col_letter}${last_data_row})"
             )
 
             row_vals_sum = [
@@ -3743,6 +3850,7 @@ def sort_orders_excel(
         ws_sum.column_dimensions["D"].width = 9.5
         ws_sum.column_dimensions["E"].width = 62.0
 
+        build_view_sheet(wb_out, ws_orders, total_row_idx)
         out_path = pathlib.Path(output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         wb_out.save(out_path)
@@ -3767,6 +3875,7 @@ def sort_orders_excel(
             initial_edited=initial_edited,
             set_location=set_manual_location,
             load_packages=load_packages_report,
+            initial_actual=initial_actual,
         )
         if result is None:
             return last_written.get("drivers", [])

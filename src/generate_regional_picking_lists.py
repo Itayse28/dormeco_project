@@ -843,7 +843,8 @@ def generate_picking_lists_from_sorted_excel(
     cfg: dict[str, Any],
 ) -> list[tuple[str, pathlib.Path, int, float]]:
     wb = load_workbook_safe(sorted_excel_path)
-    ws = wb.active
+    # הנתונים המלאים בגיליון "נתונים מלאים" (הגיליון הראשון הוא תצוגה מצומצמת)
+    ws = wb["נתונים מלאים"] if "נתונים מלאים" in wb.sheetnames else wb.active
 
     headers = [
         str(ws.cell(1, col).value or "").strip()

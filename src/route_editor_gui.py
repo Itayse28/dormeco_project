@@ -124,6 +124,13 @@ WARN_MARK = "⚠ "
 
 
 RLM = "‏"  # סימן כיוון מימין לשמאל (בלתי נראה)
+# נהגים "כלליים" בקובץ הנהגים (חברת הובלה / קבלן): בכל יום נוהג אדם אחר, ולכן
+# אפשר להזין לכל אחד מהם את שם הנהג בפועל והטלפון שלו - נכתבים לדוח ההובלה
+GENERIC_DRIVER_RE = re.compile(r"^\s*(?:אוברסיז|אלירן)(?:\s*\d+)?\s*$")
+
+
+def is_generic_driver(name: str | None) -> bool:
+    return bool(name) and bool(GENERIC_DRIVER_RE.match(name))
 
 
 def rtl(text: str) -> str:
@@ -227,8 +234,11 @@ class RouteEditor:
         initial_special: dict[str, list[str]] | None = None,
         group_of: Callable[[dict[str, Any]], str | None] | None = None,
         load_packages: Callable[[str], str] | None = None,
+        initial_actual: dict[tuple[str, str], dict[str, str]] | None = None,
     ) -> None:
         self.root = root
+        # (נהג כללי, תאריך) -> {"name": שם הנהג בפועל, "phone": טלפון}
+        self.actual_driver: dict[tuple[str, str], dict[str, str]] = dict(initial_actual or {})
         # דוח "פירוט הזמנות ששודרו לפי נהג" (לא חובה) - מקור למספר האריזות
         self.load_packages = load_packages
         self._packages_file = ""
@@ -1190,7 +1200,27 @@ class RouteEditor:
                 row, text="החלף סדר סבבים", font=F_SMALL, padx=2, pady=0,
                 command=lambda c=col: self.swap_rounds(c),
             ).pack(side="left", padx=(2, 0))
+        if is_generic_driver(driver):
+            info = self.actual_driver.get((driver, day or ""), {})
+            tk.Button(
+                row, text="פרטי נהג", font=F_SMALL, padx=2, pady=0,
+                bg="#FFF2CC" if not info.get("name") else "#E2EFDA",
+                command=lambda c=col: self.edit_actual_driver(c),
+            ).pack(side="left", padx=(2, 0))
         cb.pack(side="right", fill="x", expand=True, padx=(0, 4))
+        if is_generic_driver(driver):
+            info = self.actual_driver.get((driver, day or ""), {})
+            text = (
+                "נהג בפועל: " + " ".join(p for p in (info.get("name"), info.get("phone")) if p)
+                if info.get("name") or info.get("phone")
+                else "נהג בפועל: לא הוזן (לחצו על \"פרטי נהג\")"
+            )
+            lbl = tk.Label(
+                frame, text=rtl(text), font=F_SMALL, bg=bg, anchor="e", justify="right",
+                fg="black" if info.get("name") else FG_MUTED,
+            )
+            lbl.pack(side="top", fill="x")
+            self._register_drop(lbl, col)
         cb.bind(
             "<<ComboboxSelected>>",
             lambda _e, c=col, w=cb, m=display_to_name: self.assign_driver(c, m.get(w.get())),
@@ -1207,6 +1237,38 @@ class RouteEditor:
         self.route_driver[rid] = name
         self.selected_id = rid
         self.render()
+
+    def edit_actual_driver(self, col: int) -> None:
+        """שם וטלפון של הנהג בפועל לנהג כללי (אוברסיז N / אלירן N) באותו יום."""
+        driver = self._driver_of(col)
+        if not is_generic_driver(driver):
+            return
+        key = (driver, self._route_date(col) or "")
+        cur = self.actual_driver.get(key, {})
+        name = simpledialog.askstring(
+            "פרטי נהג", f"שם הנהג בפועל עבור \"{driver}\":",
+            initialvalue=cur.get("name", ""), parent=self.root,
+        )
+        if name is None:
+            return
+        phone = simpledialog.askstring(
+            "פרטי נהג", f"טלפון של {name or driver}:",
+            initialvalue=cur.get("phone", ""), parent=self.root,
+        )
+        if phone is None:
+            return
+        name, phone = name.strip(), phone.strip()
+        if name or phone:
+            self.actual_driver[key] = {"name": name, "phone": phone}
+        else:
+            self.actual_driver.pop(key, None)
+        self.render()
+
+    def _actual_of(self, col: int) -> dict[str, str]:
+        driver = self._driver_of(col)
+        if not is_generic_driver(driver):
+            return {}
+        return dict(self.actual_driver.get((driver, self._route_date(col) or ""), {}))
 
     def swap_rounds(self, col: int) -> None:
         """מחליף בין הסבב הזה לסבב שלפניו (או אחריו, אם זה הסבב הראשון)."""
@@ -1263,7 +1325,8 @@ class RouteEditor:
         return repr(
             (
                 [
-                    (tuple(self.routes[c]), self._driver_of(c), self._route_date(c))
+                    (tuple(self.routes[c]), self._driver_of(c), self._route_date(c),
+                     tuple(sorted(self._actual_of(c).items())))
                     for c in range(len(self.routes))
                     if self.routes[c]
                 ],
@@ -2092,7 +2155,7 @@ class RouteEditor:
                 if not ok:
                     return
         result = [
-            (list(self.routes[c]), self._driver_of(c), self._route_date(c))
+            (list(self.routes[c]), self._driver_of(c), self._route_date(c), self._actual_of(c))
             for c in active_cols
         ]
         # איסוף עצמי / ללא יעד: "נהג" מזויף שמסמן את הקבוצה
@@ -2208,6 +2271,7 @@ def run_route_editor(
     initial_special: dict[str, list[str]] | None = None,
     group_of: Callable[[dict[str, Any]], str | None] | None = None,
     load_packages: Callable[[str], str] | None = None,
+    initial_actual: dict[tuple[str, str], dict[str, str]] | None = None,
 ) -> list[tuple[list[str], str | None, str | None]] | None:
     """
     פותח את חלון העריכה וממתין עד שהמשתמש יאשר או יבטל.
@@ -2220,6 +2284,7 @@ def run_route_editor(
         initial_days, compute_efficient, on_generate, send_mails,
         initial_drivers, list_mail_groups, save_copy, save_as_path,
         apply_address, set_location, initial_special, group_of, load_packages,
+        initial_actual,
     )
     root.lift()
     try:

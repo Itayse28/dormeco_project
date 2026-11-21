@@ -654,7 +654,12 @@ def create_single_driver_report(
     ws.merge_cells(
         start_row=1, start_column=1, end_row=1, end_column=num_cols
     )
-    title_cell = ws.cell(1, 1, f"הובלות על ידי נהג {driver_num}")
+    title_text = f"הובלות על ידי נהג {driver_num}"
+    # נהג כללי (אוברסיז N / אלירן N): שם וטלפון של הנהג בפועל, כפי שהוזנו בחלון
+    actual = next((r.get("actual_driver") for r in driver_rows if r.get("actual_driver")), "")
+    if actual:
+        title_text += f"  |  נהג: {actual}"
+    title_cell = ws.cell(1, 1, title_text)
     title_cell.font = title_font
     title_cell.fill = title_fill
     title_cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -925,7 +930,8 @@ def generate_driver_reports_from_sorted_excel(
     cfg: dict[str, Any],
 ) -> list[pathlib.Path]:
     wb = load_workbook_safe(sorted_excel_path)
-    ws = wb.active
+    # הנתונים המלאים בגיליון "נתונים מלאים" (הגיליון הראשון הוא תצוגה מצומצמת)
+    ws = wb["נתונים מלאים"] if "נתונים מלאים" in wb.sheetnames else wb.active
 
     headers = [
         str(ws.cell(1, col).value or "").strip()
@@ -962,6 +968,7 @@ def generate_driver_reports_from_sorted_excel(
     idx_chosen = find_col(["כתובת אספקה נבחרת"], -1)
     idx_quality = find_col(["דיוק מיקום"], -1)
     idx_contact = find_col(["איש קשר לאספקה"], -1)
+    idx_actual = headers.index("נהג בפועל") if "נהג בפועל" in headers else -1
     # משטחים (רק בדוח PDF): התאמה מדויקת, כי "כמות" כבר תופס את עמודת הכמות
     idx_per_pallet = headers.index("כמות במשטח") if "כמות במשטח" in headers else -1
     idx_pallets = headers.index("מספר משטחים") if "מספר משטחים" in headers else -1
@@ -1094,6 +1101,9 @@ def generate_driver_reports_from_sorted_excel(
             else "",
             "loc_quality": str(row_vals[idx_quality] or "").strip()
             if 0 <= idx_quality < len(row_vals)
+            else "",
+            "actual_driver": str(row_vals[idx_actual] or "").strip()
+            if 0 <= idx_actual < len(row_vals)
             else "",
             "contact": str(row_vals[idx_contact] or "").strip()
             if 0 <= idx_contact < len(row_vals)
