@@ -79,13 +79,13 @@ AMOUNT_OF_DRIVERS_ON_SCREEN = 10
 # --- 9. שליחת דוחות ההעמסות במייל (דרך Outlook) ---
 # רשימת כתובות המייל שאליהן יישלחו כל דוחות ההעמסות (במייל אחד לכולם)
 # מפרידים בין הכתובות בפסיק. לדוגמה:
-SEND_PICKING_LIST_TO_OVERSEAS = 
-SEND_PICKING_LIST_TO_COOLING = 
-SEND_PICKING_LIST_TO_DANGEROUS = 
-SEND_PICKING_LIST_TO_GOLDBOND_GILI =
+SEND_PICKING_LIST_TO_OVERSEAS = alondoron7@gmail.com
+SEND_PICKING_LIST_TO_COOLING = alondoron7@gmail.com
+SEND_PICKING_LIST_TO_DANGEROUS = alondoron7@gmail.com
+SEND_PICKING_LIST_TO_GOLDBOND_GILI =alondoron7@gmail.com
 
 # --- שולח רשימות הובלה של נהגי אוברסיז
-SEND_SHIPPING_LIST_TO_OVERSEAS_DRIVERS =
+SEND_SHIPPING_LIST_TO_OVERSEAS_DRIVERS =alondoron7@gmail.com
 
 # --- שולח את כל רשימות ההובלה (מיועד לסוכנים) ---
-SEND_ALL_SHIPPING_LISTS_TO = 
+SEND_ALL_SHIPPING_LISTS_TO = alondoron7@gmail.com
