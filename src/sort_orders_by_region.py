@@ -4112,6 +4112,7 @@ def main() -> None:
                 "name_filter": "^" + rp.REPORT_FILE_PREFIX,
                 "strip_prefix": rp.REPORT_FILE_PREFIX,
                 "subject_prefix": rp.SHIPPING_SUBJECT_PREFIX,
+                "pdf_single_mail": True,
             },
         ]
         return groups
@@ -4142,6 +4143,7 @@ def main() -> None:
             sent, total, out = mail_sender.run_inline(
                 g["folder"], g["default_to"], g["default_name"], g["rules"],
                 g["name_filter"], g["strip_prefix"], g["subject_prefix"],
+                pdf_single_mail=g.get("pdf_single_mail", False),
             )
             if "Could not open Outlook" in out:
                 lines.append(f"{g['title']}: לא ניתן לפתוח את Outlook (נדרש Outlook הקלאסי).")

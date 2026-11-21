@@ -8,6 +8,8 @@
   בתיקייה במייל נפרד דרך Outlook (הגרסה הקלאסית), לנמענים לפי סיומת שם הקובץ.
 - run_launcher: מריץ את אותה שליחה מתוך Python (לכפתור "שלח מיילים" בחלון העריכה).
 - run_inline: שליחה של קבוצת קבצים מתיקייה בלי קובץ bat (לכפתור "שלח חלקית").
+- pdf_single_mail=True: קובצי האקסל מומרים ל-PDF ברגע השליחה (דרך Excel) ונשלחים
+  כולם במייל אחד - כך שאפשר לתקן ידנית את האקסל לפני הלחיצה על ה-bat.
 """
 
 from __future__ import annotations
@@ -104,7 +106,100 @@ function Send-FolderFiles {
     Write-Host ''
     Write-Host ('[V] Done: ' + $sent + ' of ' + $files.Count + ' emails sent.')
 }
-Send-FolderFiles
+function Send-FolderAsPdf {
+    # ממיר את קובצי האקסל שבתיקייה ל-PDF (ברגע השליחה - כך שתיקונים ידניים באקסל נכללים)
+    # ושולח את כל קובצי ה-PDF במייל אחד לנמענים של ברירת המחדל.
+    $defaultTo = __DEFAULT_TO__
+    $nameFilter = __FILTER__
+    $subject = __SINGLE_SUBJECT__
+    $folder = Split-Path -Parent $f
+    if ([string]::IsNullOrWhiteSpace($subject)) { $subject = Split-Path -Leaf $folder }
+    $files = @(Get-ChildItem -LiteralPath $folder -File |
+        Where-Object { @('.xlsx', '.xls') -contains $_.Extension.ToLower() } |
+        Where-Object { -not $_.Name.StartsWith('~$') } |
+        Where-Object { ($nameFilter -eq '') -or ($_.BaseName -match $nameFilter) } |
+        Sort-Object Name)
+
+    if ($files.Count -eq 0) {
+        Write-Host '[X] No files to send were found in this folder.'
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($defaultTo)) {
+        Write-Host '[X] No recipients defined.'
+        return
+    }
+
+    $pdfDir = Join-Path ([IO.Path]::GetTempPath()) ('dormeco_pdf_' + [Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $pdfDir)
+    Write-Host 'Converting Excel files to PDF (unsaved changes in open files are NOT included)...'
+    try {
+        $excel = New-Object -ComObject Excel.Application
+    } catch {
+        Write-Host '[X] Could not open Excel - it is needed to convert the reports to PDF.'
+        Remove-Item -LiteralPath $pdfDir -Recurse -Force -ErrorAction SilentlyContinue
+        return
+    }
+    $excel.Visible = $false
+    $excel.DisplayAlerts = $false
+    $pdfs = @()
+    foreach ($file in $files) {
+        $pdfPath = Join-Path $pdfDir ($file.BaseName + '.pdf')
+        $wb = $null
+        try {
+            # UpdateLinks=0, ReadOnly=true - עובד גם כשהקובץ פתוח באקסל (נלקחת הגרסה השמורה)
+            $wb = $excel.Workbooks.Open($file.FullName, 0, $true)
+            $wb.ExportAsFixedFormat(0, $pdfPath)
+            $pdfs += $pdfPath
+            Write-Host ('[V] Converted: ' + $file.Name)
+        } catch {
+            Write-Host ('[X] PDF conversion failed for ' + $file.Name + ': ' + $_.Exception.Message)
+        } finally {
+            if ($wb) { try { $wb.Close($false) } catch {} }
+        }
+    }
+    try { $excel.Quit() } catch {}
+    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($excel)
+
+    if ($pdfs.Count -eq 0) {
+        Write-Host '[X] No PDF files were created - nothing was sent.'
+        Remove-Item -LiteralPath $pdfDir -Recurse -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    try {
+        $outlook = New-Object -ComObject Outlook.Application
+    } catch {
+        Write-Host '[X] Could not open Outlook.'
+        Write-Host '    Classic (desktop) Outlook must be installed and signed in.'
+        Write-Host '    The "new Outlook" app does not support automatic sending.'
+        Remove-Item -LiteralPath $pdfDir -Recurse -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    $sent = 0
+    try {
+        $names = ($pdfs | ForEach-Object {
+            [System.Net.WebUtility]::HtmlEncode([IO.Path]::GetFileNameWithoutExtension($_)) }) -join '<br>'
+        $mail = $outlook.CreateItem(0)
+        $mail.To = $defaultTo
+        $mail.Subject = $subject
+        $mail.HTMLBody = '<div dir="rtl" style="font-family:Arial;font-size:11pt">' +
+            'שלום,<br><br>מצורפים:<br><b>' + $names + '</b><br><br>' +
+            'נשלח אוטומטית ממערכת מיון ההזמנות.</div>'
+        foreach ($p in $pdfs) { [void]$mail.Attachments.Add($p) }
+        $mail.Send()
+        $sent = 1
+        Write-Host ('[V] Sent ' + $pdfs.Count + ' PDF files in one email to ' + $defaultTo)
+    } catch {
+        Write-Host ('[X] Sending failed: ' + $_.Exception.Message)
+    }
+    try { $outlook.Session.SendAndReceive($false) } catch {}
+    Start-Sleep -Seconds 3
+    Remove-Item -LiteralPath $pdfDir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host ''
+    Write-Host ('[V] Done: ' + $sent + ' of 1 emails sent.')
+}
+__ENTRY__
 """
 
 
@@ -150,18 +245,23 @@ def create_launcher(
     name_filter: str = "",
     strip_prefix: str = "",
     subject_prefix: str = "",
+    pdf_single_mail: bool = False,
+    single_subject: str = "",
 ) -> pathlib.Path | None:
     """
     יוצר קובץ bat ששולח כל קובץ בתיקייה במייל נפרד.
     rules: [(סיומת שם קובץ, נמענים, שם להצגה)] - קובץ שמסתיים בסיומת נשלח לנמענים שלה.
     name_filter: ביטוי רגולרי - נשלחים רק קבצים ששמם מתאים (ריק = כולם).
     הנושא: subject_prefix + "נהג <שם> <תאריך>" (משם הקובץ, בלי strip_prefix ובלי הסיומת).
+    pdf_single_mail: ממיר את קובצי האקסל ל-PDF בזמן השליחה ושולח את כולם במייל אחד
+    לנמענים של ברירת המחדל (נושא: single_subject, או שם התיקייה אם ריק).
     """
     rules = rules or []
     if not default_to and not any(r[1] for r in rules):
         return None
     ps_body = build_ps_body(
-        default_to, default_name, rules, name_filter, strip_prefix, subject_prefix
+        default_to, default_name, rules, name_filter, strip_prefix, subject_prefix,
+        pdf_single_mail, single_subject,
     )
     content = (_BAT_HEADER.replace("__TITLE__", title) + ps_body)
     content = content.replace("\r\n", "\n").replace("\n", "\r\n")
@@ -177,6 +277,8 @@ def build_ps_body(
     name_filter: str = "",
     strip_prefix: str = "",
     subject_prefix: str = "",
+    pdf_single_mail: bool = False,
+    single_subject: str = "",
 ) -> str:
     """סקריפט ה-PowerShell של השליחה (מתחיל בשורה #PS-START)."""
     rules = rules or []
@@ -192,6 +294,8 @@ def build_ps_body(
         .replace("__FILTER__", _ps_quote(name_filter))
         .replace("__STRIP_PREFIX__", _ps_quote(strip_prefix))
         .replace("__SUBJECT_PREFIX__", _ps_quote(subject_prefix))
+        .replace("__SINGLE_SUBJECT__", _ps_quote(single_subject))
+        .replace("__ENTRY__", "Send-FolderAsPdf" if pdf_single_mail else "Send-FolderFiles")
     )
     return ps_body
 
@@ -243,6 +347,8 @@ def run_inline(
     strip_prefix: str = "",
     subject_prefix: str = "",
     powershell: str = "powershell",
+    pdf_single_mail: bool = False,
+    single_subject: str = "",
 ) -> tuple[int, int, str]:
     """
     שולח מיד את הקבצים המתאימים בתיקייה (כל קובץ במייל נפרד), בלי ליצור bat.
@@ -251,7 +357,8 @@ def run_inline(
     if not default_to and not any(r[1] for r in (rules or [])):
         return 0, 0, "no recipients"
     body = build_ps_body(
-        default_to, default_name, rules, name_filter, strip_prefix, subject_prefix
+        default_to, default_name, rules, name_filter, strip_prefix, subject_prefix,
+        pdf_single_mail, single_subject,
     )
     fake_self = str((folder / "_send.bat").resolve()).replace("'", "''")
     script = f"$f = '{fake_self}'\r\n" + body.replace("\r\n", "\n").replace("\n", "\r\n")

@@ -484,7 +484,10 @@ def create_overseas_shipping_launcher(
 def create_all_shipping_launcher(
     day_dir: pathlib.Path, cfg: dict[str, Any]
 ) -> pathlib.Path | None:
-    """קובץ bat ששולח את כל דוחות ההובלה שבתיקייה (כל דוח במייל נפרד) אל SEND_ALL_SHIPPING_LISTS_TO."""
+    """
+    קובץ bat ששולח את כל דוחות ההובלה שבתיקייה אל SEND_ALL_SHIPPING_LISTS_TO:
+    בלחיצה הדוחות מומרים מאקסל ל-PDF (כולל תיקונים ידניים שנשמרו) ונשלחים במייל אחד.
+    """
     if mail_sender is None:
         return None
     recipients = cfg.get("SEND_ALL_SHIPPING_LISTS_TO") or []
@@ -499,6 +502,7 @@ def create_all_shipping_launcher(
         name_filter="^" + REPORT_FILE_PREFIX,
         strip_prefix=REPORT_FILE_PREFIX,
         subject_prefix=SHIPPING_SUBJECT_PREFIX,
+        pdf_single_mail=True,  # מומרים ל-PDF בזמן השליחה, כולם במייל אחד
     )
 
 
