@@ -4235,16 +4235,21 @@ def main() -> None:
     )
     print(f'    סה"כ נהגים/משאיות ששובצו: {len(drivers)}\n')
     for drv in drivers:
-        print(
-            f"  - {drv['driver_label']}: {len(drv['ordered_stops'])} עצירות | "
-            f'{drv["total_weight"]:,.0f} ק"ג | זמן משמרת: {drv["total_shift_hhmm"]} | '
-            + (
+        # סיכום בלבד - קבוצה בלי מסלול (למשל "ללא יעד") חסרים לה חלק מהשדות
+        line = (
+            f"  - {drv.get('driver_label', '')}: {len(drv.get('ordered_stops') or [])} עצירות"
+        )
+        if drv.get("total_weight") is not None:
+            line += f' | {drv["total_weight"]:,.0f} ק"ג'
+        if drv.get("total_shift_hhmm"):
+            line += f" | זמן משמרת: {drv['total_shift_hhmm']}"
+        if drv.get("return_home_str"):
+            line += " | " + (
                 f"חזרה אל ה{drv.get('home_name', cfg['DRIVER_HOME_NAME'])}: "
                 if drv.get("ends_at_home", True)
                 else "סיום סבב וחזרה למחסן: "
-            )
-            + f"{drv['return_home_str']}"
-        )
+            ) + drv["return_home_str"]
+        print(line)
 
     if downstream_runs["count"] > 0:
         # דוחות ההעמסות ודוחות ההובלה כבר נוצרו מתוך החלון - run_all.bat לא יריץ אותם שוב

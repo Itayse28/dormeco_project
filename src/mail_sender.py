@@ -115,8 +115,7 @@ function Send-FolderFiles {
             $mail.Subject = $subject
             $mail.HTMLBody = '<div dir="rtl" style="font-family:Arial;font-size:11pt">' +
                 'שלום,<br><br>מצורף:<br><b>' +
-                [System.Net.WebUtility]::HtmlEncode($base) + '</b><br><br>' +
-                'נשלח אוטומטית ממערכת מיון ההזמנות.</div>'
+                [System.Net.WebUtility]::HtmlEncode($base) + '</b></div>'
             [void]$mail.Attachments.Add($file.FullName)
             Send-Or-Show $mail
             $sent++
@@ -214,8 +213,7 @@ function Send-FolderAsPdf {
         $mail.To = $defaultTo
         $mail.Subject = $subject
         $mail.HTMLBody = '<div dir="rtl" style="font-family:Arial;font-size:11pt">' +
-            'שלום,<br><br>מצורפים:<br><b>' + $names + '</b><br><br>' +
-            'נשלח אוטומטית ממערכת מיון ההזמנות.</div>'
+            'שלום,<br><br>מצורפים:<br><b>' + $names + '</b></div>'
         foreach ($p in $pdfs) { [void]$mail.Attachments.Add($p) }
         Send-Or-Show $mail
         $sent = 1
