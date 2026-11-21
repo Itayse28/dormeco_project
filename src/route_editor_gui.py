@@ -43,7 +43,7 @@ import re
 import tkinter as tk
 import tkinter.font as tkfont
 import webbrowser
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Any, Callable
 from urllib.parse import quote
 
@@ -226,8 +226,12 @@ class RouteEditor:
         set_location: Callable[[dict[str, Any], float, float], int] | None = None,
         initial_special: dict[str, list[str]] | None = None,
         group_of: Callable[[dict[str, Any]], str | None] | None = None,
+        load_packages: Callable[[str], str] | None = None,
     ) -> None:
         self.root = root
+        # דוח "פירוט הזמנות ששודרו לפי נהג" (לא חובה) - מקור למספר האריזות
+        self.load_packages = load_packages
+        self._packages_file = ""
         # ריבועים מיוחדים: הזמנות ללא יעד / איסוף עצמי (לא מסלולים)
         self.group_of = group_of
         self._initial_special = {
@@ -514,6 +518,12 @@ class RouteEditor:
             command=self.toggle_map,
         )
         self.map_btn.pack(side="left", padx=6)
+        if self.load_packages is not None:
+            self.packages_btn = tk.Button(
+                bottom, text="הוסף דוח אריזות", font=F_BTN, padx=12, pady=6,
+                command=self.add_packages_report,
+            )
+            self.packages_btn.pack(side="left", padx=6)
         self.eff_btn = tk.Button(
             bottom, text="מצא סידור יעיל", font=F_BTN, padx=12, pady=6,
             command=self.toggle_efficient,
@@ -808,6 +818,34 @@ class RouteEditor:
         self.selected_id = None
         self.render()
         self._draw_map(fit=True)
+
+    def add_packages_report(self) -> None:
+        """בחירת דוח "פירוט הזמנות ששודרו לפי נהג" (PDF / אקסל) - מספר האריזות
+        בדוחות ההעמסות יילקח ממנו. בלי הדוח - החישוב הרגיל (package_sizes.xlsx)."""
+        if self.load_packages is None:
+            return
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="בחירת דוח 'פירוט הזמנות ששודרו לפי נהג' (מספר אריזות)",
+            filetypes=[("PDF / Excel", "*.pdf *.xlsx *.xlsm"), ("כל הקבצים", "*.*")],
+        )
+        if not path:
+            return
+        self.root.configure(cursor="watch")
+        self.root.update()
+        try:
+            summary = self.load_packages(path)
+        except Exception as exc:  # noqa: BLE001
+            self.root.configure(cursor="")
+            messagebox.showerror("דוח אריזות", f"לא ניתן לקרוא את הדוח:\n{exc}", parent=self.root)
+            return
+        self.root.configure(cursor="")
+        import pathlib as _pl
+
+        self._packages_file = _pl.Path(path).name
+        self.packages_btn.configure(text="החלף דוח אריזות")
+        self._update_info()
+        messagebox.showinfo("דוח אריזות", summary, parent=self.root)
 
     def add_day(self) -> None:
         """עמודה של יום חדש בדוח השבועי (עם נהג ריק אחד) - גוררים אליה עצירות.
@@ -1214,6 +1252,8 @@ class RouteEditor:
                 parts.append(f"הקבצים נוצרו ({self._generated_time})")
             else:
                 parts.append("יש שינויים שעוד לא נוצרו לקבצים")
+        if self._packages_file:
+            parts.append(f"אריזות מדוח: {self._packages_file}")
         if self._saved_text:
             parts.append(self._saved_text)
         self.info_label.configure(text=rtl("   |   ".join(parts)), fg=color)
@@ -1229,6 +1269,7 @@ class RouteEditor:
                 ],
                 sorted(self.no_dest),
                 sorted(self.pickup),
+                self._packages_file,
                 # גם שינוי כתובת אספקה מחייב יצירה מחדש של הקבצים
                 sorted(
                     (k, s.get("address_choice"), tuple(s.get("coords") or ()))
@@ -2166,6 +2207,7 @@ def run_route_editor(
     set_location: Callable[[dict[str, Any], float, float], int] | None = None,
     initial_special: dict[str, list[str]] | None = None,
     group_of: Callable[[dict[str, Any]], str | None] | None = None,
+    load_packages: Callable[[str], str] | None = None,
 ) -> list[tuple[list[str], str | None, str | None]] | None:
     """
     פותח את חלון העריכה וממתין עד שהמשתמש יאשר או יבטל.
@@ -2177,7 +2219,7 @@ def run_route_editor(
         root, initial_routes, stops_by_key, simulate, cfg, region_order, drivers,
         initial_days, compute_efficient, on_generate, send_mails,
         initial_drivers, list_mail_groups, save_copy, save_as_path,
-        apply_address, set_location, initial_special, group_of,
+        apply_address, set_location, initial_special, group_of, load_packages,
     )
     root.lift()
     try:

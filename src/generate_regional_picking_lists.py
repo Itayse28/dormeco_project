@@ -871,6 +871,8 @@ def generate_picking_lists_from_sorted_excel(
     idx_internal_note = find_col(["הערה פנימית להזמנה", "הערה פנימית"], 20)
     idx_cust_no = find_cust_no_col(headers)
     idx_mark = find_col(["דגש מיוחד ללקוח"], -1)
+    # מספר האריזות מדוח "פירוט הזמנות ששודרו לפי נהג" - קיים רק אם הדוח נוסף בחלון
+    idx_pri_packages = find_col(["מספר אריזות (פריוריטי)"], -1)
     cust_no_by_order: dict[str, Any] = {}
 
     cooling_skus, hazmat_skus, goldbond_skus = load_warehouse_sku_sets(cfg)
@@ -956,13 +958,23 @@ def generate_picking_lists_from_sorted_excel(
                 _key_text(row_vals[idx_order]), row_vals[idx_cust_no]
             )
 
+        pri_packages = None
+        if 0 <= idx_pri_packages < len(row_vals) and row_vals[idx_pri_packages] not in (None, ""):
+            try:
+                n = float(row_vals[idx_pri_packages])
+                pri_packages = int(n) if n == int(n) else round(n, 2)
+            except (TypeError, ValueError):
+                pri_packages = None
+
         picking_row = [
             row_vals[idx_order] if idx_order < len(row_vals) else None,
             row_vals[idx_cust_name] if idx_cust_name < len(row_vals) else None,
             row_vals[idx_sku] if idx_sku < len(row_vals) else None,
             row_vals[idx_prod_desc] if idx_prod_desc < len(row_vals) else None,
             qty_val,
-            packages_count(qty_val, sku_val, package_sizes),
+            pri_packages
+            if pri_packages is not None
+            else packages_count(qty_val, sku_val, package_sizes),
             combined_notes if combined_notes else None,
             (
                 str(row_vals[idx_mark] or "").strip() or None

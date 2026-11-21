@@ -2264,6 +2264,9 @@ def find_client_mark(cust_name: Any, marks: list[tuple[str, str]]) -> str:
 CHOSEN_ADDRESS_HEADER = "כתובת אספקה נבחרת"
 LOCATION_QUALITY_HEADER = "דיוק מיקום"
 DELIVERY_CONTACT_HEADER = "איש קשר לאספקה"
+# מספר האריזות מדוח "פירוט הזמנות ששודרו לפי נהג" (רק כשהדוח נוסף בחלון) -
+# דוחות ההעמסות לוקחים ממנו את עמודת האריזות במקום החישוב לפי package_sizes.xlsx
+PACKAGES_HEADER = "מספר אריזות (פריוריטי)"
 
 
 def delivery_contact(stop: dict[str, Any]) -> str:
@@ -2520,6 +2523,7 @@ GENERATED_HEADERS = {
     CHOSEN_ADDRESS_HEADER,
     LOCATION_QUALITY_HEADER,
     DELIVERY_CONTACT_HEADER,
+    PACKAGES_HEADER,
 }
 
 
@@ -2730,6 +2734,7 @@ def apply_manual_route_edits(
     gui_extras: dict[str, Any] | None = None,
     initial_edited: list[tuple[list[str], str | None, str | None]] | None = None,
     set_location: Callable[[dict[str, Any], float, float], int] | None = None,
+    load_packages: Callable[[str], str] | None = None,
 ) -> list[dict[str, Any]] | None:
     """
     פותח את חלון העריכה.
@@ -2811,6 +2816,7 @@ def apply_manual_route_edits(
         initial_drivers=initial_drivers,
         apply_address=apply_address_choice,
         set_location=set_location,
+        load_packages=load_packages,
         initial_special=initial_special,
         group_of=stop_group,
         **(gui_extras or {}),
@@ -3238,6 +3244,30 @@ def sort_orders_excel(
                 f" ({LOCATION_QUALITY_LABELS.get(st['loc_quality'], '')})"
             )
 
+    packages: dict[str, Any] = {"lookup": None}
+
+    def load_packages_report(path: str) -> str:
+        """
+        דוח "פירוט הזמנות ששודרו לפי נהג" (מהחלון): מעכשיו עמודת האריזות בדוחות
+        ההעמסות נלקחת ממנו. מחזיר סיכום להצגה (כמה שורות הזמנה נמצאו בדוח).
+        """
+        from packages_report import PackagesLookup, read_packages_report
+
+        lookup = PackagesLookup(read_packages_report(path), pathlib.Path(path).name)
+        packages["lookup"] = lookup
+        matched = sum(
+            1 for rec in records
+            if lookup.get(rec["order_no"], rec["sku"], rec["qty"]) is not None
+        )
+        print(f"[V] דוח אריזות: {pathlib.Path(path).name} - {len(lookup)} שורות, "
+              f"{matched} מתוך {len(records)} שורות הזמנה נמצאו בו.")
+        return (
+            f"נטען דוח האריזות: {pathlib.Path(path).name}\n"
+            f"{matched} מתוך {len(records)} שורות הזמנה נמצאו בדוח - בהן מספר האריזות "
+            "יילקח מהדוח.\nשאר השורות יחושבו כרגיל (לפי package_sizes.xlsx).\n\n"
+            "השינוי ייכנס לקבצים באישור הבא (\"אישור והמשך\")."
+        )
+
     def set_manual_location(stop: dict[str, Any], lat: float, lon: float) -> int:
         """
         קביעת מיקום ידנית לכתובת שנבחרה בעצירה (מתוך החלון). המיקום נשמר לקובץ
@@ -3407,6 +3437,9 @@ def sort_orders_excel(
         out_headers.append(LOCATION_QUALITY_HEADER)
         col_quality_out = len(out_headers)
         out_headers.append(DELIVERY_CONTACT_HEADER)
+        pk_lookup = packages["lookup"]
+        if pk_lookup is not None:
+            out_headers.append(PACKAGES_HEADER)
         mark_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
         mark_font = Font(name="Arial", size=10, bold=True, color="9C0006")
 
@@ -3518,6 +3551,8 @@ def sort_orders_excel(
             stop_quality = stop.get("loc_quality", "")
             row_out.append(LOCATION_QUALITY_LABELS.get(stop_quality) or None)
             row_out.append(delivery_contact(stop) or None)
+            if pk_lookup is not None:
+                row_out.append(pk_lookup.get(rec["order_no"], rec["sku"], rec["qty"]))
             for col_idx, val in enumerate(row_out, start=1):
                 cell = ws_orders.cell(row_offset, col_idx, val)
                 cell.fill = row_fill
@@ -3731,6 +3766,7 @@ def sort_orders_excel(
             gui_extras=gui_extras,
             initial_edited=initial_edited,
             set_location=set_manual_location,
+            load_packages=load_packages_report,
         )
         if result is None:
             return last_written.get("drivers", [])
